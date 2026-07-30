@@ -211,6 +211,8 @@ export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [role,     setRole]     = useState(null);
   const [tenderCosts, setTCosts]= useState({});
+  const [additions,   setAdditions]  = useState({});
+  const [extraItems,  setExtraItems] = useState([]);
   const [poEntries,   setPO]    = useState([]);
   const [loaded,   setLoaded]   = useState(false);
   const [newProjModal, setNewProjModal] = useState(false);
@@ -226,8 +228,12 @@ export default function App() {
   const fetchProjectData = useCallback(async (id) => {
     const t  = await sg(`tcs-tenders-${id}`);
     const po = await sg(`tcs-po-${id}`);
+    const ad = await sg(`tcs-additions-${id}`);
+    const ex = await sg(`tcs-extra-${id}`);
     setTCosts(t || {});
     setPO(po || []);
+    setAdditions(ad || {});
+    setExtraItems(ex || []);
   }, []);
 
   const fetchProjects = useCallback(async () => {
@@ -247,7 +253,7 @@ export default function App() {
         const key = payload.new?.key || payload.old?.key || "";
         setSyncing(true);
         if (key === "tcs-projects") await fetchProjects();
-        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}`)) await fetchProjectData(activeId);
+        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}`)) await fetchProjectData(activeId);
         setSyncedAt(new Date()); setSyncing(false);
       }).subscribe();
     return () => supabase.removeChannel(channel);
@@ -255,6 +261,8 @@ export default function App() {
 
   const saveProjects = useCallback((list) => { setProjects(list); ss("tcs-projects", list).then(()=>setSyncedAt(new Date())); }, []);
   const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
+  const saveAdditions= useCallback((a)    => { setAdditions(a);   ss(`tcs-additions-${activeId}`, a).then(()=>setSyncedAt(new Date())); }, [activeId]);
+  const saveExtraItems=useCallback((ex)   => { setExtraItems(ex); ss(`tcs-extra-${activeId}`, ex).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const savePO       = useCallback((po)   => { setPO(po);         ss(`tcs-po-${activeId}`, po).then(()=>setSyncedAt(new Date())); }, [activeId]);
 
   const openProject = (id) => {
@@ -265,7 +273,7 @@ export default function App() {
   const deleteProject = async (id) => {
     if (!confirm("ลบโครงการนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
     saveProjects(projects.filter(p => p.id !== id));
-    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`);
+    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`);
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
@@ -286,6 +294,7 @@ export default function App() {
   const effectiveRole = session.role === "admin" ? role : session.role;
 
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
+    additions, saveAdditions, extraItems, saveExtraItems,
     updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
     syncedAt, syncing, session, onLogout: handleLogout };
 
@@ -827,7 +836,31 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing, session, onLogout }) {
+function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, onBack, syncedAt, syncing, session, onLogout }) {
+  const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
+
+  return (
+    <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+      <div style={{padding:"20px 28px 0"}}>
+        <div style={{display:"flex",gap:8,marginBottom:20}}>
+          {[["baseline","📐 ราคาเดิม (Baseline)"],["monthly","📅 รายการเพิ่มรายเดือน"]].map(([id,label])=>(
+            <button key={id} onClick={()=>setTab(id)}
+              style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {tab === "baseline"
+        ? <QSBaselineTab tenderCosts={tenderCosts} saveTenders={saveTenders} />
+        : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
+                         extraItems={extraItems} saveExtraItems={saveExtraItems} />}
+    </Shell>
+  );
+}
+
+// ─── QS Tab 1: Baseline (original tender cost, unchanged behaviour) ───────────
+function QSBaselineTab({ tenderCosts, saveTenders }) {
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
@@ -852,68 +885,283 @@ function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing, 
   };
 
   return (
-    <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
-      <div style={{padding:"24px 28px"}}>
-        {/* Stats */}
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:24}}>
-          <StatCard label="Tender Cost รวม" value={fmt(base)} sub="Base cost ทั้งหมด" color={T.blue} icon="📐" accent={T.blueLight}/>
-          <StatCard label="Spare & Wastage 3%" value={fmt(adj3)} sub="เผื่อสูญหาย" color={T.amber} icon="⚙️" accent={T.amberBg}/>
-          <StatCard label="Total Adjusted" value={fmt(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
-        </div>
+    <div style={{padding:"4px 28px 24px"}}>
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:24}}>
+        <StatCard label="Tender Cost รวม" value={fmt(base)} sub="Base cost ทั้งหมด (ราคาเดิม)" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="Spare & Wastage 3%" value={fmt(adj3)} sub="เผื่อสูญหาย" color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label="Total Adjusted" value={fmt(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
+      </div>
 
-        {/* Filters + Save */}
-        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
-            className="input-base" style={{width:240}}/>
-          <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
-            {["All",...GROUPS].map(g=>(
-              <button key={g} onClick={()=>setFilter(g)}
-                style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
+      {/* Filters + Save */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
+          className="input-base" style={{width:240}}/>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
+          {["All",...GROUPS].map(g=>(
+            <button key={g} onClick={()=>setFilter(g)}
+              style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
+          ))}
+        </div>
+        <button onClick={handleSave} className="btn-primary"
+          style={{background:saved?T.green:T.blue,minWidth:140}}>
+          {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
+        </button>
+      </div>
+
+      {/* Table */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead>
+            <tr style={{background:"#f8fafc"}}>
+              {["Acc. Code","Group","Account Name","Tender Cost (THB)"].map(h=>(
+                <th key={h} style={{padding:"11px 16px",textAlign:h.includes("Cost")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((a,i)=>(
+              <tr key={a.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
+                <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.code}</td>
+                <td style={{padding:"10px 16px"}}>
+                  <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                </td>
+                <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
+                <td style={{padding:"8px 16px",textAlign:"right"}}>
+                  <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
+                    placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
+                </td>
+              </tr>
             ))}
-          </div>
-          <button onClick={handleSave} className="btn-primary"
-            style={{background:saved?T.green:T.blue,minWidth:140}}>
-            {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
-          </button>
-        </div>
+          </tbody>
+          <tfoot>
+            <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+(parseFloat(draft[a.code])||0),0))}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  );
+}
 
-        {/* Table */}
+// ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, saveExtraItems }) {
+  const thisMonth = new Date().toISOString().slice(0,7);
+  const months = Object.keys(additions).sort();
+  const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
+  const [newMonth, setNewMonth] = useState("");
+  const [filter, setFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [draftAdd, setDraftAdd] = useState({...(additions[month]||{})});
+  const [saved, setSaved] = useState(false);
+  const [addExtraOpen, setAddExtraOpen] = useState(false);
+  const [extraDraft, setExtraDraft] = useState({ name:"", group:GROUPS[0] });
+
+  useEffect(() => { setDraftAdd({...(additions[month]||{})}); }, [month, additions]);
+  useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
+
+  // All rows = original 70 account codes + user-created extra items
+  const allRows = [...ACCOUNTS, ...extraItems.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+
+  const cumulativeThrough = (code, uptoMonth) => {
+    const base = parseFloat(tenderCosts[code]) || 0;
+    const addSum = months.filter(m => m <= uptoMonth).reduce((s,m) => s + (parseFloat(additions[m]?.[code]) || 0), 0);
+    return base + addSum;
+  };
+  const monthTotal      = (m) => allRows.reduce((s,r) => s + (parseFloat(additions[m]?.[r.code]) || 0), 0);
+  const cumulativeTotal = (uptoMonth) => allRows.reduce((s,r) => s + cumulativeThrough(r.code, uptoMonth), 0);
+
+  const baseTotal = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  const thisMonthAdd = allRows.reduce((s,r) => s + (parseFloat(draftAdd[r.code]) || 0), 0);
+  const cumulativeSoFar = months.filter(m=>m<month).reduce((s,m)=>s+monthTotal(m),0) + thisMonthAdd + baseTotal;
+
+  const filtered = allRows.filter(r =>
+    (filter==="All" || r.group===filter) &&
+    (r.name.toLowerCase().includes(search.toLowerCase()) || r.code.includes(search))
+  );
+
+  const handleAddMonth = () => {
+    if (!newMonth || months.includes(newMonth)) return;
+    saveAdditions({ ...additions, [newMonth]: additions[newMonth] || {} });
+    setMonth(newMonth); setNewMonth("");
+  };
+
+  const handleSave = () => {
+    const clean = {};
+    Object.entries(draftAdd).forEach(([k,v]) => { if(v!==""&&!isNaN(v)&&parseFloat(v)!==0) clean[k]=parseFloat(v); });
+    saveAdditions({ ...additions, [month]: clean });
+    setSaved(true); setTimeout(()=>setSaved(false),2000);
+  };
+
+  const handleCreateExtra = () => {
+    if (!extraDraft.name.trim()) return;
+    const item = { code:`EX-${uid()}`, name:extraDraft.name.trim(), group:extraDraft.group };
+    saveExtraItems([...extraItems, item]);
+    setExtraDraft({ name:"", group:GROUPS[0] }); setAddExtraOpen(false);
+  };
+
+  const handleDeleteExtra = (code) => {
+    if (!confirm("ลบรายการงานเพิ่มนี้? (ยอดเงินที่เคยกรอกไว้ทุกเดือนของรายการนี้จะถูกลบด้วย)")) return;
+    saveExtraItems(extraItems.filter(e => e.code !== code));
+    const nextAdd = {};
+    Object.entries(additions).forEach(([m, obj]) => {
+      const o = {...obj}; delete o[code]; nextAdd[m] = o;
+    });
+    saveAdditions(nextAdd);
+  };
+
+  return (
+    <div style={{padding:"4px 28px 24px"}}>
+      {/* Month selector */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:12,color:T.textSecondary,fontWeight:600}}>เดือน:</span>
+        <select className="input-base" value={month} onChange={e=>setMonth(e.target.value)} style={{width:160,fontWeight:600}}>
+          {(months.length ? months : [thisMonth]).map(m => (
+            <option key={m} value={m}>{new Date(m+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})}</option>
+          ))}
+        </select>
+        <input type="month" className="input-base" value={newMonth} onChange={e=>setNewMonth(e.target.value)} style={{width:150}}/>
+        <button className="btn-ghost" onClick={handleAddMonth}>+ เพิ่มเดือนใหม่</button>
+        <div style={{marginLeft:"auto"}}/>
+        <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)}>+ เพิ่มงานพิเศษ (Extra Item)</button>
+        <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:150}}>
+          {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
+        </button>
+      </div>
+
+      {addExtraOpen && (
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:10,alignItems:"end"}}>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>ชื่อรายการงานเพิ่ม</span>
+            <input className="input-base" value={extraDraft.name} onChange={e=>setExtraDraft(d=>({...d,name:e.target.value}))} placeholder="เช่น งานเพิ่มกระจกโค้งพิเศษ" />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>Group</span>
+            <select className="input-base" value={extraDraft.group} onChange={e=>setExtraDraft(d=>({...d,group:e.target.value}))}>
+              {GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </label>
+          <button className="btn-primary" onClick={handleCreateExtra}>+ สร้างรายการ</button>
+        </div>
+      )}
+
+      {/* Stats for selected month */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:20}}>
+        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baseTotal)} sub="รวมทุก Account Code" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label={`เพิ่มเดือนนี้`} value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
+        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมทุกเดือน" color={T.green} icon="✅" accent={T.greenBg}/>
+      </div>
+
+      {/* Filters */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
+          className="input-base" style={{width:240}}/>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
+          {["All",...GROUPS].map(g=>(
+            <button key={g} onClick={()=>setFilter(g)}
+              style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Main table: เดิม / เพิ่มเดือนนี้ / รวมสะสม */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginBottom:24}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead>
+            <tr style={{background:"#f8fafc"}}>
+              {["Acc. Code","Group","Account Name","เดิม (THB)","เพิ่มเดือนนี้ (THB)","รวมสะสม (THB)",""].map(h=>(
+                <th key={h} style={{padding:"11px 16px",textAlign:h.includes("THB")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r,i) => {
+              const baseVal = r.isExtra ? 0 : (parseFloat(tenderCosts[r.code]) || 0);
+              const cumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + baseVal;
+              const thisVal = parseFloat(draftAdd[r.code]) || 0;
+              const cum = cumBefore + thisVal;
+              return (
+                <tr key={r.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
+                  <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{r.code}</td>
+                  <td style={{padding:"10px 16px"}}>
+                    <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{r.group}</span>
+                  </td>
+                  <td style={{padding:"10px 16px",color:T.textPrimary}}>
+                    {r.name}
+                    {r.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>งานเพิ่ม</span>}
+                  </td>
+                  <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(baseVal)}</td>
+                  <td style={{padding:"8px 16px",textAlign:"right"}}>
+                    <input type="number" value={draftAdd[r.code]??""} onChange={e=>setDraftAdd(d=>({...d,[r.code]:e.target.value}))}
+                      placeholder="0.00" className="input-base" style={{width:140,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:thisVal!==0?T.amberBg:T.bg}}/>
+                  </td>
+                  <td style={{padding:"8px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cum)}</td>
+                  <td style={{padding:"8px 16px",textAlign:"center"}}>
+                    {r.isExtra && (
+                      <button onClick={()=>handleDeleteExtra(r.code)} title="ลบรายการงานเพิ่ม"
+                        style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
+                {fmt(filtered.reduce((s,r)=>s+(r.isExtra?0:(parseFloat(tenderCosts[r.code])||0)),0))}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
+                {fmt(filtered.reduce((s,r)=>s+(parseFloat(draftAdd[r.code])||0),0))}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
+                {fmt(filtered.reduce((s,r)=>{
+                  const baseVal = r.isExtra?0:(parseFloat(tenderCosts[r.code])||0);
+                  const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
+                  return s + cumBefore + (parseFloat(draftAdd[r.code])||0);
+                },0))}
+              </td>
+              <td/>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      {/* Overview across all months */}
+      {months.length > 0 && (
         <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+          <div style={{padding:"14px 18px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:600,color:T.textPrimary}}>
+            สรุปยอดรวมแต่ละเดือน (ทุกเดือน)
+          </div>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
             <thead>
               <tr style={{background:"#f8fafc"}}>
-                {["Acc. Code","Group","Account Name","Tender Cost (THB)"].map(h=>(
-                  <th key={h} style={{padding:"11px 16px",textAlign:h.includes("Cost")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                {["เดือน","เพิ่มเดือนนั้น (THB)","รวมสะสมถึงเดือนนั้น (THB)"].map(h=>(
+                  <th key={h} style={{padding:"10px 16px",textAlign:h.includes("THB")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((a,i)=>(
-                <tr key={a.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
-                  <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.code}</td>
-                  <td style={{padding:"10px 16px"}}>
-                    <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+              {months.map(m => (
+                <tr key={m} onClick={()=>setMonth(m)}
+                  style={{borderBottom:"1px solid #f1f5f9",cursor:"pointer",background:m===month?T.blueLight:T.card}}>
+                  <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:m===month?700:500}}>
+                    {new Date(m+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})}
                   </td>
-                  <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
-                  <td style={{padding:"8px 16px",textAlign:"right"}}>
-                    <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
-                      placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
-                  </td>
+                  <td style={{padding:"9px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(monthTotal(m))}</td>
+                  <td style={{padding:"9px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cumulativeTotal(m))}</td>
                 </tr>
               ))}
             </tbody>
-            <tfoot>
-              <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-                <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
-                <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
-                  {fmt(filtered.reduce((s,a)=>s+(parseFloat(draft[a.code])||0),0))}
-                </td>
-              </tr>
-            </tfoot>
           </table>
         </div>
-      </div>
-    </Shell>
+      )}
+    </div>
   );
 }
 
