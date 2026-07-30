@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase, sg, ss, sd } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
@@ -841,9 +841,14 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
   // and kept in sync with tenderCosts + every month's additions on delete.
-  const handleAddExtraItem = ({ name, group }) => {
+  // Two kinds of extra item:
+  //  - standalone (has `group`): a brand-new scope item with its own Acc-like code
+  //  - sub-item   (has `parentCode`): a breakdown line that rolls up INTO an existing Acc. Code
+  const handleAddExtraItem = ({ name, group, parentCode }) => {
     if (!name.trim()) return;
-    const item = { code:`EX-${uid()}`, name:name.trim(), group };
+    const item = parentCode
+      ? { code:`EX-${uid()}`, name:name.trim(), parentCode }
+      : { code:`EX-${uid()}`, name:name.trim(), group };
     saveExtraItems([...extraItems, item]);
     return item.code;
   };
@@ -887,24 +892,49 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const [saved,  setSaved]  = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addDraft, setAddDraft] = useState({ name:"", group:GROUPS[0] });
+  const [subFor, setSubFor] = useState(null);       // code of account currently adding a sub-item
+  const [subName, setSubName] = useState("");
 
   useEffect(() => setDraft({...tenderCosts}), [tenderCosts]);
 
-  // Fixed 70 account codes + QS-added extra rows (e.g. sub-items like "Gasket Linear")
-  const allRows = [...ACCOUNTS, ...extraItems.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+  // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
+  // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
+  const subItemsByParent = {};
+  extraItems.forEach(e => {
+    if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
+  });
+  const standaloneExtras = extraItems.filter(e => !e.parentCode);
+  const childrenOf = (code) => subItemsByParent[code] || [];
 
-  const base  = Object.values(draft).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  // Effective value of a row: sum of its sub-items if it has any, else its own draft value.
+  const effectiveValue = (row) => {
+    const kids = !row.isExtra ? childrenOf(row.code) : [];
+    if (kids.length) return kids.reduce((s,k)=>s+(parseFloat(draft[k.code])||0),0);
+    return parseFloat(draft[row.code]) || 0;
+  };
+
+  const allRows = [...ACCOUNTS, ...standaloneExtras.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+
+  const base  = allRows.reduce((s,r)=>s+effectiveValue(r),0);
   const adj3  = base * 0.03;
   const total = base + adj3;
 
-  const filtered = allRows.filter(a =>
-    (filter==="All" || a.group===filter) &&
-    (a.name.toLowerCase().includes(search.toLowerCase()) || a.code.includes(search))
-  );
+  const q = search.toLowerCase();
+  const filtered = allRows.filter(a => {
+    if (filter!=="All" && a.group!==filter) return false;
+    const selfMatch = a.name.toLowerCase().includes(q) || a.code.includes(search);
+    const childMatch = !a.isExtra && childrenOf(a.code).some(k=>k.name.toLowerCase().includes(q));
+    return selfMatch || childMatch;
+  });
 
   const handleSave = () => {
+    const merged = {...draft};
+    ACCOUNTS.forEach(a => {
+      const kids = childrenOf(a.code);
+      if (kids.length) merged[a.code] = kids.reduce((s,k)=>s+(parseFloat(merged[k.code])||0),0);
+    });
     const clean = {};
-    Object.entries(draft).forEach(([k,v]) => { if(v!==""&&!isNaN(v)&&parseFloat(v)>0) clean[k]=parseFloat(v); });
+    Object.entries(merged).forEach(([k,v]) => { if(v!==""&&!isNaN(v)&&parseFloat(v)>0) clean[k]=parseFloat(v); });
     saveTenders(clean);
     setSaved(true); setTimeout(()=>setSaved(false),2000);
   };
@@ -913,6 +943,12 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     if (!addDraft.name.trim()) return;
     onAddExtra(addDraft);
     setAddDraft({ name:"", group:GROUPS[0] }); setAddOpen(false);
+  };
+
+  const handleAddSub = (parentCode) => {
+    if (!subName.trim()) return;
+    onAddExtra({ name:subName, parentCode });
+    setSubName(""); setSubFor(null);
   };
 
   const handleDeleteRow = (code) => {
@@ -939,18 +975,18 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
               style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
           ))}
         </div>
-        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการ</button>
+        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการใหม่ (Acc. Code ใหม่)</button>
         <button onClick={handleSave} className="btn-primary"
           style={{background:saved?T.green:T.blue,minWidth:140}}>
           {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
         </button>
       </div>
 
-      {/* Inline "add row" form */}
+      {/* Inline "add standalone row" form */}
       {addOpen && (
         <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:10,alignItems:"end"}}>
           <label style={{display:"flex",flexDirection:"column",gap:5}}>
-            <span style={{fontSize:11,color:T.textSecondary}}>ชื่อรายการ (เช่น Gasket Linear, Silicone Boot)</span>
+            <span style={{fontSize:11,color:T.textSecondary}}>ชื่อรายการใหม่ (งานที่ไม่มี Acc. Code เดิมรองรับ)</span>
             <input className="input-base" value={addDraft.name} onChange={e=>setAddDraft(d=>({...d,name:e.target.value}))}
               placeholder="พิมพ์ชื่อรายการที่ต้องการเพิ่ม" onKeyDown={e=>e.key==="Enter"&&handleAddRow()} autoFocus />
           </label>
@@ -975,34 +1011,86 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
             </tr>
           </thead>
           <tbody>
-            {filtered.map((a,i)=>(
-              <tr key={a.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
-                <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.isExtra?"—":a.code}</td>
-                <td style={{padding:"10px 16px"}}>
-                  <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
-                </td>
-                <td style={{padding:"10px 16px",color:T.textPrimary}}>
-                  {a.name}
-                  {a.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการเพิ่ม</span>}
-                </td>
-                <td style={{padding:"8px 16px",textAlign:"right"}}>
-                  <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
-                    placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
-                </td>
-                <td style={{padding:"8px 16px",textAlign:"center"}}>
-                  {a.isExtra && (
-                    <button onClick={()=>handleDeleteRow(a.code)} title="ลบรายการนี้"
-                      style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
+            {filtered.map((a,i)=>{
+              const kids = !a.isExtra ? childrenOf(a.code) : [];
+              const hasKids = kids.length > 0;
+              const rowVal = effectiveValue(a);
+              return (
+                <Fragment key={a.code}>
+                  <tr style={{background:i%2===0?T.card:"#fafbfd",borderBottom:hasKids||subFor===a.code?"none":"1px solid #f1f5f9"}}>
+                    <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.isExtra?"—":a.code}</td>
+                    <td style={{padding:"10px 16px"}}>
+                      <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                    </td>
+                    <td style={{padding:"10px 16px",color:T.textPrimary}}>
+                      {a.name}
+                      {a.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการใหม่</span>}
+                      {!a.isExtra && (
+                        <button onClick={()=>{setSubFor(subFor===a.code?null:a.code); setSubName("");}} title="เพิ่มรายการย่อยใต้ Acc. Code นี้"
+                          style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
+                          + รายการย่อย
+                        </button>
+                      )}
+                    </td>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      {hasKids ? (
+                        <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.blueLight,borderRadius:8,color:T.blue,fontWeight:700,fontSize:13}}>
+                          {fmt(rowVal)}
+                        </div>
+                      ) : (
+                        <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
+                          placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
+                      )}
+                    </td>
+                    <td style={{padding:"8px 16px",textAlign:"center"}}>
+                      {a.isExtra && (
+                        <button onClick={()=>handleDeleteRow(a.code)} title="ลบรายการนี้"
+                          style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
+                      )}
+                    </td>
+                  </tr>
+
+                  {/* Sub-items — roll up into the parent Acc. Code's total above */}
+                  {kids.map((k,ki)=>(
+                    <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(ki===kids.length-1 && subFor!==a.code)?"1px solid #f1f5f9":"none"}}>
+                      <td style={{padding:"6px 16px 6px 30px",color:T.green,fontSize:12}}>↳</td>
+                      <td/>
+                      <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>{k.name}</td>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <input type="number" value={draft[k.code]??""} onChange={e=>setDraft(d=>({...d,[k.code]:e.target.value}))}
+                          placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:draft[k.code]>0?T.greenBg:T.bg}}/>
+                      </td>
+                      <td style={{padding:"6px 16px",textAlign:"center"}}>
+                        <button onClick={()=>handleDeleteRow(k.code)} title="ลบรายการย่อยนี้"
+                          style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {/* Inline "add sub-item" form for this account */}
+                  {subFor===a.code && (
+                    <tr style={{background:T.greenBg,borderBottom:"1px solid #f1f5f9"}}>
+                      <td/><td/>
+                      <td style={{padding:"7px 16px"}} colSpan={1}>
+                        <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
+                          placeholder="ชื่อรายการย่อย เช่น Silicone Structure" style={{width:"100%",fontSize:12}}
+                          onKeyDown={e=>e.key==="Enter"&&handleAddSub(a.code)} autoFocus />
+                      </td>
+                      <td colSpan={2} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                        <button className="btn-primary" style={{padding:"5px 12px",fontSize:12}} onClick={()=>handleAddSub(a.code)}>+ เพิ่ม</button>
+                        <button className="btn-ghost" style={{padding:"5px 12px",fontSize:12}} onClick={()=>setSubFor(null)}>ยกเลิก</button>
+                      </td>
+                    </tr>
                   )}
-                </td>
-              </tr>
-            ))}
+                </Fragment>
+              );
+            })}
           </tbody>
           <tfoot>
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
               <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
-                {fmt(filtered.reduce((s,a)=>s+(parseFloat(draft[a.code])||0),0))}
+                {fmt(filtered.reduce((s,a)=>s+effectiveValue(a),0))}
               </td>
               <td/>
             </tr>
@@ -1029,8 +1117,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   useEffect(() => { setDraftAdd({...(additions[month]||{})}); }, [month, additions]);
   useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
 
-  // All rows = original 70 account codes + user-created extra items
-  const allRows = [...ACCOUNTS, ...extraItems.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+  // All rows = original 70 account codes + standalone extra items.
+  // Sub-items that roll up into an existing Acc. Code (parentCode set) are
+  // baseline-only breakdown lines — they're edited on the Baseline tab and
+  // their sum already flows into tenderCosts[parentCode], so they don't need
+  // a separate row here.
+  const allRows = [...ACCOUNTS, ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const cumulativeThrough = (code, uptoMonth) => {
     const base = parseFloat(tenderCosts[code]) || 0;
