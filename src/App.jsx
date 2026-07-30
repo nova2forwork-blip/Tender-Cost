@@ -1200,6 +1200,13 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const thisMonthAdd = allRows.reduce((s,r) => s + (parseFloat(draftAdd[r.code]) || 0), 0);
   const cumulativeSoFar = months.filter(m=>m<month).reduce((s,m)=>s+monthTotal(m),0) + thisMonthAdd + baseTotal;
 
+  // "Live" versions that use the currently-edited draft for the selected month
+  // (instead of the last-saved value) so the top summary updates as you type.
+  const monthTotalLive = (m) => m===month ? thisMonthAdd : monthTotal(m);
+  const sortedMonths = months.length ? months : [thisMonth];
+  const cumulativeLive = (uptoMonth) => baseTotal + sortedMonths.filter(m=>m<=uptoMonth).reduce((s,m)=>s+monthTotalLive(m),0);
+  const grandTotal = cumulativeLive(sortedMonths[sortedMonths.length-1]);
+
   const filtered = allRows.filter(r =>
     (filter==="All" || r.group===filter) &&
     (r.name.toLowerCase().includes(search.toLowerCase()) || r.code.includes(search))
@@ -1228,6 +1235,50 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   return (
     <div style={{padding:"4px 28px 24px"}}>
+      {/* Monthly summary — every month + grand total, up top */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
+        <div style={{padding:"14px 18px",borderBottom:`1px solid ${T.cardBorder}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+          <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📊 สรุปรายเดือน (รวมทุกเดือน)</span>
+          <span style={{fontSize:12,color:T.textMuted}}>รวมทั้งหมด (ราคาเดิม + เพิ่มสะสมทุกเดือน): <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:14}}>{fmt(grandTotal)}</b></span>
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead>
+            <tr style={{background:"#f8fafc"}}>
+              {["เดือน","เพิ่มเดือนนั้น (THB)","รวมสะสมถึงเดือนนั้น (THB)"].map(h=>(
+                <th key={h} style={{padding:"9px 16px",textAlign:h==="เดือน"?"left":"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sortedMonths.map((m,i)=>{
+              const add = monthTotalLive(m);
+              const cum = cumulativeLive(m);
+              const active = m===month;
+              return (
+                <tr key={m} onClick={()=>setMonth(m)}
+                  style={{cursor:"pointer",background:active?T.blueLight:(i%2===0?T.card:"#fafbfd"),borderBottom:"1px solid #f1f5f9"}}>
+                  <td style={{padding:"9px 16px",fontWeight:active?700:500,color:active?T.blue:T.textPrimary}}>
+                    {new Date(m+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})}
+                    {active && <span style={{marginLeft:7,fontSize:10,color:T.blue}}>● กำลังดู</span>}
+                  </td>
+                  <td style={{padding:"9px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(add)}</td>
+                  <td style={{padding:"9px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cum)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+              <td style={{padding:"10px 16px",color:T.textMuted,fontSize:12,fontWeight:600}}>รวมทุกเดือน</td>
+              <td style={{padding:"10px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>
+                {fmt(sortedMonths.reduce((s,m)=>s+monthTotalLive(m),0))}
+              </td>
+              <td style={{padding:"10px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>{fmt(grandTotal)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
       {/* Month selector */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
         <span style={{fontSize:12,color:T.textSecondary,fontWeight:600}}>เดือน:</span>
