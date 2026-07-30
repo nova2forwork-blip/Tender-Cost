@@ -848,11 +848,11 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
   // Two kinds of extra item:
   //  - standalone (has `group`): a brand-new scope item with its own Acc-like code
   //  - sub-item   (has `parentCode`): a breakdown line that rolls up INTO an existing Acc. Code
-  const handleAddExtraItem = ({ name, group, parentCode }) => {
+  const handleAddExtraItem = ({ name, group, parentCode, code }) => {
     if (!name.trim()) return;
     const item = parentCode
       ? { code:`EX-${uid()}`, name:name.trim(), parentCode }
-      : { code:`EX-${uid()}`, name:name.trim(), group };
+      : { code: code || `EX-${uid()}`, name:name.trim(), group };
     saveExtraItems([...extraItems, item]);
     return item.code;
   };
@@ -906,7 +906,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const [search, setSearch] = useState("");
   const [saved,  setSaved]  = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [addDraft, setAddDraft] = useState({ name:"", group:GROUPS[0] });
+  const [addDraft, setAddDraft] = useState({ code:"", name:"", group:GROUPS[0] });
   const [subFor, setSubFor] = useState(null);       // code of account currently adding a sub-item
   const [subName, setSubName] = useState("");
   const [collapsed, setCollapsed] = useState({});   // code -> true means sub-items hidden
@@ -960,8 +960,13 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
   const handleAddRow = () => {
     if (!addDraft.name.trim()) return;
-    onAddExtra(addDraft);
-    setAddDraft({ name:"", group:GROUPS[0] }); setAddOpen(false);
+    const code = addDraft.code.trim();
+    if (code) {
+      const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
+      if (taken) { alert(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`); return; }
+    }
+    onAddExtra({ name:addDraft.name, group:addDraft.group, code: code || undefined });
+    setAddDraft({ code:"", name:"", group:GROUPS[0] }); setAddOpen(false);
   };
 
   const handleAddSub = (parentCode) => {
@@ -1025,7 +1030,13 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
       {/* Inline "add standalone row" form */}
       {addOpen && (
-        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:10,alignItems:"end"}}>
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:10,alignItems:"end"}}>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>Acc. Code (ถ้ามี)</span>
+            <input className="input-base" value={addDraft.code} onChange={e=>setAddDraft(d=>({...d,code:e.target.value}))}
+              placeholder="เช่น 511099" style={{fontFamily:"'JetBrains Mono',monospace"}}
+              onKeyDown={e=>e.key==="Enter"&&handleAddRow()} />
+          </label>
           <label style={{display:"flex",flexDirection:"column",gap:5}}>
             <span style={{fontSize:11,color:T.textSecondary}}>ชื่อรายการใหม่ (งานที่ไม่มี Acc. Code เดิมรองรับ)</span>
             <input className="input-base" value={addDraft.name} onChange={e=>setAddDraft(d=>({...d,name:e.target.value}))}
@@ -1059,15 +1070,16 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
               const rowVal = effectiveValue(a);
               return (
                 <Fragment key={a.code}>
-                  <tr style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===a.code?"none":"1px solid #f1f5f9"}}>
+                  <tr onClick={()=>hasKids && setCollapsed(c=>({...c,[a.code]:!c[a.code]}))}
+                      style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===a.code?"none":"1px solid #f1f5f9",cursor:hasKids?"pointer":"default"}}>
                     <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>
                       {hasKids && (
-                        <button onClick={()=>setCollapsed(c=>({...c,[a.code]:!c[a.code]}))} title={isCollapsed?"ขยายรายการย่อย":"ย่อรายการย่อย"}
-                          style={{background:"none",border:"none",cursor:"pointer",color:T.textMuted,fontSize:10,marginRight:6,verticalAlign:"middle"}}>
+                        <span title={isCollapsed?"ขยายรายการย่อย":"ย่อรายการย่อย"}
+                          style={{color:T.textMuted,fontSize:10,marginRight:6,verticalAlign:"middle",display:"inline-block"}}>
                           {isCollapsed?"▸":"▾"}
-                        </button>
+                        </span>
                       )}
-                      {a.isExtra?"—":a.code}
+                      {a.isExtra ? (a.code.startsWith("EX-") ? "—" : a.code) : a.code}
                     </td>
                     <td style={{padding:"10px 16px"}}>
                       <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
@@ -1077,7 +1089,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                       {a.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการใหม่</span>}
                       {hasKids && <span style={{marginLeft:7,fontSize:10,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} รายการย่อย</span>}
                       {!a.isExtra && (
-                        <button onClick={()=>{setSubFor(subFor===a.code?null:a.code); setSubName(""); setCollapsed(c=>({...c,[a.code]:false}));}} title="เพิ่มรายการย่อยใต้ Acc. Code นี้"
+                        <button onClick={(e)=>{e.stopPropagation(); setSubFor(subFor===a.code?null:a.code); setSubName(""); setCollapsed(c=>({...c,[a.code]:false}));}} title="เพิ่มรายการย่อยใต้ Acc. Code นี้"
                           style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
                           + รายการย่อย
                         </button>
@@ -1089,15 +1101,15 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                           {fmt(rowVal)}
                         </div>
                       ) : (
-                        <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
+                        <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))} onClick={e=>e.stopPropagation()}
                           placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
                       )}
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
                       {a.isExtra
-                        ? <button onClick={()=>handleDeleteRow(a.code)} title="ลบรายการนี้"
+                        ? <button onClick={(e)=>{e.stopPropagation(); handleDeleteRow(a.code);}} title="ลบรายการนี้"
                             style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
-                        : <button onClick={()=>onHideAccount(a.code)} title="นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)"
+                        : <button onClick={(e)=>{e.stopPropagation(); onHideAccount(a.code);}} title="นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)"
                             style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14}}>✕</button>}
                     </td>
                   </tr>
