@@ -2,6 +2,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
 import { supabase, sg, ss, sd } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
+import {
+  ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
+  loadUsers, createUser, resetPassword, toggleActive, deleteUser, loadLogs,
+} from "./auth.js";
+// (saveUsers is used internally by auth.js helpers above, not needed directly here)
 
 // ─── Master Data ──────────────────────────────────────────────────────────────
 const ACCOUNTS = [
@@ -200,6 +205,7 @@ function exportToExcel(project, tenderCosts, poEntries) {
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 export default function App() {
+  const [session,  setSessionState] = useState(() => getSession());
   const [screen,   setScreen]   = useState("home");
   const [projects, setProjects] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -210,6 +216,12 @@ export default function App() {
   const [newProjModal, setNewProjModal] = useState(false);
   const [syncedAt,    setSyncedAt]    = useState(null);
   const [syncing,     setSyncing]     = useState(false);
+
+  const handleLogin = (user) => { setSession(user); setSessionState(user); };
+  const handleLogout = () => {
+    clearSession(); setSessionState(null);
+    setScreen("home"); setRole(null); setActiveId(null);
+  };
 
   const fetchProjectData = useCallback(async (id) => {
     const t  = await sg(`tcs-tenders-${id}`);
@@ -245,7 +257,11 @@ export default function App() {
   const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const savePO       = useCallback((po)   => { setPO(po);         ss(`tcs-po-${activeId}`, po).then(()=>setSyncedAt(new Date())); }, [activeId]);
 
-  const openProject = (id) => { setActiveId(id); setRole(null); setScreen("roleSelect"); };
+  const openProject = (id) => {
+    setActiveId(id);
+    if (session?.role === "admin") { setRole(null); setScreen("roleSelect"); }
+    else { setRole(session?.role); setScreen("app"); }
+  };
   const deleteProject = async (id) => {
     if (!confirm("ลบโครงการนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
     saveProjects(projects.filter(p => p.id !== id));
@@ -254,10 +270,24 @@ export default function App() {
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
 
+  if (!session) {
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <LoginScreen onLogin={handleLogin} />
+      </>
+    );
+  }
+
   if (!loaded) return <Loader />;
 
+  // Non-admins can only ever act as the role tied to their account,
+  // even if they somehow land on screen "roleSelect" or "app" with a stale role.
+  const effectiveRole = session.role === "admin" ? role : session.role;
+
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
-    updateProject, onBack:()=>setScreen("roleSelect"), syncedAt, syncing };
+    updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
+    syncedAt, syncing, session, onLogout: handleLogout };
 
   return (
     <>
@@ -265,18 +295,247 @@ export default function App() {
       {screen === "home" && (
         <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
           deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
-          syncedAt={syncedAt} syncing={syncing} />
+          syncedAt={syncedAt} syncing={syncing} session={session} onLogout={handleLogout}
+          onOpenAdmin={() => setScreen("admin")} />
       )}
-      {screen === "roleSelect" && (
+      {screen === "admin" && session.role === "admin" && (
+        <AdminPanel onBack={() => setScreen("home")} onLogout={handleLogout} session={session} />
+      )}
+      {screen === "roleSelect" && session.role === "admin" && (
         <RoleSelect project={activeProject} updateProject={updateProject}
           onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
       )}
-      {screen === "app" && role === "qs"          && <QSView          {...sharedProps} />}
-      {screen === "app" && role === "procurement" && <ProcurementView {...sharedProps} />}
-      {screen === "app" && role === "accounting"  && (
+      {screen === "app" && effectiveRole === "qs"          && <QSView          {...sharedProps} />}
+      {screen === "app" && effectiveRole === "procurement" && <ProcurementView {...sharedProps} />}
+      {screen === "app" && effectiveRole === "accounting"  && (
         <AccountingView {...sharedProps} onExport={() => exportToExcel(activeProject, tenderCosts, poEntries)} />
       )}
     </>
+  );
+}
+
+// ─── Login Screen ─────────────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error,    setError]    = useState("");
+  const [busy,     setBusy]     = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!username.trim() || !password) { setError("กรอก Username และ Password ให้ครบ"); return; }
+    setBusy(true); setError("");
+    try {
+      const user = await verifyLogin(username, password);
+      if (!user) { setError("Username หรือ Password ไม่ถูกต้อง หรือบัญชีถูกระงับ"); setBusy(false); return; }
+      onLogin(user);
+    } catch (err) {
+      setError("เกิดข้อผิดพลาด ลองใหม่อีกครั้ง");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:T.headerGrad,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <form onSubmit={submit} style={{background:T.card,borderRadius:20,padding:36,width:400,maxWidth:"92vw",boxShadow:"0 24px 60px rgba(0,0,0,0.25)"}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{fontSize:34,marginBottom:8}}>🏗</div>
+          <div style={{fontSize:11,letterSpacing:3,color:T.textMuted,textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
+          <div style={{fontSize:19,fontWeight:800,color:T.textPrimary,marginTop:4}}>เข้าสู่ระบบ</div>
+          <div style={{fontSize:12,color:T.textMuted,marginTop:4}}>ล็อกอินตามแผนก: QS · จัดซื้อ · บัญชี · Admin</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <label style={{display:"flex",flexDirection:"column",gap:6}}>
+            <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Username</span>
+            <input className="input-base" autoFocus value={username} onChange={e=>setUsername(e.target.value)} placeholder="เช่น qs, procurement, accounting, admin" />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:6}}>
+            <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Password</span>
+            <input className="input-base" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" />
+          </label>
+          {error && <div style={{background:T.redBg,color:T.red,fontSize:12,padding:"9px 12px",borderRadius:8,fontWeight:500}}>{error}</div>}
+          <button className="btn-primary" type="submit" disabled={busy} style={{marginTop:6,opacity:busy?0.7:1}}>
+            {busy ? "กำลังตรวจสอบ..." : "เข้าสู่ระบบ"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── User row (admin panel) ────────────────────────────────────────────────
+function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
+  const [resetting, setResetting] = useState(false);
+  const [pw, setPw] = useState("");
+  return (
+    <tr style={{borderBottom:`1px solid #f1f5f9`}}>
+      <td style={{padding:"10px 14px",color:T.textPrimary,fontWeight:600}}>{u.username}{isSelf && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>(คุณ)</span>}</td>
+      <td style={{padding:"10px 14px",color:T.textSecondary}}>{u.name}</td>
+      <td style={{padding:"10px 14px"}}>
+        <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{ROLE_LABELS[u.role]}</span>
+      </td>
+      <td style={{padding:"10px 14px"}}>
+        <span style={{background:u.active?T.greenBg:T.redBg,color:u.active?T.green:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>
+          {u.active ? "ใช้งานได้" : "ระงับแล้ว"}
+        </span>
+      </td>
+      <td style={{padding:"10px 14px"}}>
+        {resetting ? (
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <input className="input-base" type="text" placeholder="รหัสผ่านใหม่" value={pw} onChange={e=>setPw(e.target.value)} style={{width:130,padding:"6px 10px"}} />
+            <button className="btn-primary" style={{padding:"6px 12px"}} onClick={()=>{ if(pw){ onReset(u.id,pw); setPw(""); setResetting(false);} }}>บันทึก</button>
+            <button className="btn-ghost" style={{padding:"6px 10px"}} onClick={()=>{setResetting(false);setPw("");}}>ยกเลิก</button>
+          </div>
+        ) : (
+          <div style={{display:"flex",gap:8}}>
+            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>รีเซ็ตรหัส</button>
+            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>onToggle(u.id)}>{u.active?"ระงับ":"เปิดใช้"}</button>
+            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(`ลบผู้ใช้ ${u.username}?`)) onDelete(u.id);}}>ลบ</button>}
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+// ─── Admin Panel ────────────────────────────────────────────────────────────
+function AdminPanel({ onBack, onLogout, session }) {
+  const [tab,   setTab]   = useState("users");
+  const [users, setUsers] = useState([]);
+  const [logs,  setLogs]  = useState([]);
+  const [loaded, setLoadedU] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [draft, setDraft] = useState({ username:"", name:"", role:"qs", password:"" });
+  const [err, setErr] = useState("");
+
+  const refresh = useCallback(async () => {
+    const [u, l] = await Promise.all([loadUsers(), loadLogs()]);
+    setUsers(u); setLogs(l); setLoadedU(true);
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleReset   = async (id, pw)  => setUsers(await resetPassword(users, id, pw));
+  const handleToggle  = async (id)      => setUsers(await toggleActive(users, id));
+  const handleDelete  = async (id)      => setUsers(await deleteUser(users, id));
+  const handleCreate  = async () => {
+    setErr("");
+    if (!draft.username.trim() || !draft.password) { setErr("กรอก Username และ Password"); return; }
+    try {
+      const next = await createUser(draft);
+      setUsers(next); setAddOpen(false); setDraft({ username:"", name:"", role:"qs", password:"" });
+    } catch (e) { setErr(e.message || "สร้างผู้ใช้ไม่สำเร็จ"); }
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
+        <button onClick={onBack} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 12px",fontSize:18}}>←</button>
+        <div>
+          <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
+          <div style={{fontSize:16,fontWeight:700,color:"#fff",marginTop:2}}>Admin Panel</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:12,color:"rgba(255,255,255,0.8)"}}>👤 {session.name} ({ROLE_LABELS[session.role]})</span>
+          <button onClick={onLogout} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>ออกจากระบบ</button>
+        </div>
+      </div>
+
+      <div style={{padding:"28px 32px"}}>
+        <div style={{display:"flex",gap:8,marginBottom:22}}>
+          {[["users","👥 จัดการผู้ใช้"],["logs","📜 Log การเข้าใช้งาน"]].map(([id,label])=>(
+            <button key={id} onClick={()=>setTab(id)}
+              style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {!loaded ? (
+          <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลด...</div>
+        ) : tab === "users" ? (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`}}>
+              <div style={{fontSize:13,fontWeight:600,color:T.textPrimary}}>ผู้ใช้ทั้งหมด ({users.length})</div>
+              <button className="btn-primary" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มผู้ใช้</button>
+            </div>
+            {addOpen && (
+              <div style={{padding:18,borderBottom:`1px solid ${T.cardBorder}`,background:"#fafbfd"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr auto",gap:10,alignItems:"end"}}>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>Username</span>
+                    <input className="input-base" value={draft.username} onChange={e=>setDraft(d=>({...d,username:e.target.value}))} />
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>ชื่อที่แสดง</span>
+                    <input className="input-base" value={draft.name} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} />
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>แผนก</span>
+                    <select className="input-base" value={draft.role} onChange={e=>setDraft(d=>({...d,role:e.target.value}))}>
+                      <option value="qs">QS</option>
+                      <option value="procurement">จัดซื้อ</option>
+                      <option value="accounting">บัญชี</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>Password</span>
+                    <input className="input-base" type="text" value={draft.password} onChange={e=>setDraft(d=>({...d,password:e.target.value}))} />
+                  </label>
+                  <button className="btn-primary" onClick={handleCreate}>สร้าง</button>
+                </div>
+                {err && <div style={{color:T.red,fontSize:12,marginTop:8,fontWeight:500}}>{err}</div>}
+              </div>
+            )}
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr style={{background:"#f8fafc"}}>
+                  {["Username","ชื่อที่แสดง","แผนก","สถานะ",""].map(h=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {users.map(u => (
+                  <UserRow key={u.id} u={u} onReset={handleReset} onToggle={handleToggle} onDelete={handleDelete} isSelf={u.id===session.id} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+            <div style={{padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:600,color:T.textPrimary}}>
+              ประวัติการเข้าใช้งานล่าสุด ({logs.length})
+            </div>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr style={{background:"#f8fafc"}}>
+                  {["เวลา","Username","แผนก","ผลลัพธ์"].map(h=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {logs.length===0 ? (
+                  <tr><td colSpan={4} style={{padding:"30px",textAlign:"center",color:T.textMuted}}>ยังไม่มีข้อมูล</td></tr>
+                ) : logs.map(l => (
+                  <tr key={l.id} style={{borderBottom:"1px solid #f1f5f9"}}>
+                    <td style={{padding:"9px 14px",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{new Date(l.time).toLocaleString("th-TH")}</td>
+                    <td style={{padding:"9px 14px",color:T.textPrimary,fontWeight:500}}>{l.username}</td>
+                    <td style={{padding:"9px 14px",color:T.textSecondary}}>{ROLE_LABELS[l.role]||l.role}</td>
+                    <td style={{padding:"9px 14px"}}>
+                      <span style={{background:l.result==="success"?T.greenBg:T.redBg,color:l.result==="success"?T.green:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>
+                        {l.result==="success"?"สำเร็จ":l.result==="inactive"?"บัญชีถูกระงับ":"ล้มเหลว"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -319,7 +578,7 @@ function StatCard({ label, value, sub, color, icon, accent }) {
 }
 
 // ─── Home Screen ──────────────────────────────────────────────────────────────
-function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing }) {
+function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
   const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB" });
 
   const createProject = () => {
@@ -342,9 +601,24 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
           </div>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
             <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
+            {session?.role === "admin" && (
+              <button className="btn-primary" onClick={onOpenAdmin}
+                style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)"}}>
+                ⚙️ Admin
+              </button>
+            )}
             <button className="btn-primary" onClick={()=>setNewProjModal(true)}
               style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontSize:16,lineHeight:1}}>+</span> โครงการใหม่
+            </button>
+            <div style={{width:1,alignSelf:"stretch",background:"rgba(255,255,255,0.2)"}}/>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:12,color:"#fff",fontWeight:600}}>{session?.name}</div>
+              <div style={{fontSize:10,color:"rgba(255,255,255,0.6)"}}>{ROLE_LABELS[session?.role]}</div>
+            </div>
+            <button onClick={onLogout} title="ออกจากระบบ"
+              style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600}}>
+              ออกจากระบบ
             </button>
           </div>
         </div>
@@ -514,7 +788,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
 }
 
 // ─── Shell ────────────────────────────────────────────────────────────────────
-function Shell({ role, color, project, onBack, children, syncedAt, syncing }) {
+function Shell({ role, color, project, onBack, children, syncedAt, syncing, session, onLogout }) {
   const labels = {qs:"QS · Quantity Surveyor",procurement:"จัดซื้อ · Procurement",accounting:"บัญชี · Accounting"};
   const gradients = {
     qs:          "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
@@ -537,6 +811,15 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing }) {
             ))}
           </div>
         )}
+        {session && (
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:11,color:"rgba(255,255,255,0.8)"}}>👤 {session.name}</span>
+            <button onClick={onLogout} title="ออกจากระบบ"
+              style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 11px",fontSize:11,fontWeight:600}}>
+              ออกจากระบบ
+            </button>
+          </div>
+        )}
       </div>
       <div style={{flex:1,overflow:"auto"}}>{children}</div>
     </div>
@@ -544,7 +827,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing }) {
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing }) {
+function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing, session, onLogout }) {
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
@@ -569,7 +852,7 @@ function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing }
   };
 
   return (
-    <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
+    <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Stats */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:24}}>
@@ -635,7 +918,7 @@ function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing }
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, syncedAt, syncing }) {
+function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout }) {
   const [view,   setView]   = useState("list");
   const [form,   setForm]   = useState({code:"",supplier:"",poNumber:"",amount:"",date:new Date().toISOString().slice(0,10),status:"PO Issued",notes:""});
   const [editId, setEditId] = useState(null);
@@ -661,7 +944,7 @@ function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, sync
   });
 
   return (
-    <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
+    <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
           <StatCard label="Budget (QS)" value={fmt(tenderTotal)} sub="Tender Cost รวม" color={T.blue} icon="📋" accent={T.blueLight}/>
@@ -783,7 +1066,7 @@ function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, sync
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syncedAt, syncing }) {
+function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout }) {
   const [view, setView] = useState("dashboard");
 
   const tenderTotal   = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
@@ -816,7 +1099,7 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
   };
 
   return (
-    <Shell role="accounting" color={T.green} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
+    <Shell role="accounting" color={T.green} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:24,alignItems:"center"}}>
