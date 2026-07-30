@@ -213,6 +213,7 @@ export default function App() {
   const [tenderCosts, setTCosts]= useState({});
   const [additions,   setAdditions]  = useState({});
   const [extraItems,  setExtraItems] = useState([]);
+  const [hiddenAccounts, setHiddenAccounts] = useState([]); // codes of fixed Acc. Codes QS has removed for this project
   const [poEntries,   setPO]    = useState([]);
   const [loaded,   setLoaded]   = useState(false);
   const [newProjModal, setNewProjModal] = useState(false);
@@ -230,10 +231,12 @@ export default function App() {
     const po = await sg(`tcs-po-${id}`);
     const ad = await sg(`tcs-additions-${id}`);
     const ex = await sg(`tcs-extra-${id}`);
+    const hid = await sg(`tcs-hidden-${id}`);
     setTCosts(t || {});
     setPO(po || []);
     setAdditions(ad || {});
     setExtraItems(ex || []);
+    setHiddenAccounts(hid || []);
   }, []);
 
   const fetchProjects = useCallback(async () => {
@@ -253,7 +256,7 @@ export default function App() {
         const key = payload.new?.key || payload.old?.key || "";
         setSyncing(true);
         if (key === "tcs-projects") await fetchProjects();
-        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}`)) await fetchProjectData(activeId);
+        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}`)) await fetchProjectData(activeId);
         setSyncedAt(new Date()); setSyncing(false);
       }).subscribe();
     return () => supabase.removeChannel(channel);
@@ -263,6 +266,7 @@ export default function App() {
   const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const saveAdditions= useCallback((a)    => { setAdditions(a);   ss(`tcs-additions-${activeId}`, a).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const saveExtraItems=useCallback((ex)   => { setExtraItems(ex); ss(`tcs-extra-${activeId}`, ex).then(()=>setSyncedAt(new Date())); }, [activeId]);
+  const saveHiddenAccounts=useCallback((h)=> { setHiddenAccounts(h); ss(`tcs-hidden-${activeId}`, h).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const savePO       = useCallback((po)   => { setPO(po);         ss(`tcs-po-${activeId}`, po).then(()=>setSyncedAt(new Date())); }, [activeId]);
 
   const openProject = (id) => {
@@ -273,7 +277,7 @@ export default function App() {
   const deleteProject = async (id) => {
     if (!confirm("ลบโครงการนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
     saveProjects(projects.filter(p => p.id !== id));
-    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`);
+    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`);
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
@@ -294,7 +298,7 @@ export default function App() {
   const effectiveRole = session.role === "admin" ? role : session.role;
 
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
-    additions, saveAdditions, extraItems, saveExtraItems,
+    additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
     updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
     syncedAt, syncing, session, onLogout: handleLogout };
 
@@ -836,7 +840,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, onBack, syncedAt, syncing, session, onLogout }) {
+function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
@@ -863,6 +867,15 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
     saveAdditions(nextAdd);
   };
 
+  // Hide / restore a fixed Acc. Code (511010 ... etc). Hiding doesn't erase its stored
+  // numbers — it's reversible — it just removes it from the QS entry list and from
+  // downstream totals, in case a project doesn't use that code at all.
+  const handleHideAccount = (code) => {
+    if (!confirm("นำ Acc. Code นี้ออกจากรายการหลัก? (กู้คืนได้ภายหลัง ตัวเลขที่เคยกรอกไว้จะยังไม่หาย)")) return;
+    saveHiddenAccounts([...hiddenAccounts, code]);
+  };
+  const handleRestoreAccount = (code) => saveHiddenAccounts(hiddenAccounts.filter(c => c !== code));
+
   return (
     <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"20px 28px 0"}}>
@@ -877,15 +890,17 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
       </div>
       {tab === "baseline"
         ? <QSBaselineTab tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems}
-                         onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem} />
+                         onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
+                         hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
-                         extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem} />}
+                         extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
+                         hiddenAccounts={hiddenAccounts} />}
     </Shell>
   );
 }
 
 // ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
-function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra }) {
+function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount }) {
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
@@ -894,6 +909,8 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const [addDraft, setAddDraft] = useState({ name:"", group:GROUPS[0] });
   const [subFor, setSubFor] = useState(null);       // code of account currently adding a sub-item
   const [subName, setSubName] = useState("");
+  const [collapsed, setCollapsed] = useState({});   // code -> true means sub-items hidden
+  const [showHidden, setShowHidden] = useState(false);
 
   useEffect(() => setDraft({...tenderCosts}), [tenderCosts]);
 
@@ -913,7 +930,9 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     return parseFloat(draft[row.code]) || 0;
   };
 
-  const allRows = [...ACCOUNTS, ...standaloneExtras.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+  const visibleAccounts = ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code));
+  const hiddenList = ACCOUNTS.filter(a => hiddenAccounts.includes(a.code));
+  const allRows = [...visibleAccounts, ...standaloneExtras.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const base  = allRows.reduce((s,r)=>s+effectiveValue(r),0);
   const adj3  = base * 0.03;
@@ -948,6 +967,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
     onAddExtra({ name:subName, parentCode });
+    setCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
 
@@ -975,12 +995,33 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
               style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
           ))}
         </div>
-        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการใหม่ (Acc. Code ใหม่)</button>
+        {hiddenList.length > 0 && (
+          <button className="btn-ghost" onClick={()=>setShowHidden(v=>!v)} style={{color:T.textMuted}}>
+            🗂 ที่ซ่อนไว้ ({hiddenList.length})
+          </button>
+        )}
+        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการหลักใหม่</button>
         <button onClick={handleSave} className="btn-primary"
           style={{background:saved?T.green:T.blue,minWidth:140}}>
           {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
         </button>
       </div>
+
+      {/* Hidden accounts panel */}
+      {showHidden && hiddenList.length > 0 && (
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:14,marginBottom:16}}>
+          <div style={{fontSize:11,color:T.textSecondary,marginBottom:8}}>Acc. Code ที่ซ่อนไว้ — ตัวเลขที่เคยกรอกยังอยู่ กด "กู้คืน" เพื่อนำกลับมาแสดง</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {hiddenList.map(a=>(
+              <div key={a.code} style={{display:"flex",alignItems:"center",gap:8,background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"6px 10px"}}>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:T.textMuted}}>{a.code}</span>
+                <span style={{fontSize:12,color:T.textPrimary}}>{a.name}</span>
+                <button onClick={()=>onRestoreAccount(a.code)} className="btn-ghost" style={{padding:"3px 9px",fontSize:11}}>↺ กู้คืน</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Inline "add standalone row" form */}
       {addOpen && (
@@ -1014,19 +1055,29 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
             {filtered.map((a,i)=>{
               const kids = !a.isExtra ? childrenOf(a.code) : [];
               const hasKids = kids.length > 0;
+              const isCollapsed = hasKids && collapsed[a.code];
               const rowVal = effectiveValue(a);
               return (
                 <Fragment key={a.code}>
-                  <tr style={{background:i%2===0?T.card:"#fafbfd",borderBottom:hasKids||subFor===a.code?"none":"1px solid #f1f5f9"}}>
-                    <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.isExtra?"—":a.code}</td>
+                  <tr style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===a.code?"none":"1px solid #f1f5f9"}}>
+                    <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>
+                      {hasKids && (
+                        <button onClick={()=>setCollapsed(c=>({...c,[a.code]:!c[a.code]}))} title={isCollapsed?"ขยายรายการย่อย":"ย่อรายการย่อย"}
+                          style={{background:"none",border:"none",cursor:"pointer",color:T.textMuted,fontSize:10,marginRight:6,verticalAlign:"middle"}}>
+                          {isCollapsed?"▸":"▾"}
+                        </button>
+                      )}
+                      {a.isExtra?"—":a.code}
+                    </td>
                     <td style={{padding:"10px 16px"}}>
                       <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
                     </td>
                     <td style={{padding:"10px 16px",color:T.textPrimary}}>
                       {a.name}
                       {a.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการใหม่</span>}
+                      {hasKids && <span style={{marginLeft:7,fontSize:10,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} รายการย่อย</span>}
                       {!a.isExtra && (
-                        <button onClick={()=>{setSubFor(subFor===a.code?null:a.code); setSubName("");}} title="เพิ่มรายการย่อยใต้ Acc. Code นี้"
+                        <button onClick={()=>{setSubFor(subFor===a.code?null:a.code); setSubName(""); setCollapsed(c=>({...c,[a.code]:false}));}} title="เพิ่มรายการย่อยใต้ Acc. Code นี้"
                           style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
                           + รายการย่อย
                         </button>
@@ -1043,15 +1094,16 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                       )}
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
-                      {a.isExtra && (
-                        <button onClick={()=>handleDeleteRow(a.code)} title="ลบรายการนี้"
-                          style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
-                      )}
+                      {a.isExtra
+                        ? <button onClick={()=>handleDeleteRow(a.code)} title="ลบรายการนี้"
+                            style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
+                        : <button onClick={()=>onHideAccount(a.code)} title="นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)"
+                            style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14}}>✕</button>}
                     </td>
                   </tr>
 
                   {/* Sub-items — roll up into the parent Acc. Code's total above */}
-                  {kids.map((k,ki)=>(
+                  {!isCollapsed && kids.map((k,ki)=>(
                     <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(ki===kids.length-1 && subFor!==a.code)?"1px solid #f1f5f9":"none"}}>
                       <td style={{padding:"6px 16px 6px 30px",color:T.green,fontSize:12}}>↳</td>
                       <td/>
@@ -1102,7 +1154,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
-function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra }) {
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts }) {
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
@@ -1122,7 +1174,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // baseline-only breakdown lines — they're edited on the Baseline tab and
   // their sum already flows into tenderCosts[parentCode], so they don't need
   // a separate row here.
-  const allRows = [...ACCOUNTS, ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+  const allRows = [...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)), ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const cumulativeThrough = (code, uptoMonth) => {
     const base = parseFloat(tenderCosts[code]) || 0;
