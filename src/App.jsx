@@ -839,6 +839,25 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, onBack, syncedAt, syncing, session, onLogout }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
 
+  // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
+  // and kept in sync with tenderCosts + every month's additions on delete.
+  const handleAddExtraItem = ({ name, group }) => {
+    if (!name.trim()) return;
+    const item = { code:`EX-${uid()}`, name:name.trim(), group };
+    saveExtraItems([...extraItems, item]);
+    return item.code;
+  };
+
+  const handleDeleteExtraItem = (code) => {
+    if (!confirm("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย")) return;
+    saveExtraItems(extraItems.filter(e => e.code !== code));
+    const nextTenders = { ...tenderCosts }; delete nextTenders[code];
+    saveTenders(nextTenders);
+    const nextAdd = {};
+    Object.entries(additions).forEach(([m, obj]) => { const o = {...obj}; delete o[code]; nextAdd[m] = o; });
+    saveAdditions(nextAdd);
+  };
+
   return (
     <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"20px 28px 0"}}>
@@ -852,27 +871,33 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
         </div>
       </div>
       {tab === "baseline"
-        ? <QSBaselineTab tenderCosts={tenderCosts} saveTenders={saveTenders} />
+        ? <QSBaselineTab tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems}
+                         onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
-                         extraItems={extraItems} saveExtraItems={saveExtraItems} />}
+                         extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem} />}
     </Shell>
   );
 }
 
-// ─── QS Tab 1: Baseline (original tender cost, unchanged behaviour) ───────────
-function QSBaselineTab({ tenderCosts, saveTenders }) {
+// ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
+function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra }) {
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [saved,  setSaved]  = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addDraft, setAddDraft] = useState({ name:"", group:GROUPS[0] });
 
   useEffect(() => setDraft({...tenderCosts}), [tenderCosts]);
+
+  // Fixed 70 account codes + QS-added extra rows (e.g. sub-items like "Gasket Linear")
+  const allRows = [...ACCOUNTS, ...extraItems.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const base  = Object.values(draft).reduce((s,v)=>s+(parseFloat(v)||0),0);
   const adj3  = base * 0.03;
   const total = base + adj3;
 
-  const filtered = ACCOUNTS.filter(a =>
+  const filtered = allRows.filter(a =>
     (filter==="All" || a.group===filter) &&
     (a.name.toLowerCase().includes(search.toLowerCase()) || a.code.includes(search))
   );
@@ -884,6 +909,17 @@ function QSBaselineTab({ tenderCosts, saveTenders }) {
     setSaved(true); setTimeout(()=>setSaved(false),2000);
   };
 
+  const handleAddRow = () => {
+    if (!addDraft.name.trim()) return;
+    onAddExtra(addDraft);
+    setAddDraft({ name:"", group:GROUPS[0] }); setAddOpen(false);
+  };
+
+  const handleDeleteRow = (code) => {
+    onDeleteExtra(code);
+    setDraft(d => { const n = {...d}; delete n[code]; return n; });
+  };
+
   return (
     <div style={{padding:"4px 28px 24px"}}>
       {/* Stats */}
@@ -893,7 +929,7 @@ function QSBaselineTab({ tenderCosts, saveTenders }) {
         <StatCard label="Total Adjusted" value={fmt(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
-      {/* Filters + Save */}
+      {/* Filters + Add row + Save */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
           className="input-base" style={{width:240}}/>
@@ -903,18 +939,37 @@ function QSBaselineTab({ tenderCosts, saveTenders }) {
               style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
           ))}
         </div>
+        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการ</button>
         <button onClick={handleSave} className="btn-primary"
           style={{background:saved?T.green:T.blue,minWidth:140}}>
           {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
         </button>
       </div>
 
+      {/* Inline "add row" form */}
+      {addOpen && (
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:10,alignItems:"end"}}>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>ชื่อรายการ (เช่น Gasket Linear, Silicone Boot)</span>
+            <input className="input-base" value={addDraft.name} onChange={e=>setAddDraft(d=>({...d,name:e.target.value}))}
+              placeholder="พิมพ์ชื่อรายการที่ต้องการเพิ่ม" onKeyDown={e=>e.key==="Enter"&&handleAddRow()} autoFocus />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>Group</span>
+            <select className="input-base" value={addDraft.group} onChange={e=>setAddDraft(d=>({...d,group:e.target.value}))}>
+              {GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </label>
+          <button className="btn-primary" onClick={handleAddRow}>+ เพิ่ม</button>
+        </div>
+      )}
+
       {/* Table */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
-              {["Acc. Code","Group","Account Name","Tender Cost (THB)"].map(h=>(
+              {["Acc. Code","Group","Account Name","Tender Cost (THB)",""].map(h=>(
                 <th key={h} style={{padding:"11px 16px",textAlign:h.includes("Cost")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
               ))}
             </tr>
@@ -922,14 +977,23 @@ function QSBaselineTab({ tenderCosts, saveTenders }) {
           <tbody>
             {filtered.map((a,i)=>(
               <tr key={a.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
-                <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.code}</td>
+                <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.isExtra?"—":a.code}</td>
                 <td style={{padding:"10px 16px"}}>
                   <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
                 </td>
-                <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
+                <td style={{padding:"10px 16px",color:T.textPrimary}}>
+                  {a.name}
+                  {a.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการเพิ่ม</span>}
+                </td>
                 <td style={{padding:"8px 16px",textAlign:"right"}}>
                   <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
                     placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
+                </td>
+                <td style={{padding:"8px 16px",textAlign:"center"}}>
+                  {a.isExtra && (
+                    <button onClick={()=>handleDeleteRow(a.code)} title="ลบรายการนี้"
+                      style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -940,6 +1004,7 @@ function QSBaselineTab({ tenderCosts, saveTenders }) {
               <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,a)=>s+(parseFloat(draft[a.code])||0),0))}
               </td>
+              <td/>
             </tr>
           </tfoot>
         </table>
@@ -949,7 +1014,7 @@ function QSBaselineTab({ tenderCosts, saveTenders }) {
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
-function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, saveExtraItems }) {
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra }) {
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
@@ -999,20 +1064,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, saveE
 
   const handleCreateExtra = () => {
     if (!extraDraft.name.trim()) return;
-    const item = { code:`EX-${uid()}`, name:extraDraft.name.trim(), group:extraDraft.group };
-    saveExtraItems([...extraItems, item]);
+    onAddExtra(extraDraft);
     setExtraDraft({ name:"", group:GROUPS[0] }); setAddExtraOpen(false);
   };
 
-  const handleDeleteExtra = (code) => {
-    if (!confirm("ลบรายการงานเพิ่มนี้? (ยอดเงินที่เคยกรอกไว้ทุกเดือนของรายการนี้จะถูกลบด้วย)")) return;
-    saveExtraItems(extraItems.filter(e => e.code !== code));
-    const nextAdd = {};
-    Object.entries(additions).forEach(([m, obj]) => {
-      const o = {...obj}; delete o[code]; nextAdd[m] = o;
-    });
-    saveAdditions(nextAdd);
-  };
+  const handleDeleteExtra = (code) => onDeleteExtra(code);
 
   return (
     <div style={{padding:"4px 28px 24px"}}>
@@ -1080,7 +1136,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, saveE
           </thead>
           <tbody>
             {filtered.map((r,i) => {
-              const baseVal = r.isExtra ? 0 : (parseFloat(tenderCosts[r.code]) || 0);
+              const baseVal = parseFloat(tenderCosts[r.code]) || 0;
               const cumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + baseVal;
               const thisVal = parseFloat(draftAdd[r.code]) || 0;
               const cum = cumBefore + thisVal;
@@ -1114,14 +1170,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, saveE
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
               <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
-                {fmt(filtered.reduce((s,r)=>s+(r.isExtra?0:(parseFloat(tenderCosts[r.code])||0)),0))}
+                {fmt(filtered.reduce((s,r)=>s+(parseFloat(tenderCosts[r.code])||0),0))}
               </td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
                 {fmt(filtered.reduce((s,r)=>s+(parseFloat(draftAdd[r.code])||0),0))}
               </td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,r)=>{
-                  const baseVal = r.isExtra?0:(parseFloat(tenderCosts[r.code])||0);
+                  const baseVal = parseFloat(tenderCosts[r.code]) || 0;
                   const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
                   return s + cumBefore + (parseFloat(draftAdd[r.code])||0);
                 },0))}
