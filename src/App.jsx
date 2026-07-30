@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
 import { supabase, sg, ss, sd } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
@@ -70,62 +70,75 @@ const ACCOUNTS = [
   { code:"521250", name:"Other General Expenses",                 group:"Other"        },
 ];
 
-const GROUPS     = [...new Set(ACCOUNTS.map(a => a.group))];
-const PO_STATUS  = ["Pending","PO Issued","Delivered","Invoiced","Paid"];
-const STATUS_CLR = { Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#a78bfa",Paid:"#22c55e" };
-const STATUS_BG  = { Pending:"#1e293b","PO Issued":"#1e3a5f",Delivered:"#292001",Invoiced:"#2d1b69",Paid:"#052e16" };
-const GRP_COLORS = ["#3b82f6","#22c55e","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#ec4899"];
+const GROUPS      = [...new Set(ACCOUNTS.map(a => a.group))];
+const PO_STATUS   = ["Pending","PO Issued","Delivered","Invoiced","Paid"];
+const STATUS_CLR  = { Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#8b5cf6",Paid:"#10b981" };
+const STATUS_BG   = { Pending:"#f1f5f9","PO Issued":"#eff6ff",Delivered:"#fffbeb",Invoiced:"#f5f3ff",Paid:"#f0fdf4" };
+const GRP_COLORS  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#ec4899"];
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
-const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:fmt(n);
+const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
 const uid  = () => Math.random().toString(36).slice(2,10);
 
-// ─── Design tokens ────────────────────────────────────────────────────────────
-const C = {
-  bg:      "#0f172a",
-  surface: "#1e293b",
-  border:  "#334155",
-  borderL: "#1e293b",
-  text:    "#f1f5f9",
-  textSub: "#94a3b8",
-  textMut: "#64748b",
-  blue:    "#3b82f6",
-  green:   "#22c55e",
-  amber:   "#f59e0b",
-  red:     "#ef4444",
-  purple:  "#a78bfa",
+// ─── Design Tokens ────────────────────────────────────────────────────────────
+const T = {
+  // Layout
+  bg:        "#f0f4f8",
+  sidebar:   "#1e293b",
+  card:      "#ffffff",
+  cardBorder:"#e2e8f0",
+  // Text
+  textPrimary:  "#0f172a",
+  textSecondary:"#64748b",
+  textMuted:    "#94a3b8",
+  // Brand blue
+  blue:     "#2563eb",
+  blueDark: "#1d4ed8",
+  blueLight:"#eff6ff",
+  blueMid:  "#dbeafe",
+  // Accent
+  green:    "#10b981",
+  greenBg:  "#f0fdf4",
+  amber:    "#f59e0b",
+  amberBg:  "#fffbeb",
+  purple:   "#8b5cf6",
+  purpleBg: "#f5f3ff",
+  red:      "#ef4444",
+  redBg:    "#fef2f2",
+  // Header gradient
+  headerGrad: "linear-gradient(135deg, #1e40af 0%, #2563eb 50%, #3b82f6 100%)",
 };
 
-const G = {
-  card: { background:C.surface, border:`1px solid ${C.border}`, borderRadius:16, padding:24 },
-  input: { background:"#0f172a", border:`1px solid ${C.border}`, borderRadius:10, padding:"10px 14px",
-           color:C.text, fontSize:14, fontFamily:"system-ui,sans-serif", outline:"none", width:"100%", boxSizing:"border-box" },
-  label: { display:"flex", flexDirection:"column", gap:6 },
-  labelText: { fontSize:12, fontWeight:600, color:C.textSub, textTransform:"uppercase", letterSpacing:"0.05em" },
-};
-
-// ─── CSS Global ───────────────────────────────────────────────────────────────
-const CSS = `
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:${C.bg}; color:${C.text}; }
-  input:focus, select:focus, textarea:focus { border-color: ${C.blue} !important; box-shadow: 0 0 0 3px ${C.blue}22; }
-  input[type=number]::-webkit-inner-spin-button { opacity:0.4; }
-  ::-webkit-scrollbar { width:6px; height:6px; }
-  ::-webkit-scrollbar-track { background:${C.bg}; }
-  ::-webkit-scrollbar-thumb { background:${C.border}; border-radius:3px; }
+// ─── Global CSS ───────────────────────────────────────────────────────────────
+const GLOBAL_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', sans-serif; background: ${T.bg}; color: ${T.textPrimary}; }
+  input, select, textarea, button { font-family: 'Inter', sans-serif; }
+  input[type=number]::-webkit-inner-spin-button { opacity: 0.4; }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: #f1f5f9; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
-  .card-hover:hover { border-color: ${C.blue}55 !important; transform:translateY(-2px); box-shadow: 0 8px 24px #00000040; }
-  .row-hover:hover { background: ${C.surface} !important; }
-  tr.row-hover:hover td { background: transparent; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
+  .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
+  .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
+  .btn-primary:hover { background: ${T.blueDark}; box-shadow: 0 4px 12px rgba(37,99,235,0.3); }
+  .btn-ghost { background: transparent; color: ${T.textSecondary}; border: 1.5px solid ${T.cardBorder}; border-radius: 10px; padding: 9px 18px; font-size: 13px; font-weight: 500; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+  .btn-ghost:hover { border-color: ${T.blue}; color: ${T.blue}; }
+  .input-base { background: ${T.bg}; border: 1.5px solid ${T.cardBorder}; border-radius: 10px; padding: 10px 13px; color: ${T.textPrimary}; font-size: 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; width: 100%; }
+  .input-base:focus { border-color: ${T.blue}; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+  .tag { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 600; }
 `;
 
-// ─── Excel Export (unchanged) ─────────────────────────────────────────────────
+// ─── Excel Export ─────────────────────────────────────────────────────────────
 function exportToExcel(project, tenderCosts, poEntries) {
   const wb = XLSX.utils.book_new();
+
   const summaryRows = [];
-  summaryRows.push([`Project: ${project.name}`,"","","","",""]);
-  summaryRows.push([`Area: ${project.area} ft²`,"",`Panels: ${project.panels}`,"","",""]);
-  summaryRows.push([`Export Date: ${new Date().toLocaleDateString("th-TH")}`,"","","","",""]);
+  summaryRows.push([`Project: ${project.name}`, "", "", "", "", ""]);
+  summaryRows.push([`Area: ${project.area} ft²`, "", `Panels: ${project.panels}`, "", "", ""]);
+  summaryRows.push([`Export Date: ${new Date().toLocaleDateString("th-TH")}`, "", "", "", "", ""]);
   summaryRows.push([]);
   summaryRows.push(["Acc. Code","Account Name","Group","Budget / Tender Cost","Committed (PO)","Remaining","% Used","Status"]);
   let grandBudget=0, grandCommitted=0;
@@ -133,64 +146,174 @@ function exportToExcel(project, tenderCosts, poEntries) {
     const budget    = parseFloat(tenderCosts[a.code]) || 0;
     const committed = poEntries.filter(p=>p.code===a.code).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
     const remaining = budget - committed;
-    const pct       = budget>0?(committed/budget*100).toFixed(1)+"%" : committed>0?"No Budget":"—";
-    if (budget===0 && committed===0) return;
-    grandBudget+=budget; grandCommitted+=committed;
-    summaryRows.push([a.code,a.name,a.group,budget||"",committed||"",remaining,pct,committed>budget&&budget>0?"⚠ Over Budget":"OK"]);
+    const pctUsed   = budget > 0 ? committed/budget : (committed>0?999:0);
+    const status    = committed > budget && budget > 0 ? "OVER BUDGET" : committed>0 ? "OK" : budget>0 ? "No PO" : "-";
+    if (budget > 0 || committed > 0) {
+      summaryRows.push([a.code, a.name, a.group, budget, committed, remaining, pctUsed, status]);
+      grandBudget += budget; grandCommitted += committed;
+    }
   });
   summaryRows.push([]);
-  summaryRows.push(["TOTAL","","",grandBudget,grandCommitted,grandBudget-grandCommitted,grandBudget>0?((grandCommitted/grandBudget)*100).toFixed(1)+"%":""]);
-  const ws1 = XLSX.utils.aoa_to_sheet(summaryRows);
-  XLSX.utils.book_append_sheet(wb, ws1, "Cost Summary");
+  summaryRows.push(["","TOTAL","",grandBudget,grandCommitted,grandBudget-grandCommitted,grandBudget>0?grandCommitted/grandBudget:0,""]);
 
-  const poRows = [["Date","Account Code","Account Name","Supplier","PO Number","Amount","Status","Notes"]];
+  const ws1 = XLSX.utils.aoa_to_sheet(summaryRows);
+  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:20},{wch:20},{wch:18},{wch:10},{wch:14}];
+  for (let r=5; r<summaryRows.length; r++) {
+    const cellRef = XLSX.utils.encode_cell({r, c:6});
+    if (ws1[cellRef] && typeof ws1[cellRef].v === "number") ws1[cellRef].z = "0.0%";
+    ["D","E","F"].forEach((_,i) => {
+      const ref = XLSX.utils.encode_cell({r, c:3+i});
+      if (ws1[ref] && typeof ws1[ref].v === "number") ws1[ref].z = '#,##0.00';
+    });
+  }
+  XLSX.utils.book_append_sheet(wb, ws1, "Summary");
+
+  const poRows = [];
+  poRows.push([`Project: ${project.name}`, "", "", "", "", "", "", ""]);
+  poRows.push([]);
+  poRows.push(["PO Date","Acc. Code","Account Name","Group","Supplier","PO Number","Amount","Status","Notes"]);
   poEntries.forEach(p => {
     const acc = ACCOUNTS.find(a=>a.code===p.code);
-    poRows.push([p.date,p.code,acc?.name||"",p.supplier,p.poNumber||"",parseFloat(p.amount)||0,p.status,p.notes||""]);
+    poRows.push([p.date, p.code, acc?.name||"", acc?.group||"", p.supplier, p.poNumber, parseFloat(p.amount)||0, p.status, p.notes||""]);
   });
+  poRows.push([]);
+  poRows.push(["","","","","","TOTAL", poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0), "",""]);
   const ws2 = XLSX.utils.aoa_to_sheet(poRows);
+  ws2["!cols"] = [{wch:12},{wch:10},{wch:38},{wch:14},{wch:24},{wch:16},{wch:18},{wch:12},{wch:30}];
+  for (let r=2; r<poRows.length; r++) {
+    const ref = XLSX.utils.encode_cell({r, c:6});
+    if (ws2[ref] && typeof ws2[ref].v === "number") ws2[ref].z = '#,##0.00';
+  }
   XLSX.utils.book_append_sheet(wb, ws2, "PO Entries");
-  XLSX.writeFile(wb, `${project.name}_TenderCost.xlsx`);
+
+  const grpRows = [["Group","Budget","Committed","Remaining","% Used"]];
+  GROUPS.forEach(g => {
+    const codes = ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
+    const b = codes.reduce((s,c)=>s+(parseFloat(tenderCosts[c])||0),0);
+    const c2 = poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+    if (b>0||c2>0) grpRows.push([g,b,c2,b-c2,b>0?c2/b:0]);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(grpRows), "By Group");
+
+  XLSX.writeFile(wb, `TenderCost_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
-// ─── Stat Card ────────────────────────────────────────────────────────────────
-function StatCard({ label, value, sub, color, icon }) {
-  return (
-    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 20px",display:"flex",flexDirection:"column",gap:6}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <span style={{fontSize:12,fontWeight:600,color:C.textMut,textTransform:"uppercase",letterSpacing:"0.05em"}}>{label}</span>
-        {icon && <span style={{fontSize:20}}>{icon}</span>}
-      </div>
-      <div style={{fontSize:22,fontWeight:700,color:color||C.text,letterSpacing:"-0.02em"}}>{value}</div>
-      {sub && <div style={{fontSize:12,color:C.textSub}}>{sub}</div>}
-    </div>
-  );
-}
+// ─── Root ─────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [screen,   setScreen]   = useState("home");
+  const [projects, setProjects] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [role,     setRole]     = useState(null);
+  const [tenderCosts, setTCosts]= useState({});
+  const [poEntries,   setPO]    = useState([]);
+  const [loaded,   setLoaded]   = useState(false);
+  const [newProjModal, setNewProjModal] = useState(false);
+  const [syncedAt,    setSyncedAt]    = useState(null);
+  const [syncing,     setSyncing]     = useState(false);
 
-// ─── Topbar ───────────────────────────────────────────────────────────────────
-function Topbar({ left, center, right, syncedAt, syncing }) {
+  const fetchProjectData = useCallback(async (id) => {
+    const t  = await sg(`tcs-tenders-${id}`);
+    const po = await sg(`tcs-po-${id}`);
+    setTCosts(t || {});
+    setPO(po || []);
+  }, []);
+
+  const fetchProjects = useCallback(async () => {
+    const list = await sg("tcs-projects");
+    if (list) setProjects(list);
+  }, []);
+
+  useEffect(() => {
+    (async () => { await fetchProjects(); setLoaded(true); setSyncedAt(new Date()); })();
+  }, [fetchProjects]);
+
+  useEffect(() => { if (!activeId) return; fetchProjectData(activeId); }, [activeId, fetchProjectData]);
+
+  useEffect(() => {
+    const channel = supabase.channel("kv_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, async (payload) => {
+        const key = payload.new?.key || payload.old?.key || "";
+        setSyncing(true);
+        if (key === "tcs-projects") await fetchProjects();
+        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}`)) await fetchProjectData(activeId);
+        setSyncedAt(new Date()); setSyncing(false);
+      }).subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [activeId, fetchProjects, fetchProjectData]);
+
+  const saveProjects = useCallback((list) => { setProjects(list); ss("tcs-projects", list).then(()=>setSyncedAt(new Date())); }, []);
+  const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
+  const savePO       = useCallback((po)   => { setPO(po);         ss(`tcs-po-${activeId}`, po).then(()=>setSyncedAt(new Date())); }, [activeId]);
+
+  const openProject = (id) => { setActiveId(id); setRole(null); setScreen("roleSelect"); };
+  const deleteProject = async (id) => {
+    if (!confirm("ลบโครงการนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
+    saveProjects(projects.filter(p => p.id !== id));
+    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`);
+  };
+  const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
+  const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
+
+  if (!loaded) return <Loader />;
+
+  const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
+    updateProject, onBack:()=>setScreen("roleSelect"), syncedAt, syncing };
+
   return (
-    <div style={{background:"#080f1e",borderBottom:`1px solid ${C.border}`,padding:"0 28px",height:60,display:"flex",alignItems:"center",gap:16,position:"sticky",top:0,zIndex:50}}>
-      {left}
-      {center && <div style={{flex:1,textAlign:"center"}}>{center}</div>}
-      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
-        {/* Sync status */}
-        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMut,background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"5px 10px"}}>
-          <span style={{width:7,height:7,borderRadius:"50%",background:syncing?C.amber:C.green,display:"inline-block",boxShadow:`0 0 6px ${syncing?C.amber:C.green}`,animation:syncing?"pulse 0.8s infinite":"none"}}/>
-          <span style={{color:syncing?C.amber:C.textSub}}>{syncing?"กำลัง sync...":`sync ${syncedAt?.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"})||""}`}</span>
-        </div>
-        {right}
-      </div>
-    </div>
+    <>
+      <style>{GLOBAL_CSS}</style>
+      {screen === "home" && (
+        <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
+          deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
+          syncedAt={syncedAt} syncing={syncing} />
+      )}
+      {screen === "roleSelect" && (
+        <RoleSelect project={activeProject} updateProject={updateProject}
+          onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
+      )}
+      {screen === "app" && role === "qs"          && <QSView          {...sharedProps} />}
+      {screen === "app" && role === "procurement" && <ProcurementView {...sharedProps} />}
+      {screen === "app" && role === "accounting"  && (
+        <AccountingView {...sharedProps} onExport={() => exportToExcel(activeProject, tenderCosts, poEntries)} />
+      )}
+    </>
   );
 }
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
 function Loader() {
   return (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:C.bg,flexDirection:"column",gap:16}}>
-      <div style={{width:36,height:36,border:`3px solid ${C.border}`,borderTop:`3px solid ${C.blue}`,borderRadius:"50%",animation:"pulse 0.8s ease-in-out infinite"}}/>
-      <div style={{fontSize:14,color:C.textSub}}>กำลังโหลด...</div>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:T.bg}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{width:40,height:40,border:`3px solid ${T.blueMid}`,borderTopColor:T.blue,borderRadius:"50%",animation:"spin 0.7s linear infinite",margin:"0 auto 14px"}}/>
+        <div style={{fontSize:13,color:T.textSecondary}}>กำลังโหลด...</div>
+      </div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+// ─── SyncBadge ────────────────────────────────────────────────────────────────
+function SyncBadge({ syncing, syncedAt }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(255,255,255,0.15)",backdropFilter:"blur(8px)",borderRadius:8,padding:"5px 12px",fontSize:11,color:"rgba(255,255,255,0.85)"}}>
+      <span style={{width:6,height:6,borderRadius:"50%",background:syncing?"#fbbf24":"#34d399",display:"inline-block",boxShadow:syncing?"0 0 6px #fbbf24":"0 0 6px #34d399",animation:syncing?"pulse 0.8s ease-in-out infinite":"none"}}/>
+      {syncing ? "กำลัง sync..." : syncedAt ? `sync ${syncedAt.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}` : ""}
+    </div>
+  );
+}
+
+// ─── StatCard ─────────────────────────────────────────────────────────────────
+function StatCard({ label, value, sub, color, icon, accent }) {
+  return (
+    <div style={{background:T.card,borderRadius:14,padding:"20px 22px",border:`1px solid ${T.cardBorder}`,position:"relative",overflow:"hidden"}}>
+      <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:color,borderRadius:"14px 14px 0 0"}}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+        <div style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{label}</div>
+        {icon && <div style={{width:34,height:34,borderRadius:10,background:accent||T.blueLight,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{icon}</div>}
+      </div>
+      <div style={{fontSize:22,fontWeight:700,color:T.textPrimary,letterSpacing:"-0.5px",fontFamily:"'JetBrains Mono',monospace"}}>{value}</div>
+      {sub && <div style={{fontSize:11,color:T.textMuted,marginTop:5}}>{sub}</div>}
     </div>
   );
 }
@@ -208,44 +331,49 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
   };
 
   return (
-    <div style={{minHeight:"100vh",background:C.bg}}>
-      <style>{CSS}</style>
-      <Topbar syncedAt={syncedAt} syncing={syncing}
-        left={
-          <div style={{display:"flex",alignItems:"center",gap:12}}>
-            <div style={{width:36,height:36,background:"linear-gradient(135deg,#3b82f6,#1d4ed8)",borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🏗</div>
-            <div>
-              <div style={{fontSize:15,fontWeight:700,color:C.text}}>Tender Cost System</div>
-              <div style={{fontSize:11,color:C.textMut}}>ระบบบริหารต้นทุนโครงการ</div>
-            </div>
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      {/* Header */}
+      <div style={{background:T.headerGrad,padding:"0 32px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px"}}>
+          <div>
+            <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600,marginBottom:4}}>TENDER COST SYSTEM</div>
+            <div style={{fontSize:22,fontWeight:800,color:"#fff",letterSpacing:"-0.5px"}}>ระบบบริหารต้นทุนโครงการ</div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · จัดซื้อ · บัญชี — Real-time sync</div>
           </div>
-        }
-        right={
-          <button onClick={()=>setNewProjModal(true)}
-            style={{background:C.blue,color:"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:13,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:16}}>＋</span> โครงการใหม่
-          </button>
-        }
-      />
-
-      <div style={{padding:"32px",maxWidth:1200,margin:"0 auto",animation:"fadeIn 0.3s ease"}}>
-        {projects.length === 0 ? (
-          <div style={{textAlign:"center",padding:"100px 0",color:C.textSub}}>
-            <div style={{fontSize:64,marginBottom:20}}>🏗️</div>
-            <div style={{fontSize:20,fontWeight:700,color:C.text,marginBottom:8}}>ยังไม่มีโครงการ</div>
-            <div style={{fontSize:14,color:C.textSub,marginBottom:28}}>เริ่มต้นด้วยการสร้างโครงการใหม่</div>
-            <button onClick={()=>setNewProjModal(true)}
-              style={{background:C.blue,color:"#fff",border:"none",borderRadius:10,padding:"12px 28px",fontSize:14,fontWeight:700,cursor:"pointer"}}>
-              + สร้างโครงการแรก
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
+            <button className="btn-primary" onClick={()=>setNewProjModal(true)}
+              style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:16,lineHeight:1}}>+</span> โครงการใหม่
             </button>
+          </div>
+        </div>
+        {/* Summary row */}
+        <div style={{display:"flex",gap:24,paddingBottom:20}}>
+          {[
+            {label:"โครงการทั้งหมด",value:projects.length,icon:"🏗"},
+            {label:"Active Projects",value:projects.length,icon:"📊"},
+          ].map(s=>(
+            <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.12)",borderRadius:10,padding:"8px 16px"}}>
+              <span style={{fontSize:16}}>{s.icon}</span>
+              <span style={{fontSize:13,color:"rgba(255,255,255,0.85)",fontWeight:600}}>{s.value} {s.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div style={{padding:"28px 32px"}}>
+        {projects.length === 0 ? (
+          <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
+            <div style={{fontSize:52,marginBottom:14}}>🏗</div>
+            <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>ยังไม่มีโครงการ</div>
+            <div style={{fontSize:13,marginBottom:20}}>กด "โครงการใหม่" เพื่อเริ่มต้น</div>
+            <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ สร้างโครงการแรก</button>
           </div>
         ) : (
           <>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
-              <div style={{fontSize:24,fontWeight:700,color:C.text}}>โครงการทั้งหมด
-                <span style={{marginLeft:10,fontSize:14,fontWeight:400,color:C.textMut,background:C.surface,border:`1px solid ${C.border}`,borderRadius:20,padding:"2px 10px"}}>{projects.length}</span>
-              </div>
-            </div>
+            <div style={{fontSize:12,color:T.textMuted,marginBottom:18,fontWeight:500}}>{projects.length} โครงการทั้งหมด</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
               {projects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={()=>deleteProject(p.id)} />)}
             </div>
@@ -253,39 +381,34 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
         )}
       </div>
 
-      {/* Modal */}
+      {/* New Project Modal */}
       {newProjModal && (
-        <div style={{position:"fixed",inset:0,background:"#000c",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,backdropFilter:"blur(4px)"}}
-          onClick={e=>{if(e.target===e.currentTarget)setNewProjModal(false)}}>
-          <div style={{background:"#131f35",border:`1px solid ${C.border}`,borderRadius:20,padding:32,width:500,maxWidth:"92vw",animation:"fadeIn 0.2s ease"}}>
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,backdropFilter:"blur(4px)"}}>
+          <div style={{background:T.card,borderRadius:20,padding:32,width:500,maxWidth:"90vw",boxShadow:"0 24px 60px rgba(0,0,0,0.15)",animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
-              <h3 style={{margin:0,fontSize:18,fontWeight:700,color:C.text}}>สร้างโครงการใหม่</h3>
-              <button onClick={()=>setNewProjModal(false)} style={{background:"none",border:"none",color:C.textMut,cursor:"pointer",fontSize:22,lineHeight:1}}>×</button>
+              <div>
+                <div style={{fontSize:16,fontWeight:700,color:T.textPrimary}}>สร้างโครงการใหม่</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>กรอกข้อมูลโครงการเพื่อเริ่มต้น</div>
+              </div>
+              <button onClick={()=>setNewProjModal(false)} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               {[
                 ["ชื่อโครงการ *","name","text","1/-1"],
-                ["ชื่อลูกค้า / Client","client","text","1/-1"],
+                ["ลูกค้า / Client","client","text","1/-1"],
                 ["พื้นที่รวม (ft²)","area","number","auto"],
                 ["จำนวน Panels","panels","number","auto"],
                 ["สกุลเงิน","currency","text","auto"],
               ].map(([label,key,type,col]) => (
-                <label key={key} style={{...G.label,gridColumn:col}}>
-                  <span style={G.labelText}>{label}</span>
-                  <input type={type} value={draft[key]} onChange={e=>setDraft(d=>({...d,[key]:e.target.value}))}
-                    style={G.input} onKeyDown={e=>key==="currency"&&e.key==="Enter"&&createProject()} />
+                <label key={key} style={{display:"flex",flexDirection:"column",gap:6,gridColumn:col}}>
+                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{label}</span>
+                  <input type={type} value={draft[key]} onChange={e=>setDraft(d=>({...d,[key]:e.target.value}))} className="input-base"/>
                 </label>
               ))}
             </div>
             <div style={{display:"flex",gap:10,marginTop:24}}>
-              <button onClick={createProject} disabled={!draft.name.trim()}
-                style={{flex:1,background:draft.name.trim()?C.blue:"#1e3a5f",color:"#fff",border:"none",borderRadius:10,padding:"12px 0",fontSize:14,fontWeight:700,cursor:draft.name.trim()?"pointer":"not-allowed",transition:"background 0.2s"}}>
-                สร้างโครงการ
-              </button>
-              <button onClick={()=>setNewProjModal(false)}
-                style={{padding:"12px 20px",background:"transparent",border:`1px solid ${C.border}`,borderRadius:10,color:C.textSub,fontSize:14,cursor:"pointer"}}>
-                ยกเลิก
-              </button>
+              <button onClick={createProject} disabled={!draft.name.trim()} className="btn-primary" style={{opacity:draft.name.trim()?1:0.5}}>สร้างโครงการ</button>
+              <button onClick={()=>setNewProjModal(false)} className="btn-ghost">ยกเลิก</button>
             </div>
           </div>
         </div>
@@ -297,113 +420,91 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
 function ProjectCard({ project, onOpen, onDelete }) {
   const age = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
   return (
-    <div className="card-hover" style={{...G.card,cursor:"pointer",transition:"all 0.2s",position:"relative"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
-        <div style={{width:42,height:42,borderRadius:12,background:"linear-gradient(135deg,#1d4ed8,#3b82f6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🏛️</div>
-        <button onClick={e=>{e.stopPropagation();if(confirm("ลบโครงการนี้?"))onDelete();}}
-          style={{background:C.bg,border:`1px solid ${C.border}`,color:C.textMut,cursor:"pointer",fontSize:13,padding:"4px 10px",borderRadius:8,transition:"all 0.15s"}}
-          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.red;e.currentTarget.style.color=C.red;}}
-          onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.color=C.textMut;}}>
-          ลบ
-        </button>
+    <div className="card-hover" style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
+      <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:T.headerGrad,borderRadius:"16px 16px 0 0"}}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,paddingTop:2}}>
+        <span style={{fontSize:10,letterSpacing:2,color:T.blue,fontWeight:700,textTransform:"uppercase"}}>PROJECT</span>
+        <button onClick={e=>{e.stopPropagation();onDelete();}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14,padding:4,borderRadius:6,transition:"color 0.15s"}}
+          onMouseEnter={e=>e.target.style.color="#ef4444"} onMouseLeave={e=>e.target.style.color=T.textMuted}>🗑</button>
       </div>
-      <div style={{fontSize:17,fontWeight:700,color:C.text,marginBottom:4,lineHeight:1.3}}>{project.name}</div>
-      {project.client && <div style={{fontSize:13,color:C.textSub,marginBottom:12}}>{project.client}</div>}
+      <div style={{fontSize:18,fontWeight:700,color:T.textPrimary,marginBottom:4,lineHeight:1.3}}>{project.name}</div>
+      {project.client && <div style={{fontSize:12,color:T.textSecondary,marginBottom:14}}>{project.client}</div>}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
-        {project.area   && <span style={{fontSize:11,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",color:C.textSub}}>{project.area} ft²</span>}
-        {project.panels && <span style={{fontSize:11,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",color:C.textSub}}>{project.panels} Panels</span>}
-        {project.currency && <span style={{fontSize:11,background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",color:C.textSub}}>{project.currency}</span>}
+        {project.area   && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.area} ft²</span>}
+        {project.panels && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.panels} Panels</span>}
+        {project.currency && <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
       </div>
-      <div style={{fontSize:11,color:C.textMut,marginBottom:16}}>{age === 0 ? "สร้างวันนี้" : `${age} วันที่แล้ว`}</div>
-      <button onClick={onOpen}
-        style={{width:"100%",background:C.blue,color:"#fff",border:"none",borderRadius:10,padding:"11px 0",fontSize:14,fontWeight:700,cursor:"pointer",transition:"opacity 0.15s"}}
-        onMouseEnter={e=>e.currentTarget.style.opacity="0.9"}
-        onMouseLeave={e=>e.currentTarget.style.opacity="1"}>
-        เปิดโครงการ →
-      </button>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{fontSize:11,color:T.textMuted}}>{age === 0 ? "สร้างวันนี้" : `${age} วันที่แล้ว`}</div>
+        <button onClick={onOpen} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>เปิดโครงการ →</button>
+      </div>
     </div>
   );
 }
 
 // ─── Role Select ──────────────────────────────────────────────────────────────
-function RoleSelect({ project, updateProject, onSelect, onBack, syncedAt, syncing }) {
+function RoleSelect({ project, updateProject, onSelect, onBack }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(project);
-  useEffect(()=>setDraft(project),[project]);
+  useEffect(() => setDraft(project), [project]);
 
-  const roles = [
-    {id:"qs",       icon:"📐",label:"QS",     sub:"Quantity Surveyor",  desc:"ลงประมาณการ Tender Cost ตาม Account Code", color:C.blue,  grad:"linear-gradient(135deg,#1d4ed8,#3b82f6)"},
-    {id:"procurement",icon:"📦",label:"จัดซื้อ",sub:"Procurement",       desc:"ออก PO ติดตามสถานะและมูลค่าจริงที่ซื้อ",   color:C.amber, grad:"linear-gradient(135deg,#92400e,#f59e0b)"},
-    {id:"accounting",icon:"📊",label:"บัญชี",  sub:"Accounting",         desc:"Dashboard ต้นทุน Budget vs Actual และ Export Excel", color:C.green, grad:"linear-gradient(135deg,#14532d,#22c55e)"},
+  const ROLES = [
+    {id:"qs",label:"QS",sub:"Quantity Surveyor",desc:"ลงราคา Tender Cost\nประมาณการต้นทุนโครงการ",color:T.blue,bg:T.blueLight,icon:"📐"},
+    {id:"procurement",label:"จัดซื้อ",sub:"Procurement",desc:"ลงราคาจริงที่ซื้อ + วันที่\nออก PO และติดตามสถานะ",color:"#d97706",bg:"#fffbeb",icon:"📦"},
+    {id:"accounting",label:"บัญชี",sub:"Accounting",desc:"Dashboard ต้นทุน\nBudget vs Actual + Export Excel",color:T.green,bg:T.greenBg,icon:"📊"},
   ];
 
   return (
-    <div style={{minHeight:"100vh",background:C.bg}}>
-      <style>{CSS}</style>
-      <Topbar syncedAt={syncedAt} syncing={syncing}
-        left={
-          <div style={{display:"flex",alignItems:"center",gap:12}}>
-            <button onClick={onBack} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.textSub,cursor:"pointer",padding:"6px 12px",fontSize:13,display:"flex",alignItems:"center",gap:6}}>
-              ← กลับ
-            </button>
-            <div style={{width:1,height:24,background:C.border}}/>
-            <div>
-              <div style={{fontSize:15,fontWeight:700,color:C.text}}>{project.name}</div>
-              {project.client&&<div style={{fontSize:11,color:C.textMut}}>{project.client}</div>}
-            </div>
-          </div>
-        }
-      />
-
-      <div style={{padding:"40px 32px",maxWidth:900,margin:"0 auto",animation:"fadeIn 0.3s ease"}}>
-        {/* Project info bar */}
-        <div style={{...G.card,marginBottom:28,display:"flex",alignItems:"center",gap:20,flexWrap:"wrap"}}>
-          <div style={{flex:1}}>
-            <div style={{fontSize:20,fontWeight:700,color:C.text,marginBottom:4}}>{project.name}</div>
-            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-              {project.client&&<span style={{fontSize:13,color:C.textSub}}>👤 {project.client}</span>}
-              {project.area&&<span style={{fontSize:13,color:C.textSub}}>📐 {project.area} ft²</span>}
-              {project.panels&&<span style={{fontSize:13,color:C.textSub}}>🪟 {project.panels} Panels</span>}
-              {project.currency&&<span style={{fontSize:13,color:C.textSub}}>💱 {project.currency}</span>}
-            </div>
-          </div>
-          <button onClick={()=>setEditing(e=>!e)}
-            style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 16px",color:C.textSub,fontSize:13,cursor:"pointer"}}>
-            {editing?"ยกเลิก":"✏️ แก้ไขข้อมูล"}
-          </button>
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
+        <button onClick={onBack} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 12px",fontSize:18}}>←</button>
+        <div>
+          <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
+          <div style={{fontSize:16,fontWeight:700,color:"#fff",marginTop:2}}>{project.name}</div>
         </div>
+        {project.area && (
+          <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+            {[`${project.area} ft²`,`${project.panels} Panels`].map(v=>(
+              <span key={v} style={{background:"rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.9)",fontSize:12,padding:"4px 12px",borderRadius:8,fontWeight:500}}>{v}</span>
+            ))}
+          </div>
+        )}
+      </div>
 
-        {editing && (
-          <div style={{...G.card,marginBottom:24,animation:"fadeIn 0.2s ease"}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:16}}>
-              {[["ชื่อโครงการ","name","text"],["ลูกค้า","client","text"],["สกุลเงิน","currency","text"],["พื้นที่ (ft²)","area","number"],["Panels","panels","number"]].map(([l,k,t])=>(
-                <label key={k} style={G.label}>
-                  <span style={G.labelText}>{l}</span>
-                  <input type={t} value={draft[k]||""} onChange={e=>setDraft(d=>({...d,[k]:e.target.value}))} style={G.input}/>
+      <div style={{padding:"32px"}}>
+        {editing ? (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,marginBottom:28,maxWidth:640}}>
+            <div style={{fontSize:14,fontWeight:600,color:T.textPrimary,marginBottom:16}}>แก้ไขข้อมูลโครงการ</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+              {[["ชื่อโครงการ","name","text"],["ลูกค้า","client","text"],["สกุลเงิน","currency","text"],["พื้นที่ (ft²)","area","number"],["Panels","panels","number"]].map(([l,k,t]) => (
+                <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
+                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
+                  <input type={t} value={draft[k]||""} onChange={e=>setDraft(d=>({...d,[k]:e.target.value}))} className="input-base"/>
                 </label>
               ))}
             </div>
-            <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>{updateProject(draft);setEditing(false);}}
-                style={{background:C.blue,color:"#fff",border:"none",borderRadius:8,padding:"10px 24px",fontSize:13,fontWeight:700,cursor:"pointer"}}>บันทึก</button>
-              <button onClick={()=>setEditing(false)}
-                style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 20px",color:C.textSub,fontSize:13,cursor:"pointer"}}>ยกเลิก</button>
+            <div style={{display:"flex",gap:10,marginTop:16}}>
+              <button className="btn-primary" onClick={()=>{updateProject(draft);setEditing(false);}}>บันทึก</button>
+              <button className="btn-ghost" onClick={()=>setEditing(false)}>ยกเลิก</button>
             </div>
           </div>
+        ) : (
+          <button onClick={()=>setEditing(true)} className="btn-ghost" style={{marginBottom:24,fontSize:12}}>✏️ แก้ไขข้อมูลโครงการ</button>
         )}
 
-        <div style={{fontSize:13,color:C.textSub,marginBottom:16}}>เลือก Role เพื่อเข้าใช้งาน</div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20}}>
-          {roles.map(r=>(
+        <div style={{fontSize:13,color:T.textSecondary,marginBottom:20,fontWeight:500}}>เลือก Role การทำงาน</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20,maxWidth:800}}>
+          {ROLES.map(r => (
             <button key={r.id} onClick={()=>onSelect(r.id)} className="card-hover"
-              style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:18,padding:"28px 24px",cursor:"pointer",textAlign:"left",fontFamily:"inherit",display:"flex",flexDirection:"column",gap:14,transition:"all 0.2s"}}>
-              <div style={{width:52,height:52,borderRadius:14,background:r.grad,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24}}>{r.icon}</div>
+              style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:18,padding:"28px 24px",cursor:"pointer",textAlign:"left",display:"flex",flexDirection:"column",gap:12,position:"relative",overflow:"hidden"}}>
+              <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:r.color}}/>
+              <div style={{width:44,height:44,borderRadius:12,background:r.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>{r.icon}</div>
               <div>
-                <div style={{fontSize:22,fontWeight:800,color:r.color,letterSpacing:"-0.02em"}}>{r.label}</div>
-                <div style={{fontSize:12,color:C.textMut,marginTop:2,fontWeight:500}}>{r.sub}</div>
+                <div style={{fontSize:20,fontWeight:700,color:r.color}}>{r.label}</div>
+                <div style={{fontSize:11,color:T.textMuted,marginTop:2,letterSpacing:0.5}}>{r.sub}</div>
               </div>
-              <p style={{margin:0,fontSize:13,color:C.textSub,lineHeight:1.6}}>{r.desc}</p>
-              <div style={{fontSize:13,color:r.color,fontWeight:700,display:"flex",alignItems:"center",gap:4}}>เข้าใช้งาน <span>→</span></div>
+              <p style={{margin:0,fontSize:12,color:T.textSecondary,lineHeight:1.7,whiteSpace:"pre-line"}}>{r.desc}</p>
+              <div style={{display:"flex",alignItems:"center",gap:4,fontSize:12,color:r.color,fontWeight:600,marginTop:4}}>เข้าใช้งาน <span>→</span></div>
             </button>
           ))}
         </div>
@@ -412,31 +513,31 @@ function RoleSelect({ project, updateProject, onSelect, onBack, syncedAt, syncin
   );
 }
 
-// ─── Shell (inner layout for QS/Procurement/Accounting) ──────────────────────
-function Shell({ role, color, label, icon, project, onBack, children, syncedAt, syncing }) {
+// ─── Shell ────────────────────────────────────────────────────────────────────
+function Shell({ role, color, project, onBack, children, syncedAt, syncing }) {
+  const labels = {qs:"QS · Quantity Surveyor",procurement:"จัดซื้อ · Procurement",accounting:"บัญชี · Accounting"};
+  const gradients = {
+    qs:          "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
+    procurement: "linear-gradient(135deg, #78350f 0%, #d97706 100%)",
+    accounting:  "linear-gradient(135deg, #064e3b 0%, #10b981 100%)",
+  };
   return (
-    <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column"}}>
-      <style>{CSS}</style>
-      <Topbar syncedAt={syncedAt} syncing={syncing}
-        left={
-          <div style={{display:"flex",alignItems:"center",gap:12}}>
-            <button onClick={onBack} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.textSub,cursor:"pointer",padding:"6px 12px",fontSize:13}}>← กลับ</button>
-            <div style={{width:1,height:24,background:C.border}}/>
-            <div style={{width:32,height:32,borderRadius:8,background:color+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{icon}</div>
-            <div>
-              <div style={{fontSize:14,fontWeight:700,color:color}}>{label}</div>
-              <div style={{fontSize:11,color:C.textMut}}>{project.name}</div>
-            </div>
+    <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
+      <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14}}>
+        <button onClick={onBack} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 12px",fontSize:18}}>←</button>
+        <div style={{flex:1}}>
+          <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
+          <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
+        </div>
+        <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
+        {project.area && (
+          <div style={{display:"flex",gap:8}}>
+            {[`${project.area} ft²`,`${project.panels} Panels`].map(v=>(
+              <span key={v} style={{background:"rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.85)",fontSize:11,padding:"3px 10px",borderRadius:6}}>{v}</span>
+            ))}
           </div>
-        }
-        right={
-          project.area && (
-            <div style={{fontSize:11,color:C.textMut,textAlign:"right"}}>
-              <div>{project.area} ft²  ·  {project.panels} Panels</div>
-            </div>
-          )
-        }
-      />
+        )}
+      </div>
       <div style={{flex:1,overflow:"auto"}}>{children}</div>
     </div>
   );
@@ -449,87 +550,79 @@ function QSView({ project, tenderCosts, saveTenders, onBack, syncedAt, syncing }
   const [search, setSearch] = useState("");
   const [saved,  setSaved]  = useState(false);
 
-  useEffect(()=>setDraft({...tenderCosts}),[tenderCosts]);
+  useEffect(() => setDraft({...tenderCosts}), [tenderCosts]);
 
   const base  = Object.values(draft).reduce((s,v)=>s+(parseFloat(v)||0),0);
   const adj3  = base * 0.03;
   const total = base + adj3;
 
   const filtered = ACCOUNTS.filter(a =>
-    (filter==="All"||a.group===filter) &&
-    (a.name.toLowerCase().includes(search.toLowerCase())||a.code.includes(search))
+    (filter==="All" || a.group===filter) &&
+    (a.name.toLowerCase().includes(search.toLowerCase()) || a.code.includes(search))
   );
 
   const handleSave = () => {
     const clean = {};
-    Object.entries(draft).forEach(([k,v])=>{if(v!==""&&!isNaN(v)&&parseFloat(v)>0)clean[k]=parseFloat(v);});
+    Object.entries(draft).forEach(([k,v]) => { if(v!==""&&!isNaN(v)&&parseFloat(v)>0) clean[k]=parseFloat(v); });
     saveTenders(clean);
-    setSaved(true); setTimeout(()=>setSaved(false),2500);
+    setSaved(true); setTimeout(()=>setSaved(false),2000);
   };
 
   return (
-    <Shell role="qs" color={C.blue} label="QS · Quantity Surveyor" icon="📐" project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
-      <div style={{padding:"28px 32px",maxWidth:1200,margin:"0 auto",animation:"fadeIn 0.3s ease"}}>
+    <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
+      <div style={{padding:"24px 28px"}}>
         {/* Stats */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:28}}>
-          <StatCard label="Tender Cost รวม"   value={fmt(base)}  color={C.blue}  icon="📋" sub={`${Object.values(draft).filter(v=>parseFloat(v)>0).length} รายการที่มีค่า`}/>
-          <StatCard label="Spare & Wastage 3%" value={fmt(adj3)}  color={C.amber} icon="📦"/>
-          <StatCard label="Total Adjusted"     value={fmt(total)} color={C.green} icon="✅"/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:24}}>
+          <StatCard label="Tender Cost รวม" value={fmt(base)} sub="Base cost ทั้งหมด" color={T.blue} icon="📐" accent={T.blueLight}/>
+          <StatCard label="Spare & Wastage 3%" value={fmt(adj3)} sub="เผื่อสูญหาย" color={T.amber} icon="⚙️" accent={T.amberBg}/>
+          <StatCard label="Total Adjusted" value={fmt(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
         </div>
 
-        {/* Toolbar */}
-        <div style={{...G.card,marginBottom:20,padding:"16px 20px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-          <div style={{position:"relative",flex:"0 0 220px"}}>
-            <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:C.textMut,fontSize:14}}>🔍</span>
-            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ค้นหา Account..."
-              style={{...G.input,paddingLeft:36}}/>
-          </div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",flex:1}}>
+        {/* Filters + Save */}
+        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
+            className="input-base" style={{width:240}}/>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
             {["All",...GROUPS].map(g=>(
               <button key={g} onClick={()=>setFilter(g)}
-                style={{background:filter===g?C.blue+"22":"transparent",border:`1px solid ${filter===g?C.blue:C.border}`,
-                        borderRadius:8,padding:"6px 12px",color:filter===g?C.blue:C.textSub,fontSize:12,cursor:"pointer",fontWeight:filter===g?600:400,transition:"all 0.15s"}}>
-                {g}
-              </button>
+                style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
             ))}
           </div>
-          <button onClick={handleSave}
-            style={{background:saved?"#052e16":C.blue,color:saved?C.green:"#fff",border:`1px solid ${saved?C.green:C.blue}`,borderRadius:10,padding:"10px 24px",fontSize:14,fontWeight:700,cursor:"pointer",transition:"all 0.3s",whiteSpace:"nowrap"}}>
-            {saved?"✓ บันทึกแล้ว":"💾 บันทึก"}
+          <button onClick={handleSave} className="btn-primary"
+            style={{background:saved?T.green:T.blue,minWidth:140}}>
+            {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
           </button>
         </div>
 
         {/* Table */}
-        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
-          <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
             <thead>
-              <tr style={{background:"#0f1e35"}}>
+              <tr style={{background:"#f8fafc"}}>
                 {["Acc. Code","Group","Account Name","Tender Cost (THB)"].map(h=>(
-                  <th key={h} style={{padding:"14px 18px",textAlign:h.includes("Cost")?"right":"left",color:C.textMut,fontWeight:600,fontSize:11,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                  <th key={h} style={{padding:"11px 16px",textAlign:h.includes("Cost")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.map((a,i)=>(
-                <tr key={a.code} className="row-hover" style={{borderBottom:`1px solid ${C.borderL}`,background:i%2===0?"transparent":"#16213a"}}>
-                  <td style={{padding:"12px 18px",color:C.blue,fontFamily:"monospace",fontSize:12,fontWeight:600}}>{a.code}</td>
-                  <td style={{padding:"12px 18px"}}>
-                    <span style={{background:C.bg,border:`1px solid ${C.border}`,color:C.textSub,fontSize:11,padding:"3px 10px",borderRadius:20}}>{a.group}</span>
+                <tr key={a.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
+                  <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.code}</td>
+                  <td style={{padding:"10px 16px"}}>
+                    <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
                   </td>
-                  <td style={{padding:"12px 18px",color:C.text,fontSize:13}}>{a.name}</td>
-                  <td style={{padding:"10px 18px",textAlign:"right"}}>
+                  <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
+                  <td style={{padding:"8px 16px",textAlign:"right"}}>
                     <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))}
-                      placeholder="0.00"
-                      style={{background:C.bg,border:`1px solid ${parseFloat(draft[a.code])>0?C.blue+"55":C.border}`,borderRadius:8,padding:"8px 12px",
-                              color:C.text,fontSize:13,fontFamily:"monospace",outline:"none",width:160,textAlign:"right",transition:"border-color 0.2s"}}/>
+                      placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
                   </td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
-              <tr style={{background:"#0f1e35"}}>
-                <td colSpan={3} style={{padding:"12px 18px",color:C.textMut,fontSize:12}}>{filtered.length} รายการ</td>
-                <td style={{padding:"12px 18px",textAlign:"right",color:C.blue,fontFamily:"monospace",fontWeight:700,fontSize:15}}>
+              <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+                <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
+                <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                   {fmt(filtered.reduce((s,a)=>s+(parseFloat(draft[a.code])||0),0))}
                 </td>
               </tr>
@@ -552,15 +645,11 @@ function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, sync
   const tenderTotal = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
   const totalComm   = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
-  const remaining   = tenderTotal - totalComm;
-  const pctUsed     = tenderTotal>0?(totalComm/tenderTotal*100):0;
 
   const submit = () => {
     if (!form.code||!form.amount) return;
-    const updated = editId
-      ? poEntries.map(p=>p.id===editId?{...form,id:editId}:p)
-      : [...poEntries,{...form,id:uid()}];
-    savePO(updated); setEditId(null);
+    savePO(editId ? poEntries.map(p=>p.id===editId?{...form,id:editId}:p) : [...poEntries,{...form,id:uid()}]);
+    setEditId(null);
     setForm({code:"",supplier:"",poNumber:"",amount:"",date:new Date().toISOString().slice(0,10),status:"PO Issued",notes:""});
     setView("list");
   };
@@ -571,161 +660,122 @@ function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, sync
       (search===""||[acc?.name,p.supplier,p.poNumber].join(" ").toLowerCase().includes(search.toLowerCase()));
   });
 
-  const inputStyle = {...G.input};
-
   return (
-    <Shell role="procurement" color={C.amber} label="จัดซื้อ · Procurement" icon="📦" project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
-      <div style={{padding:"28px 32px",maxWidth:1200,margin:"0 auto",animation:"fadeIn 0.3s ease"}}>
-
-        {/* Stats */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:28}}>
-          <StatCard label="Budget (QS)"    value={fmt(tenderTotal)} color={C.blue}  icon="📋" sub="Tender Cost"/>
-          <StatCard label="Committed (PO)" value={fmt(totalComm)}   color={C.amber} icon="📦" sub={`${poEntries.length} รายการ · ${pctUsed.toFixed(1)}% ของงบ`}/>
-          <StatCard label="ชำระแล้ว"        value={fmt(totalPaid)}   color={C.green} icon="✅" sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`}/>
-          <StatCard label="คงเหลือ"         value={fmt(remaining)}   color={remaining<0?C.red:C.textSub} icon={remaining<0?"⚠️":"💰"} sub={remaining<0?"เกินงบ!":"ยังอยู่ในงบ"}/>
+    <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
+      <div style={{padding:"24px 28px"}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
+          <StatCard label="Budget (QS)" value={fmt(tenderTotal)} sub="Tender Cost รวม" color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
+          <StatCard label="ชำระแล้ว" value={fmt(totalPaid)} sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
+          <StatCard label="Budget คงเหลือ" value={fmt(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
         </div>
 
-        {/* Progress bar */}
-        <div style={{...G.card,marginBottom:24,padding:"16px 20px"}}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-            <span style={{fontSize:13,fontWeight:600,color:C.textSub}}>Budget Utilization</span>
-            <span style={{fontSize:13,fontWeight:700,color:pctUsed>100?C.red:pctUsed>80?C.amber:C.green,fontFamily:"monospace"}}>{pctUsed.toFixed(1)}%</span>
-          </div>
-          <div style={{background:C.bg,borderRadius:99,height:10,overflow:"hidden"}}>
-            <div style={{width:`${Math.min(pctUsed,100)}%`,background:pctUsed>100?C.red:pctUsed>80?C.amber:C.green,height:"100%",borderRadius:99,transition:"width 0.6s ease"}}/>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:11,color:C.textMut}}>
-            <span>0</span><span>{fmt(tenderTotal)}</span>
-          </div>
-        </div>
-
-        {/* Form */}
         {view==="add" ? (
-          <div style={{...G.card,marginBottom:24,animation:"fadeIn 0.2s ease"}}>
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:28,maxWidth:680,animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-              <h3 style={{margin:0,fontSize:16,fontWeight:700,color:C.text}}>{editId?"✏️ แก้ไขรายการ PO":"➕ เพิ่ม PO ใหม่"}</h3>
-              <button onClick={()=>{setView("list");setEditId(null);}} style={{background:"none",border:"none",color:C.textMut,cursor:"pointer",fontSize:22}}>×</button>
+              <div>
+                <div style={{fontSize:15,fontWeight:700,color:T.textPrimary}}>{editId?"แก้ไขรายการ PO":"เพิ่ม PO ใหม่"}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>กรอกข้อมูลคำสั่งซื้อ</div>
+              </div>
+              <button onClick={()=>{setView("list");setEditId(null);}} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-              <label style={{...G.label,gridColumn:"1/-1"}}>
-                <span style={G.labelText}>หมวดต้นทุน *</span>
-                <select value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))} style={inputStyle}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+              <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>หมวดต้นทุน *</span>
+                <select value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))} className="input-base">
                   <option value="">— เลือก Account Code —</option>
                   {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
                 </select>
               </label>
               {[["ชื่อ Supplier *","supplier","text"],["เลข PO","poNumber","text"],["มูลค่า (THB) *","amount","number"],["วันที่","date","date"]].map(([l,k,t])=>(
-                <label key={k} style={G.label}>
-                  <span style={G.labelText}>{l}</span>
-                  <input type={t} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))} style={inputStyle}/>
+                <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
+                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
+                  <input type={t} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))} className="input-base"/>
                 </label>
               ))}
-              <label style={G.label}>
-                <span style={G.labelText}>สถานะ</span>
-                <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} style={inputStyle}>
+              <label style={{display:"flex",flexDirection:"column",gap:6}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>สถานะ</span>
+                <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} className="input-base">
                   {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
               </label>
-              <label style={{...G.label,gridColumn:"1/-1"}}>
-                <span style={G.labelText}>หมายเหตุ</span>
-                <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} style={{...inputStyle,resize:"vertical"}}/>
+              <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>หมายเหตุ</span>
+                <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} className="input-base" style={{resize:"vertical"}}/>
               </label>
             </div>
             <div style={{display:"flex",gap:10,marginTop:20}}>
-              <button onClick={submit} disabled={!form.code||!form.amount}
-                style={{background:form.code&&form.amount?C.amber:"#292001",color:form.code&&form.amount?"#000":C.textMut,border:"none",borderRadius:10,padding:"11px 28px",fontSize:14,fontWeight:700,cursor:form.code&&form.amount?"pointer":"not-allowed"}}>
-                {editId?"อัปเดต PO":"➕ เพิ่ม PO"}
-              </button>
-              <button onClick={()=>{setView("list");setEditId(null);}}
-                style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 20px",color:C.textSub,fontSize:14,cursor:"pointer"}}>
-                ยกเลิก
-              </button>
+              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editId?"อัปเดต":"เพิ่ม PO"}</button>
+              <button onClick={()=>{setView("list");setEditId(null);}} className="btn-ghost">ยกเลิก</button>
             </div>
           </div>
         ) : (
-          /* List toolbar */
-          <div style={{...G.card,marginBottom:20,padding:"14px 18px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-            <div style={{position:"relative",flex:"0 0 220px"}}>
-              <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:C.textMut}}>🔍</span>
-              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ค้นหา supplier, PO..."
-                style={{...G.input,paddingLeft:36}}/>
+          <>
+            <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา supplier, PO..."
+                className="input-base" style={{width:220}}/>
+              <div style={{display:"flex",gap:5,flex:1,flexWrap:"wrap"}}>
+                {["All",...PO_STATUS].map(s=>(
+                  <button key={s} onClick={()=>setFilter(s)}
+                    style={{background:filter===s?T.amber:"transparent",border:`1.5px solid ${filter===s?T.amber:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===s?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{s}</button>
+                ))}
+              </div>
+              <button onClick={()=>setView("add")} className="btn-primary" style={{background:T.amber}}>+ เพิ่ม PO</button>
             </div>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",flex:1}}>
-              {["All",...PO_STATUS].map(s=>(
-                <button key={s} onClick={()=>setFilter(s)}
-                  style={{background:filter===s?(STATUS_CLR[s]||C.amber)+"22":"transparent",
-                          border:`1px solid ${filter===s?(STATUS_CLR[s]||C.amber):C.border}`,
-                          borderRadius:8,padding:"6px 12px",color:filter===s?(STATUS_CLR[s]||C.amber):C.textSub,
-                          fontSize:12,cursor:"pointer",fontWeight:filter===s?600:400,transition:"all 0.15s"}}>
-                  {s}
-                </button>
-              ))}
-            </div>
-            <button onClick={()=>setView("add")}
-              style={{background:C.amber,color:"#000",border:"none",borderRadius:10,padding:"10px 20px",fontSize:13,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-              ＋ เพิ่ม PO
-            </button>
-          </div>
-        )}
 
-        {/* PO Table */}
-        {view==="list" && (
-          filtered.length===0 ? (
-            <div style={{...G.card,textAlign:"center",padding:"60px 0",color:C.textSub}}>
-              <div style={{fontSize:40,marginBottom:12}}>📋</div>
-              <div style={{fontSize:15,fontWeight:600,color:C.text,marginBottom:8}}>ยังไม่มีรายการ PO</div>
-              <div style={{fontSize:13}}>กด "＋ เพิ่ม PO" เพื่อเริ่มต้น</div>
-            </div>
-          ) : (
-            <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
-              <table style={{width:"100%",borderCollapse:"collapse"}}>
-                <thead>
-                  <tr style={{background:"#0f1e35"}}>
-                    {["วันที่","Account","Supplier","PO No.","มูลค่า (THB)","สถานะ",""].map(h=>(
-                      <th key={h} style={{padding:"13px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:C.textMut,fontWeight:600,fontSize:11,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((p,i)=>{
-                    const acc=ACCOUNTS.find(a=>a.code===p.code);
-                    return (
-                      <tr key={p.id} className="row-hover" style={{borderBottom:`1px solid ${C.borderL}`,background:i%2===0?"transparent":"#16213a"}}>
-                        <td style={{padding:"12px 16px",color:C.textMut,fontSize:12,fontFamily:"monospace"}}>{p.date}</td>
-                        <td style={{padding:"12px 16px"}}>
-                          <div style={{color:C.blue,fontSize:11,fontFamily:"monospace",fontWeight:600}}>{p.code}</div>
-                          <div style={{color:C.textSub,fontSize:12,marginTop:2,maxWidth:180,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acc?.name}</div>
-                        </td>
-                        <td style={{padding:"12px 16px",color:C.text,fontSize:13,fontWeight:500}}>{p.supplier}</td>
-                        <td style={{padding:"12px 16px",color:C.textSub,fontFamily:"monospace",fontSize:12}}>{p.poNumber||"—"}</td>
-                        <td style={{padding:"12px 16px",textAlign:"right",color:C.text,fontFamily:"monospace",fontWeight:700,fontSize:14}}>{fmt(p.amount)}</td>
-                        <td style={{padding:"12px 16px"}}>
-                          <span style={{background:STATUS_BG[p.status],color:STATUS_CLR[p.status],fontSize:11,padding:"4px 12px",borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[p.status]}44`}}>
-                            {p.status}
-                          </span>
-                        </td>
-                        <td style={{padding:"12px 16px",whiteSpace:"nowrap"}}>
-                          <button onClick={()=>{setForm({...p});setEditId(p.id);setView("add");}}
-                            style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:6,color:C.textSub,cursor:"pointer",padding:"4px 10px",fontSize:12,marginRight:6}}>แก้ไข</button>
-                          <button onClick={()=>{if(confirm("ลบรายการนี้?"))savePO(poEntries.filter(x=>x.id!==p.id));}}
-                            style={{background:"transparent",border:`1px solid ${C.red}44`,borderRadius:6,color:C.red,cursor:"pointer",padding:"4px 10px",fontSize:12}}>ลบ</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr style={{background:"#0f1e35"}}>
-                    <td colSpan={4} style={{padding:"12px 16px",color:C.textMut,fontSize:12}}>{filtered.length} รายการ</td>
-                    <td style={{padding:"12px 16px",textAlign:"right",color:C.amber,fontFamily:"monospace",fontWeight:700,fontSize:15}}>
-                      {fmt(filtered.reduce((s,p)=>s+(parseFloat(p.amount)||0),0))}
-                    </td>
-                    <td colSpan={2}/>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          )
+            {filtered.length===0 ? (
+              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+                <div style={{fontSize:32,marginBottom:12}}>📋</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>ยังไม่มีรายการ</div>
+                <div style={{fontSize:12}}>กด "+ เพิ่ม PO" เพื่อเริ่มต้น</div>
+              </div>
+            ) : (
+              <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                  <thead>
+                    <tr style={{background:"#f8fafc"}}>
+                      {["วันที่","Account","Supplier","PO No.","มูลค่า (THB)","สถานะ",""].map(h=>(
+                        <th key={h} style={{padding:"11px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((p,i)=>{
+                      const acc=ACCOUNTS.find(a=>a.code===p.code);
+                      return (
+                        <tr key={p.id} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
+                          <td style={{padding:"10px 16px",color:T.textMuted,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
+                          <td style={{padding:"10px 16px"}}>
+                            <div style={{color:T.blue,fontSize:11,fontFamily:"'JetBrains Mono',monospace",fontWeight:500}}>{p.code}</div>
+                            <div style={{color:T.textSecondary,fontSize:11,marginTop:2}}>{acc?.name}</div>
+                          </td>
+                          <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{p.supplier}</td>
+                          <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{p.poNumber||"—"}</td>
+                          <td style={{padding:"10px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(p.amount)}</td>
+                          <td style={{padding:"10px 16px"}}>
+                            <span style={{background:STATUS_BG[p.status],color:STATUS_CLR[p.status],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{p.status}</span>
+                          </td>
+                          <td style={{padding:"10px 16px",whiteSpace:"nowrap"}}>
+                            <button onClick={()=>{setForm({...p});setEditId(p.id);setView("add");}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:"2px 6px",borderRadius:6,marginRight:4}}>✏️</button>
+                            <button onClick={()=>savePO(poEntries.filter(x=>x.id!==p.id))} style={{background:"none",border:"none",color:T.red,cursor:"pointer",padding:"2px 6px",borderRadius:6}}>🗑</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+                      <td colSpan={4} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
+                      <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
+                        {fmt(filtered.reduce((s,p)=>s+(parseFloat(p.amount)||0),0))}
+                      </td>
+                      <td colSpan={2}/>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </>
         )}
       </div>
     </Shell>
@@ -744,109 +794,93 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
 
   const groupData = GROUPS.map((g,i)=>{
     const codes=ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
-    const budget=codes.reduce((s,c)=>s+(parseFloat(tenderCosts[c])||0),0);
-    const committed=poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
-    return {group:g,budget,committed,color:GRP_COLORS[i%GRP_COLORS.length]};
+    return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(tenderCosts[c])||0),0),committed:poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0),color:GRP_COLORS[i%GRP_COLORS.length]};
   }).filter(g=>g.budget>0||g.committed>0);
 
   const accountData = ACCOUNTS.map(a=>{
     const budget=parseFloat(tenderCosts[a.code])||0;
     const pos=poEntries.filter(p=>p.code===a.code);
-    const committed=pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
-    return {...a,budget,committed,pos,over:committed>budget&&budget>0};
+    return {...a,budget,committed:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0),pos,over:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0)>budget&&budget>0};
   }).filter(a=>a.budget>0||a.pos.length>0);
 
-  const pieData = PO_STATUS.map(s=>({
-    name:s, value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+(parseFloat(p.amount)||0),0), color:STATUS_CLR[s]
-  })).filter(d=>d.value>0);
+  const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+(parseFloat(p.amount)||0),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
-  const CT = ({active,payload})=>{
-    if(!active||!payload?.length) return null;
+  const CT = ({active,payload}) => {
+    if (!active||!payload?.length) return null;
     return (
-      <div style={{background:"#0f1e30",border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:12}}>
-        <div style={{color:C.textSub,marginBottom:6,fontWeight:600}}>{payload[0]?.payload?.group}</div>
-        {payload.map(p=><div key={p.name} style={{color:p.fill||p.color,marginBottom:2}}>{p.name}: <b>{fmt(p.value)}</b></div>)}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"10px 14px",fontSize:12,boxShadow:"0 4px 16px rgba(0,0,0,0.1)"}}>
+        <div style={{color:T.textMuted,marginBottom:4,fontWeight:600}}>{payload[0]?.payload?.group}</div>
+        {payload.map(p=><div key={p.name} style={{color:p.fill||p.color,fontFamily:"'JetBrains Mono',monospace"}}>{p.name}: {fmt(p.value)}</div>)}
       </div>
     );
   };
 
   return (
-    <Shell role="accounting" color={C.green} label="บัญชี · Accounting" icon="📊" project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
-      <div style={{padding:"28px 32px",maxWidth:1400,margin:"0 auto",animation:"fadeIn 0.3s ease"}}>
-
-        {/* Tab bar */}
+    <Shell role="accounting" color={T.green} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing}>
+      <div style={{padding:"24px 28px"}}>
+        {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:24,alignItems:"center"}}>
           {[["dashboard","📊 Dashboard"],["detail","📋 รายละเอียด"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)}
-              style={{background:view===v?C.green+"22":"transparent",border:`1px solid ${view===v?C.green:C.border}`,
-                      borderRadius:10,padding:"9px 20px",color:view===v?C.green:C.textSub,
-                      fontSize:13,cursor:"pointer",fontWeight:view===v?700:400,transition:"all 0.15s"}}>
-              {l}
-            </button>
+              style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
-          <button onClick={onExport}
-            style={{marginLeft:"auto",background:"#052e16",border:`1px solid ${C.green}`,borderRadius:10,padding:"9px 20px",
-                    color:C.green,fontSize:13,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+          <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
             ⬇️ Export Excel
           </button>
         </div>
 
         {view==="dashboard" ? (
           <>
-            {/* KPI Cards */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
-              <StatCard label="งบประมาณ (QS)"      value={fmt(tenderTotal)}   color={C.blue}   icon="📋" sub="Tender Cost"/>
-              <StatCard label="Committed (PO รวม)"  value={fmt(totalComm)}     color={C.amber}  icon="📦" sub={`${pct.toFixed(1)}% ของงบ`}/>
-              <StatCard label="Invoiced"             value={fmt(totalInvoiced)} color={C.purple} icon="🧾" sub="รอจ่าย + จ่ายแล้ว"/>
-              <StatCard label="ชำระแล้ว (Paid)"      value={fmt(totalPaid)}     color={C.green}  icon="✅" sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`}/>
+              <StatCard label="งบประมาณ (QS)" value={fmt(tenderTotal)} sub="Tender Cost" color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label="Invoiced" value={fmt(totalInvoiced)} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
+              <StatCard label="ชำระแล้ว (Paid)" value={fmt(totalPaid)} sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
 
             {/* Progress */}
-            <div style={{...G.card,marginBottom:24,padding:"20px 24px"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                <span style={{fontSize:14,fontWeight:700,color:C.text}}>Budget Utilization</span>
-                <div style={{display:"flex",gap:16,fontSize:13}}>
-                  <span style={{color:C.textSub}}>ใช้ไป <b style={{color:C.amber}}>{pct.toFixed(1)}%</b></span>
-                  <span style={{color:tenderTotal-totalComm<0?C.red:C.green,fontWeight:700}}>
-                    {tenderTotal-totalComm<0?"⚠ เกินงบ ":"✓ คงเหลือ "}{fmt(Math.abs(tenderTotal-totalComm))}
-                  </span>
-                </div>
+            <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22,marginBottom:20}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontSize:13,color:T.textPrimary,fontWeight:600}}>Budget Utilization</span>
+                <span style={{fontSize:13,color:tenderTotal-totalComm<0?T.red:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>
+                  {tenderTotal-totalComm<0?"เกินงบ ":"คงเหลือ "}{fmt(Math.abs(tenderTotal-totalComm))}
+                </span>
               </div>
-              <div style={{background:C.bg,borderRadius:99,height:14,overflow:"hidden"}}>
-                <div style={{width:`${Math.min(pct,100)}%`,background:pct>100?C.red:pct>80?C.amber:C.green,
-                             height:"100%",borderRadius:99,transition:"width 0.6s ease",
-                             boxShadow:`0 0 8px ${pct>100?C.red:pct>80?C.amber:C.green}66`}}/>
+              <div style={{background:"#f1f5f9",borderRadius:99,height:10,overflow:"hidden"}}>
+                <div style={{width:`${Math.min(pct,100)}%`,background:pct>100?T.red:pct>80?T.amber:T.green,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:7,fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>
+                <span>0</span><span style={{fontWeight:600,color:pct>100?T.red:T.textSecondary}}>{pct.toFixed(1)}%</span><span>{fmt(tenderTotal)}</span>
               </div>
             </div>
 
-            {/* Charts */}
-            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:20}}>
-              <div style={{...G.card}}>
-                <div style={{fontSize:14,fontWeight:700,color:C.text,marginBottom:20}}>📊 Budget vs Committed (ตาม Group)</div>
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+              <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22}}>
+                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>Budget vs Committed ตาม Group</p>
                 {groupData.length===0
-                  ? <div style={{textAlign:"center",padding:"50px 0",color:C.textSub}}>QS ยังไม่ได้ลง Tender Cost</div>
-                  : <ResponsiveContainer width="100%" height={280}>
-                      <BarChart data={groupData} margin={{left:0,right:0,top:4,bottom:48}}>
-                        <XAxis dataKey="group" tick={{fill:C.textMut,fontSize:10}} angle={-30} textAnchor="end" interval={0}/>
-                        <YAxis tick={{fill:C.textMut,fontSize:10}} tickFormatter={fmtK} width={68}/>
+                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>QS ยังไม่ได้ลง Tender Cost</div>
+                  : <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={groupData} margin={{left:0,right:0,top:4,bottom:44}}>
+                        <XAxis dataKey="group" tick={{fill:T.textMuted,fontSize:10}} angle={-30} textAnchor="end" interval={0}/>
+                        <YAxis tick={{fill:T.textMuted,fontSize:10}} tickFormatter={fmtK} width={60}/>
                         <Tooltip content={<CT/>}/>
-                        <Bar dataKey="budget" name="Budget" fill={C.blue} radius={[6,6,0,0]}/>
-                        <Bar dataKey="committed" name="Committed" fill={C.amber} radius={[6,6,0,0]}/>
+                        <Bar dataKey="budget" name="Budget" fill={T.blue} radius={[5,5,0,0]}/>
+                        <Bar dataKey="committed" name="Committed" fill={T.amber} radius={[5,5,0,0]}/>
                       </BarChart>
                     </ResponsiveContainer>
                 }
               </div>
-              <div style={{...G.card}}>
-                <div style={{fontSize:14,fontWeight:700,color:C.text,marginBottom:20}}>🥧 สถานะ PO</div>
+              <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22}}>
+                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>สถานะ PO</p>
                 {pieData.length===0
-                  ? <div style={{textAlign:"center",padding:"50px 0",color:C.textSub}}>ยังไม่มี PO</div>
-                  : <ResponsiveContainer width="100%" height={240}>
+                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ยังไม่มี PO</div>
+                  : <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
-                        <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="45%" outerRadius={80} innerRadius={40}>
+                        <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={78} innerRadius={36}>
                           {pieData.map((d,i)=><Cell key={i} fill={d.color}/>)}
                         </Pie>
-                        <Tooltip formatter={v=>fmt(v)} contentStyle={{background:"#0f1e30",border:`1px solid ${C.border}`,borderRadius:10,fontSize:12}}/>
-                        <Legend iconType="circle" wrapperStyle={{fontSize:11,color:C.textSub}}/>
+                        <Tooltip formatter={v=>fmt(v)} contentStyle={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:11,boxShadow:"0 4px 16px rgba(0,0,0,0.08)"}}/>
+                        <Legend iconType="circle" wrapperStyle={{fontSize:11,color:T.textSecondary}}/>
                       </PieChart>
                     </ResponsiveContainer>
                 }
@@ -854,14 +888,12 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
             </div>
           </>
         ) : (
-          /* Detail Table */
-          <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
-            <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
               <thead>
-                <tr style={{background:"#0f1e35"}}>
-                  {["Acc. Code","Account Name","Group","Budget (QS)","Committed (PO)","% Used","สถานะ"].map(h=>(
-                    <th key={h} style={{padding:"13px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(h)?"right":"left",
-                                        color:C.textMut,fontWeight:600,fontSize:11,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                <tr style={{background:"#f8fafc"}}>
+                  {["Acc. Code","Account Name","Group","Budget (QS)","Committed (PO)","% Used",""].map(h=>(
+                    <th key={h} style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(h)?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -869,34 +901,32 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
                 {accountData.map((a,i)=>{
                   const p2=a.budget>0?(a.committed/a.budget*100):a.committed>0?999:0;
                   return (
-                    <tr key={a.code} className="row-hover" style={{background:a.over?"#1f0808":i%2===0?"transparent":"#16213a",borderBottom:`1px solid ${C.borderL}`}}>
-                      <td style={{padding:"12px 16px",color:C.blue,fontFamily:"monospace",fontSize:12,fontWeight:600}}>{a.code}</td>
-                      <td style={{padding:"12px 16px",color:C.text,fontSize:13}}>{a.name}</td>
-                      <td style={{padding:"12px 16px"}}><span style={{background:C.bg,border:`1px solid ${C.border}`,color:C.textSub,fontSize:11,padding:"3px 10px",borderRadius:20}}>{a.group}</span></td>
-                      <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"monospace",color:C.blue,fontWeight:600}}>{a.budget>0?fmt(a.budget):"—"}</td>
-                      <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"monospace",color:a.over?C.red:C.amber,fontWeight:a.over?700:400}}>{a.committed>0?fmt(a.committed):"—"}</td>
-                      <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"monospace",
-                                  color:p2>100?C.red:p2>80?C.amber:C.green,fontSize:12,fontWeight:600}}>
+                    <tr key={a.code} style={{background:a.over?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
+                      <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.code}</td>
+                      <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
+                      <td style={{padding:"10px 16px"}}>
+                        <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                      </td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:p2>100?T.red:p2>80?T.amber:T.green,fontSize:12,fontWeight:600}}>
                         {a.budget>0?`${p2.toFixed(1)}%`:a.committed>0?"No Budget":"—"}
                       </td>
-                      <td style={{padding:"12px 16px"}}>
+                      <td style={{padding:"10px 16px"}}>
                         {a.over
-                          ? <span style={{background:"#ef444422",color:C.red,fontSize:11,padding:"4px 12px",borderRadius:20,fontWeight:700,border:`1px solid ${C.red}44`}}>⚠ เกินงบ</span>
-                          : a.committed>0
-                            ? <span style={{background:"#22c55e22",color:C.green,fontSize:11,padding:"4px 12px",borderRadius:20,fontWeight:600,border:`1px solid ${C.green}44`}}>✓ OK</span>
-                            : a.budget>0
-                              ? <span style={{background:C.surface,color:C.textMut,fontSize:11,padding:"4px 12px",borderRadius:20,border:`1px solid ${C.border}`}}>ยังไม่ PO</span>
-                              : null}
+                          ? <span style={{background:T.redBg,color:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>⚠ เกินงบ</span>
+                          : a.committed>0 ? <span style={{background:T.greenBg,color:T.green,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>OK</span>
+                          : a.budget>0 ? <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:20}}>ยังไม่ PO</span> : null}
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
               <tfoot>
-                <tr style={{background:"#0f1e35"}}>
-                  <td colSpan={3} style={{padding:"12px 16px",color:C.textMut,fontSize:12}}>{accountData.length} รายการ</td>
-                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"monospace",color:C.blue,fontWeight:700}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}</td>
-                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"monospace",color:C.amber,fontWeight:700}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}</td>
+                <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+                  <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{accountData.length} รายการ</td>
+                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}</td>
+                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.amber,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}</td>
                   <td colSpan={2}/>
                 </tr>
               </tfoot>
@@ -905,78 +935,5 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
         )}
       </div>
     </Shell>
-  );
-}
-
-// ─── App Root ─────────────────────────────────────────────────────────────────
-export default function App() {
-  const [projects,   setProjects]  = useState([]);
-  const [screen,     setScreen]    = useState("home");
-  const [activeId,   setActiveId]  = useState(null);
-  const [role,       setRole]      = useState(null);
-  const [tenderCosts,setTCosts]    = useState({});
-  const [poEntries,  setPO]        = useState([]);
-  const [loaded,     setLoaded]    = useState(false);
-  const [newProjModal,setNewProjModal] = useState(false);
-  const [syncedAt,   setSyncedAt]  = useState(null);
-  const [syncing,    setSyncing]   = useState(false);
-
-  const fetchProjectData = useCallback(async id=>{
-    const t=await sg(`tcs-tenders-${id}`); const po=await sg(`tcs-po-${id}`);
-    setTCosts(t||{}); setPO(po||[]);
-  },[]);
-  const fetchProjects = useCallback(async()=>{
-    const list=await sg("tcs-projects"); if(list)setProjects(list);
-  },[]);
-
-  useEffect(()=>{(async()=>{await fetchProjects();setLoaded(true);setSyncedAt(new Date());})();},[fetchProjects]);
-  useEffect(()=>{if(!activeId)return;fetchProjectData(activeId);},[activeId,fetchProjectData]);
-
-  useEffect(()=>{
-    const channel=supabase.channel("kv_changes")
-      .on("postgres_changes",{event:"*",schema:"public",table:"kv_store"},async payload=>{
-        const key=payload.new?.key||payload.old?.key||"";
-        setSyncing(true);
-        if(key==="tcs-projects") await fetchProjects();
-        else if(activeId&&(key===`tcs-tenders-${activeId}`||key===`tcs-po-${activeId}`)) await fetchProjectData(activeId);
-        setSyncedAt(new Date()); setSyncing(false);
-      }).subscribe();
-    return ()=>supabase.removeChannel(channel);
-  },[activeId,fetchProjects,fetchProjectData]);
-
-  const saveProjects = useCallback(list=>{setProjects(list);ss("tcs-projects",list).then(()=>setSyncedAt(new Date()));},[]);
-  const saveTenders  = useCallback(t   =>{setTCosts(t);    ss(`tcs-tenders-${activeId}`,t).then(()=>setSyncedAt(new Date()));},[activeId]);
-  const savePO       = useCallback(po  =>{setPO(po);        ss(`tcs-po-${activeId}`,po).then(()=>setSyncedAt(new Date()));},[activeId]);
-
-  const openProject  = id=>{setActiveId(id);setRole(null);setTCosts({});setPO([]);setScreen("roleSelect");};
-  const updateProject= p =>{const list=projects.map(x=>x.id===p.id?p:x);saveProjects(list);};
-  const deleteProject= async id=>{
-    const list=projects.filter(p=>p.id!==id);
-    saveProjects(list); await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`);
-    if(activeId===id){setActiveId(null);setScreen("home");}
-  };
-
-  const activeProject = projects.find(p=>p.id===activeId)||{};
-  const sharedProps   = {project:activeProject,tenderCosts,poEntries,saveTenders,savePO,updateProject,onBack:()=>setScreen("roleSelect"),syncedAt,syncing};
-
-  if(!loaded) return <Loader/>;
-
-  return (
-    <>
-      <style>{CSS}</style>
-      {screen==="home" && (
-        <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
-          deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
-          syncedAt={syncedAt} syncing={syncing}/>
-      )}
-      {screen==="roleSelect" && (
-        <RoleSelect project={activeProject} updateProject={updateProject}
-          onSelect={r=>{setRole(r);setScreen("work");}} onBack={()=>setScreen("home")}
-          syncedAt={syncedAt} syncing={syncing}/>
-      )}
-      {screen==="work" && role==="qs"          && <QSView          {...sharedProps} saveTenders={saveTenders}/>}
-      {screen==="work" && role==="procurement" && <ProcurementView {...sharedProps}/>}
-      {screen==="work" && role==="accounting"  && <AccountingView  {...sharedProps} onExport={()=>exportToExcel(activeProject,tenderCosts,poEntries)}/>}
-    </>
   );
 }
