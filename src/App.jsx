@@ -1242,6 +1242,13 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     ...sortedMonths.map(m => ({ label: monthShortLabel(m), cumulative: cumulativeLive(m), added: monthTotalLive(m) })),
   ];
 
+  // "ราคาเดิม (Baseline)" should reflect the running total as of the month
+  // BEFORE the one currently selected — not the fixed original baseline —
+  // so it moves forward as prior months get their additions saved.
+  const priorMonths      = sortedMonths.filter(m => m < month);
+  const prevMonthLabel   = priorMonths.length ? monthShortLabel(priorMonths[priorMonths.length-1]) : "เริ่มต้น";
+  const baselineForMonth = baseTotal + priorMonths.reduce((s,m)=>s+monthTotalLive(m),0);
+
   const filtered = allRows.filter(r =>
     (filter==="All" || r.group===filter) &&
     (r.name.toLowerCase().includes(search.toLowerCase()) || r.code.includes(search))
@@ -1318,7 +1325,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Stats for selected month */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:16,marginBottom:20}}>
-        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baseTotal)} sub="รวมทุก Account Code" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label="เพิ่มเดือนนี้" value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
         <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
         <StatCard label="รวมทั้งหมด" value={fmt(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
