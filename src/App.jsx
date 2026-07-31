@@ -328,6 +328,7 @@ export default function App() {
   const [role,     setRole]     = useState(null);
   const [tenderCosts, setTCosts]= useState({});
   const [additions,   setAdditions]  = useState({});
+  const [columns,     setColumns]    = useState([]); // [{id,month,label}] — one or more columns per calendar month
   const [extraItems,  setExtraItems] = useState([]);
   const [hiddenAccounts, setHiddenAccounts] = useState([]); // codes of fixed Acc. Codes QS has removed for this project
   const [poEntries,   setPO]    = useState([]);
@@ -348,9 +349,25 @@ export default function App() {
     const ad = await sg(`tcs-additions-${id}`);
     const ex = await sg(`tcs-extra-${id}`);
     const hid = await sg(`tcs-hidden-${id}`);
+    let cols = await sg(`tcs-columns-${id}`);
+    const adSafe = ad || {};
+    if (!cols || cols.length === 0) {
+      // Migration: older projects only ever had one column per calendar month,
+      // keyed directly by "YYYY-MM" inside `additions`. Derive a columns list
+      // from those keys so existing data keeps working, then persist it so
+      // future multi-column-per-month edits have somewhere to live.
+      const legacyMonths = Object.keys(adSafe).sort();
+      if (legacyMonths.length) {
+        cols = legacyMonths.map(m => ({ id: m, month: m, label: new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"}) }));
+        await ss(`tcs-columns-${id}`, cols);
+      } else {
+        cols = [];
+      }
+    }
     setTCosts(t || {});
     setPO(po || []);
-    setAdditions(ad || {});
+    setAdditions(adSafe);
+    setColumns(cols);
     setExtraItems(ex || []);
     setHiddenAccounts(hid || []);
   }, []);
@@ -372,7 +389,7 @@ export default function App() {
         const key = payload.new?.key || payload.old?.key || "";
         setSyncing(true);
         if (key === "tcs-projects") await fetchProjects();
-        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}`)) await fetchProjectData(activeId);
+        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-columns-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}`)) await fetchProjectData(activeId);
         setSyncedAt(new Date()); setSyncing(false);
       }).subscribe();
     return () => supabase.removeChannel(channel);
@@ -381,6 +398,7 @@ export default function App() {
   const saveProjects = useCallback((list) => { setProjects(list); ss("tcs-projects", list).then(()=>setSyncedAt(new Date())); }, []);
   const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const saveAdditions= useCallback((a)    => { setAdditions(a);   ss(`tcs-additions-${activeId}`, a).then(()=>setSyncedAt(new Date())); }, [activeId]);
+  const saveColumns  = useCallback((c)    => { setColumns(c);     ss(`tcs-columns-${activeId}`, c).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const saveExtraItems=useCallback((ex)   => { setExtraItems(ex); ss(`tcs-extra-${activeId}`, ex).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const saveHiddenAccounts=useCallback((h)=> { setHiddenAccounts(h); ss(`tcs-hidden-${activeId}`, h).then(()=>setSyncedAt(new Date())); }, [activeId]);
   const savePO       = useCallback((po)   => { setPO(po);         ss(`tcs-po-${activeId}`, po).then(()=>setSyncedAt(new Date())); }, [activeId]);
@@ -393,7 +411,7 @@ export default function App() {
   const deleteProject = async (id) => {
     if (!confirm("ลบโครงการนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
     saveProjects(projects.filter(p => p.id !== id));
-    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`);
+    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-columns-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`);
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
@@ -414,7 +432,7 @@ export default function App() {
   const effectiveRole = session.role === "admin" ? role : session.role;
 
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
-    additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
+    additions, saveAdditions, columns, saveColumns, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
     updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
     syncedAt, syncing, session, onLogout: handleLogout };
 
@@ -956,7 +974,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout }) {
+function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, columns, saveColumns, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
@@ -1009,6 +1027,7 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
                          onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
                          hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
+                         columns={columns} saveColumns={saveColumns}
                          extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
                          hiddenAccounts={hiddenAccounts} />}
     </Shell>
@@ -1314,26 +1333,38 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
-function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts }) {
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, columns, saveColumns, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts }) {
   const thisMonth = new Date().toISOString().slice(0,7);
-  const months = Object.keys(additions).sort();
-  const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
-  const [newMonth, setNewMonth] = useState("");
+  const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
+
+  // Each "column" is one entry period (usually a month, but a project may have
+  // several CCs/rounds within the same calendar month — each gets its own
+  // column, ordered chronologically by `month` with same-month columns kept
+  // in the order they were added). `columns` is the persisted prop; if a
+  // project has none yet we work off a single not-yet-saved default so the
+  // UI always has something to show, and it gets persisted on first save.
+  const colsOrDefault = columns.length ? columns : [{ id: thisMonth, month: thisMonth, label: monthShortLabel(thisMonth) }];
+  const posOf = (id) => colsOrDefault.findIndex(c => c.id === id);
+
+  const [colId, setColId] = useState(colsOrDefault[colsOrDefault.length-1].id);
+  const [newColMonth, setNewColMonth] = useState("");
+  const [newColLabel, setNewColLabel] = useState("");
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "before" | "add" | "cum" | null
   const [sortDir, setSortDir] = useState(1);
-  const [draftAdd, setDraftAdd] = useState({...(additions[month]||{})});
+  const [draftAdd, setDraftAdd] = useState({...(additions[colId]||{})});
   const [saved, setSaved] = useState(false);
   const [addExtraOpen, setAddExtraOpen] = useState(false);
   const [extraDraft, setExtraDraft] = useState({ code:"", name:"", group:GROUPS[0] });
   const [subFor, setSubFor] = useState(null);   // code of row currently adding a sub-item
   const [subName, setSubName] = useState("");
   const [rowCollapsed, setRowCollapsed] = useState({}); // code -> true means sub-items hidden
-  const [gridFor, setGridFor] = useState(null); // code of row currently showing the monthly grid modal
 
-  useEffect(() => { setDraftAdd({...(additions[month]||{})}); }, [month, additions]);
-  useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
+  useEffect(() => { setDraftAdd({...(additions[colId]||{})}); }, [colId, additions]);
+  useEffect(() => { if (!colsOrDefault.some(c=>c.id===colId)) setColId(colsOrDefault[colsOrDefault.length-1].id); }, [columns]); // eslint-disable-line
+
+  const selectedCol = colsOrDefault.find(c=>c.id===colId) || colsOrDefault[colsOrDefault.length-1];
 
   // All rows = original 70 account codes + standalone extra items.
   // Sub-items (parentCode set) can be added right here for a monthly
@@ -1345,15 +1376,15 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   extraItems.forEach(e => { if (e.parentCode && e.scope === "monthly") (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e); });
   const childrenOf = (code) => subItemsByParent[code] || [];
 
-  // A row's monthly figure is the sum of its sub-items' figures when it has
+  // A row's per-column figure is the sum of its sub-items' figures when it has
   // any (mirrors the Baseline tab), otherwise its own entered value.
-  const rowMonthValue = (code, m, draft) => {
+  const rowMonthValue = (code, id, draft) => {
     const kids = childrenOf(code);
-    if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[m])?.[k.code])||0),0);
-    return parseFloat((draft||additions[m])?.[code]) || 0;
+    if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[id])?.[k.code])||0),0);
+    return parseFloat((draft||additions[id])?.[code]) || 0;
   };
 
-  const monthTotal = (m) => allRows.reduce((s,r) => s + rowMonthValue(r.code, m), 0);
+  const colTotal = (id) => allRows.reduce((s,r) => s + rowMonthValue(r.code, id), 0);
 
   // Sum only top-level rows (accounts + standalone extras). Do NOT sum
   // Object.values(tenderCosts) directly — sub-item codes (EX-xxxx with a
@@ -1361,34 +1392,32 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // is already rolled up into their parent's value, so a wholesale sum
   // double-counts every account that has sub-items.
   const baseTotal = allRows.reduce((s,r) => s + (parseFloat(tenderCosts[r.code]) || 0), 0);
-  const thisMonthAdd = allRows.reduce((s,r) => s + rowMonthValue(r.code, month, draftAdd), 0);
-  const cumulativeSoFar = months.filter(m=>m<month).reduce((s,m)=>s+monthTotal(m),0) + thisMonthAdd + baseTotal;
+  const thisColAdd = allRows.reduce((s,r) => s + rowMonthValue(r.code, colId, draftAdd), 0);
+  const priorCols = colsOrDefault.slice(0, posOf(colId));
+  const cumulativeSoFar = priorCols.reduce((s,c)=>s+colTotal(c.id),0) + thisColAdd + baseTotal;
 
-  // "Live" versions that use the currently-edited draft for the selected month
+  // "Live" versions that use the currently-edited draft for the selected column
   // (instead of the last-saved value) so the top summary updates as you type.
-  const monthTotalLive = (m) => m===month ? thisMonthAdd : monthTotal(m);
-  const sortedMonths = months.length ? months : [thisMonth];
-  const cumulativeLive = (uptoMonth) => baseTotal + sortedMonths.filter(m=>m<=uptoMonth).reduce((s,m)=>s+monthTotalLive(m),0);
-  const grandTotal = cumulativeLive(sortedMonths[sortedMonths.length-1]);
-  const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
+  const colTotalLive = (id) => id===colId ? thisColAdd : colTotal(id);
+  const cumulativeLive = (uptoId) => baseTotal + colsOrDefault.slice(0, posOf(uptoId)+1).reduce((s,c)=>s+colTotalLive(c.id),0);
+  const grandTotal = cumulativeLive(colsOrDefault[colsOrDefault.length-1].id);
   // Each bar = one stacked column: "previous" (running total up to the
-  // month before) + "added" (that month's increment) in a different color,
+  // column before) + "added" (that column's increment) in a different color,
   // so growth is visible within a single bar instead of a smooth area line.
   const chartData = [
     { label:"เริ่มต้น", cumulative: baseTotal, previous: baseTotal, added: 0 },
-    ...sortedMonths.map(m => {
-      const added = monthTotalLive(m);
-      const cumulative = cumulativeLive(m);
-      return { label: monthShortLabel(m), cumulative, previous: cumulative - added, added };
+    ...colsOrDefault.map(c => {
+      const added = colTotalLive(c.id);
+      const cumulative = cumulativeLive(c.id);
+      return { label: c.label, cumulative, previous: cumulative - added, added };
     }),
   ];
 
-  // "ราคาเดิม (Baseline)" should reflect the running total as of the month
+  // "ราคาเดิม (Baseline)" should reflect the running total as of the column
   // BEFORE the one currently selected — not the fixed original baseline —
-  // so it moves forward as prior months get their additions saved.
-  const priorMonths      = sortedMonths.filter(m => m < month);
-  const prevMonthLabel   = priorMonths.length ? monthShortLabel(priorMonths[priorMonths.length-1]) : "เริ่มต้น";
-  const baselineForMonth = baseTotal + priorMonths.reduce((s,m)=>s+monthTotalLive(m),0);
+  // so it moves forward as prior columns get their additions saved.
+  const prevColLabel     = priorCols.length ? priorCols[priorCols.length-1].label : "เริ่มต้น";
+  const baselineForMonth = baseTotal + priorCols.reduce((s,c)=>s+colTotalLive(c.id),0);
 
   const filtered = allRows.filter(r => {
     if (filter!=="All" && r.group!==filter) return false;
@@ -1399,9 +1428,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   });
 
   // Mirrors the per-row figures computed inline in the table body, so header
-  // sorting can order rows by the same "ยอดก่อนหน้า / เพิ่มเดือนนี้ / รวมสะสม" values shown.
-  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + (parseFloat(tenderCosts[r.code])||0);
-  const cumOf = (r) => cumBeforeOf(r) + rowMonthValue(r.code, month, draftAdd);
+  // sorting can order rows by the same "ยอดก่อนหน้า / เพิ่มงวดนี้ / รวมสะสม" values shown.
+  const cumBeforeOf = (r) => priorCols.reduce((s,c)=>s+(parseFloat(additions[c.id]?.[r.code])||0),0) + (parseFloat(tenderCosts[r.code])||0);
+  const cumOf = (r) => cumBeforeOf(r) + rowMonthValue(r.code, colId, draftAdd);
 
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => -d);
@@ -1416,7 +1445,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       else if (sortKey === "group")  { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
       else if (sortKey === "name")   { av = a.name; bv = b.name; }
       else if (sortKey === "before") { av = cumBeforeOf(a); bv = cumBeforeOf(b); }
-      else if (sortKey === "add")    { av = rowMonthValue(a.code, month, draftAdd); bv = rowMonthValue(b.code, month, draftAdd); }
+      else if (sortKey === "add")    { av = rowMonthValue(a.code, colId, draftAdd); bv = rowMonthValue(b.code, colId, draftAdd); }
       else                           { av = cumOf(a); bv = cumOf(b); }
       if (typeof av === "string") return av.localeCompare(bv) * sortDir;
       return (av - bv) * sortDir;
@@ -1424,10 +1453,36 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     return arr;
   })();
 
-  const handleAddMonth = () => {
-    if (!newMonth || months.includes(newMonth)) return;
-    saveAdditions({ ...additions, [newMonth]: additions[newMonth] || {} });
-    setMonth(newMonth); setNewMonth("");
+  // Adds a new column. Unlike the old single-column-per-month picker, this no
+  // longer refuses a month that's already in use — a project can have several
+  // CCs/rounds landing in the same calendar month, each as its own column. The
+  // new column is inserted right after any existing columns for the same (or
+  // earlier) month, so the overall chronological order stays intact.
+  const handleAddColumn = () => {
+    const m = newColMonth || thisMonth;
+    const label = newColLabel.trim() || monthShortLabel(m);
+    const id = uid();
+    let insertAt = 0;
+    colsOrDefault.forEach((c,i) => { if (c.month <= m) insertAt = i+1; });
+    const next = [...colsOrDefault];
+    next.splice(insertAt, 0, { id, month: m, label });
+    saveColumns(next);
+    setColId(id); setNewColMonth(""); setNewColLabel("");
+  };
+
+  const handleRenameColumn = (c) => {
+    const label = window.prompt("ชื่อคอลัมน์ (เช่น CC#17)", c.label);
+    if (label === null || !label.trim()) return;
+    saveColumns(colsOrDefault.map(x => x.id===c.id ? {...x, label:label.trim()} : x));
+  };
+
+  const handleDeleteColumn = (id) => {
+    if (!confirm("ลบคอลัมน์นี้? ยอดเงินที่กรอกไว้ในคอลัมน์นี้จะหายไปด้วย")) return;
+    const next = colsOrDefault.filter(c => c.id !== id);
+    saveColumns(next);
+    const nextAdd = {...additions}; delete nextAdd[id];
+    saveAdditions(nextAdd);
+    if (id === colId) setColId(next.length ? next[next.length-1].id : thisMonth);
   };
 
   const handleSave = () => {
@@ -1438,7 +1493,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     });
     const clean = {};
     Object.entries(merged).forEach(([k,v]) => { if(v!==""&&!isNaN(v)&&parseFloat(v)!==0) clean[k]=parseFloat(v); });
-    saveAdditions({ ...additions, [month]: clean });
+    saveAdditions({ ...additions, [colId]: clean });
+    if (!columns.some(c=>c.id===colId)) saveColumns([...columns, selectedCol]); // persist a not-yet-saved default column on first save
     setSaved(true); setTimeout(()=>setSaved(false),2000);
   };
 
@@ -1486,34 +1542,48 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </ResponsiveContainer>
       </div>
 
-      {/* Month picker — horizontal chips, click any to switch, "+" chip to add a new month */}
+      {/* Column picker — horizontal chips, click any to switch. A month can have
+          more than one column (e.g. several CCs in the same month) — "+" adds
+          one, ✏️ renames it, ✕ deletes it. */}
       <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,marginBottom:16}}>
-        {sortedMonths.map(m=>{
-          const active = m===month;
-          const add = monthTotalLive(m);
+        {colsOrDefault.map(c=>{
+          const active = c.id===colId;
+          const add = colTotalLive(c.id);
           return (
-            <button key={m} onClick={()=>setMonth(m)}
-              style={{flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
-                background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
-              <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{monthShortLabel(m)}</div>
-              <div style={{fontSize:15,fontWeight:700,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
-              <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} เดือนนี้</div>
-            </button>
+            <div key={c.id} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>setColId(c.id)}
+                style={{textAlign:"left",padding:"10px 30px 10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
+                  background:active?T.blue:T.card,cursor:"pointer",minWidth:150,transition:"all 0.15s"}}>
+                <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{c.label}</div>
+                <div style={{fontSize:15,fontWeight:700,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(c.id))}</div>
+                <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} งวดนี้</div>
+              </button>
+              <div style={{position:"absolute",top:4,right:4,display:"flex",flexDirection:"column",gap:2}}>
+                <span onClick={(e)=>{e.stopPropagation();handleRenameColumn(c);}} title="เปลี่ยนชื่อคอลัมน์"
+                  style={{cursor:"pointer",fontSize:10,color:active?"#dbeafe":T.textMuted}}>✏️</span>
+                <span onClick={(e)=>{e.stopPropagation();handleDeleteColumn(c.id);}} title="ลบคอลัมน์นี้"
+                  style={{cursor:"pointer",fontSize:10,color:active?"#fecaca":T.red}}>✕</span>
+              </div>
+            </div>
           );
         })}
-        <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.cardBorder}`}}>
-          <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
-            style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
-          <button className="btn-ghost" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap"}} onClick={handleAddMonth}>+ เพิ่มเดือน</button>
+        <div style={{flexShrink:0,display:"flex",flexDirection:"column",gap:6,padding:"8px 12px",borderRadius:12,border:`1.5px dashed ${T.cardBorder}`}}>
+          <div style={{display:"flex",gap:6}}>
+            <input type="month" value={newColMonth} onChange={e=>setNewColMonth(e.target.value)} className="input-base"
+              style={{width:118,fontSize:12,padding:"6px 8px"}}/>
+            <input value={newColLabel} onChange={e=>setNewColLabel(e.target.value)} placeholder="ชื่อ เช่น CC#17" className="input-base"
+              style={{width:100,fontSize:12,padding:"6px 8px"}} onKeyDown={e=>e.key==="Enter"&&handleAddColumn()}/>
+          </div>
+          <button className="btn-ghost" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap"}} onClick={handleAddColumn}>+ เพิ่มคอลัมน์</button>
         </div>
       </div>
 
-      {/* Stats for selected month */}
+      {/* Stats for selected column */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:16,marginBottom:20}}>
-        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="เพิ่มเดือนนี้" value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
-        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
-        <StatCard label="รวมทั้งหมด" value={fmt(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
+        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baselineForMonth)} sub={`สะสมถึง ${prevColLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="เพิ่มในคอลัมน์นี้" value={fmt(thisColAdd)} sub={`${selectedCol.label} (${new Date(selectedCol.month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})})`} color={T.amber} icon="➕" accent={T.amberBg}/>
+        <StatCard label="รวมสะสมถึงคอลัมน์นี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงคอลัมน์ที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="รวมทั้งหมด" value={fmt(grandTotal)} sub="เดิม + ทุกคอลัมน์ที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
       </div>
 
       {/* Toolbar: search + group filter + actions */}
@@ -1528,7 +1598,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </div>
         <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)}>+ งานพิเศษ</button>
         <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
-          {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
+          {saved?"✓ บันทึกแล้ว":`บันทึกรายการคอลัมน์นี้`}
         </button>
       </div>
 
@@ -1563,7 +1633,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                 {label:"Account Name", key:"name", align:"left"},
                 {label:"📐 ยอดก่อนหน้า", key:"before", align:"right"},
                 {label:"+", key:null, align:"center", width:20},
-                {label:"➕ เพิ่มเดือนนี้", key:"add", align:"right"},
+                {label:"➕ เพิ่มในคอลัมน์นี้", key:"add", align:"right"},
                 {label:"=", key:null, align:"center", width:20},
                 {label:"✅ รวมสะสม", key:"cum", align:"right"},
                 {label:"", key:null, width:20},
@@ -1581,8 +1651,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               const hasKids = kids.length > 0;
               const isCollapsed = hasKids && rowCollapsed[r.code];
               const baseVal = parseFloat(tenderCosts[r.code]) || 0;
-              const cumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + baseVal;
-              const thisVal = rowMonthValue(r.code, month, draftAdd);
+              const cumBefore = priorCols.reduce((s,c)=>s+(parseFloat(additions[c.id]?.[r.code])||0),0) + baseVal;
+              const thisVal = rowMonthValue(r.code, colId, draftAdd);
               const cum = cumBefore + thisVal;
               return (
                 <Fragment key={r.code}>
@@ -1608,12 +1678,6 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
                         + รายการย่อย
                       </button>
-                      {hasKids && (
-                        <button onClick={(e)=>{e.stopPropagation(); setGridFor(r.code);}} title="ดูตารางรายเดือนของรายการย่อยทั้งหมด (ทุกเดือนในตารางเดียว)"
-                          style={{marginLeft:6,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
-                          📊 ตารางรายเดือน
-                        </button>
-                      )}
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}</td>
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
@@ -1640,7 +1704,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   {/* Sub-items — this month's value rolls up into the parent row above */}
                   {!isCollapsed && kids.map((k,ki) => {
                     const kBaseVal = parseFloat(tenderCosts[k.code]) || 0;
-                    const kCumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[k.code])||0),0) + kBaseVal;
+                    const kCumBefore = priorCols.reduce((s,c)=>s+(parseFloat(additions[c.id]?.[k.code])||0),0) + kBaseVal;
                     const kThisVal = parseFloat(draftAdd[k.code]) || 0;
                     const kCum = kCumBefore + kThisVal;
                     return (
@@ -1692,185 +1756,26 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
                 {fmt(filtered.reduce((s,r)=>{
                   const baseVal = parseFloat(tenderCosts[r.code]) || 0;
-                  const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
+                  const cumBefore = priorCols.reduce((ss,c)=>ss+(parseFloat(additions[c.id]?.[r.code])||0),0)+baseVal;
                   return s + cumBefore;
                 },0))}
               </td>
               <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
-                {fmt(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0))}
+                {fmt(filtered.reduce((s,r)=>s+rowMonthValue(r.code, colId, draftAdd),0))}
               </td>
               <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,r)=>{
                   const baseVal = parseFloat(tenderCosts[r.code]) || 0;
-                  const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
-                  return s + cumBefore + rowMonthValue(r.code, month, draftAdd);
+                  const cumBefore = priorCols.reduce((ss,c)=>ss+(parseFloat(additions[c.id]?.[r.code])||0),0)+baseVal;
+                  return s + cumBefore + rowMonthValue(r.code, colId, draftAdd);
                 },0))}
               </td>
               <td/>
             </tr>
           </tfoot>
         </table>
-      </div>
-
-      {gridFor && (
-        <SubItemGridModal
-          parentCode={gridFor}
-          parentName={(allRows.find(r=>r.code===gridFor)||{}).name || gridFor}
-          kids={childrenOf(gridFor)}
-          months={sortedMonths}
-          additions={additions}
-          saveAdditions={saveAdditions}
-          onAddExtra={onAddExtra}
-          onDeleteExtra={handleDeleteExtra}
-          onClose={()=>setGridFor(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ─── QS Tab 2b: Sub-item monthly grid modal ────────────────────────────────
-// Shows every sub-item of one Acc. Code as a row, with every month (past AND
-// any future months already created elsewhere in the app) as a column, so a
-// sub-item added in any month automatically gets an editable slot in every
-// other month too — none of them are ever tied to just the month they were
-// created in. New sub-item rows and new month columns can both be added
-// directly from here without leaving the grid.
-function SubItemGridModal({ parentCode, parentName, kids, months, additions, saveAdditions, onAddExtra, onDeleteExtra, onClose }) {
-  const sortedMonths = [...months].sort();
-  const monthLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
-
-  const cellKey = (code,m) => `${code}|${m}`;
-  const buildDraft = () => {
-    const d = {};
-    kids.forEach(k => sortedMonths.forEach(m => { d[cellKey(k.code,m)] = additions[m]?.[k.code] ?? ""; }));
-    return d;
-  };
-  const [draft, setDraft] = useState(buildDraft);
-  // Whenever a new sub-item row or a new month column shows up (added from
-  // within this modal or elsewhere), fill in a blank/editable slot for every
-  // combination that doesn't have one yet — existing edited values are kept.
-  useEffect(() => {
-    setDraft(d => {
-      const next = {...d};
-      kids.forEach(k => sortedMonths.forEach(m => {
-        const key = cellKey(k.code,m);
-        if (!(key in next)) next[key] = additions[m]?.[k.code] ?? "";
-      }));
-      return next;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kids.length, sortedMonths.length]);
-
-  const [subName, setSubName] = useState("");
-  const [newMonth, setNewMonth] = useState("");
-  const [saved, setSaved] = useState(false);
-
-  const cell    = (code,m)   => draft[cellKey(code,m)] ?? "";
-  const setCell = (code,m,v) => setDraft(d => ({...d,[cellKey(code,m)]:v}));
-  const rowTotal = (code) => sortedMonths.reduce((s,m)=>s+(parseFloat(cell(code,m))||0),0);
-  const colTotal = (m)    => kids.reduce((s,k)=>s+(parseFloat(cell(k.code,m))||0),0);
-  const grand    = sortedMonths.reduce((s,m)=>s+colTotal(m),0);
-
-  const handleSave = () => {
-    const next = {...additions};
-    sortedMonths.forEach(m => {
-      const obj = {...(next[m]||{})};
-      kids.forEach(k => {
-        const v = cell(k.code,m);
-        if (v!=="" && !isNaN(v) && parseFloat(v)!==0) obj[k.code] = parseFloat(v);
-        else delete obj[k.code];
-      });
-      next[m] = obj;
-    });
-    saveAdditions(next);
-    setSaved(true); setTimeout(()=>setSaved(false),1800);
-  };
-
-  const handleAddSub = () => {
-    if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode, scope:"monthly" });
-    setSubName("");
-  };
-
-  const handleAddMonthCol = () => {
-    if (!newMonth || sortedMonths.includes(newMonth)) return;
-    saveAdditions({ ...additions, [newMonth]: additions[newMonth] || {} });
-    setNewMonth("");
-  };
-
-  return (
-    <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:20}} onClick={onClose}>
-      <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,padding:22,width:"min(96vw,1150px)",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:14,boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <div style={{fontSize:11,color:T.textMuted,fontWeight:600,letterSpacing:0.5,textTransform:"uppercase"}}>ตารางรายเดือน · รายการย่อย</div>
-            <div style={{fontSize:16,fontWeight:700,color:T.textPrimary}}>{parentCode} — {parentName}</div>
-          </div>
-          <button onClick={onClose} className="btn-ghost" style={{padding:"6px 12px"}}>✕ ปิด</button>
-        </div>
-
-        <div style={{overflow:"auto",border:`1px solid ${T.cardBorder}`,borderRadius:12,flex:1}}>
-          <table style={{borderCollapse:"collapse",fontSize:12,width:"100%"}}>
-            <thead>
-              <tr style={{background:"#f8fafc"}}>
-                <th style={{position:"sticky",left:0,background:"#f8fafc",padding:"9px 14px",textAlign:"left",borderBottom:`1px solid ${T.cardBorder}`,minWidth:180,zIndex:2}}>รายการย่อย</th>
-                {sortedMonths.map(m => (
-                  <th key={m} style={{padding:"9px 12px",textAlign:"right",borderBottom:`1px solid ${T.cardBorder}`,color:T.textMuted,fontWeight:600,minWidth:110}}>{monthLabel(m)}</th>
-                ))}
-                <th style={{padding:"9px 12px",textAlign:"right",borderBottom:`1px solid ${T.cardBorder}`,color:T.green,fontWeight:700,minWidth:110}}>รวม</th>
-                <th style={{width:30,borderBottom:`1px solid ${T.cardBorder}`}}/>
-              </tr>
-            </thead>
-            <tbody>
-              {kids.length===0 && (
-                <tr><td colSpan={sortedMonths.length+3} style={{padding:"20px 14px",textAlign:"center",color:T.textMuted}}>ยังไม่มีรายการย่อย — เพิ่มด้านล่าง</td></tr>
-              )}
-              {kids.map((k,i) => (
-                <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd"}}>
-                  <td style={{position:"sticky",left:0,background:i%2===0?T.card:"#fafbfd",padding:"7px 14px",fontStyle:"italic",color:T.green,borderBottom:"1px solid #f1f5f9"}}>{k.name}</td>
-                  {sortedMonths.map(m => (
-                    <td key={m} style={{padding:"5px 8px",borderBottom:"1px solid #f1f5f9"}}>
-                      <input type="number" value={cell(k.code,m)} onChange={e=>setCell(k.code,m,e.target.value)}
-                        placeholder="0.00" className="input-base" style={{width:100,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,padding:"6px 8px"}}/>
-                    </td>
-                  ))}
-                  <td style={{padding:"7px 14px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green,borderBottom:"1px solid #f1f5f9"}}>{fmt(rowTotal(k.code))}</td>
-                  <td style={{textAlign:"center",borderBottom:"1px solid #f1f5f9"}}>
-                    <button onClick={()=>onDeleteExtra(k.code)} title="ลบรายการย่อยนี้" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-                <td style={{position:"sticky",left:0,background:"#f8fafc",padding:"9px 14px",fontWeight:700,color:T.textMuted}}>รวมทุกเดือน</td>
-                {sortedMonths.map(m => (
-                  <td key={m} style={{padding:"9px 12px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(colTotal(m))}</td>
-                ))}
-                <td style={{padding:"9px 12px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green}}>{fmt(grand)}</td>
-                <td/>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-
-        <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-            <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
-              placeholder="+ ชื่อรายการย่อยใหม่" style={{width:220}} onKeyDown={e=>e.key==="Enter"&&handleAddSub()}/>
-            <button className="btn-ghost" onClick={handleAddSub}>+ เพิ่มรายการย่อย</button>
-            <span style={{width:1,height:24,background:T.cardBorder}}/>
-            <input type="month" className="input-base" value={newMonth} onChange={e=>setNewMonth(e.target.value)} style={{width:130}}/>
-            <button className="btn-ghost" onClick={handleAddMonthCol}>+ เพิ่มคอลัมน์เดือน</button>
-          </div>
-          <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:160}}>
-            {saved?"✓ บันทึกแล้ว":"บันทึกตารางนี้"}
-          </button>
-        </div>
-        <p style={{margin:0,fontSize:11,color:T.textMuted}}>* รายการย่อยแต่ละรายการจะมีช่องกรอกครบทุกเดือนโดยอัตโนมัติ ถ้าเดือนก่อนหน้ามีรายการนี้อยู่ เดือนถัดไปก็จะมีช่องให้กรอกด้วยเสมอ และเพิ่มรายการย่อย/เดือนใหม่ได้ตลอดจากที่นี่</p>
       </div>
     </div>
   );
