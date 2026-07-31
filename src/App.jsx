@@ -138,6 +138,13 @@ const poSupplierLabel  = (p) => { const n = poSupplierNames(p); return n.length=
 const poNumbersLabel   = (p) => { const nums = poSuppliers(p).map(s=>s.poNumber).filter(Boolean); return nums.length ? nums.join(", ") : "—"; };
 const poRoundsAmount   = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.amount)||0),0);
 
+// Which supplier a given account-code line item was ordered from. Items
+// carry their own `supplierId` so, on a PO with several suppliers, each
+// item can be traced to exactly one of them; items saved before this link
+// existed (or with a stale/missing id) fall back to the PO's first supplier.
+const itemSupplier     = (p, it) => { const sups = poSuppliers(p); return sups.find(s=>s.id===it.supplierId) || sups[0] || null; };
+const itemSupplierName = (p, it) => itemSupplier(p, it)?.name || "—";
+
 const deliveryStatus = (d) => {
   if (d.actual) return "received";
   if (d.plan && d.plan < todayStr()) return "late";
@@ -287,7 +294,7 @@ function exportToExcel(project, tenderCosts, additions, poEntries) {
     }).join(" | ") || "-";
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
-      poRows.push([p.date, it.code, acc?.name||"", acc?.group||"", poSupplierText(p), poNumbersLabel(p), parseFloat(it.amount)||0, p.status, supplierStr, p.notes||""]);
+      poRows.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p,it), poNumbersLabel(p), parseFloat(it.amount)||0, p.status, supplierStr, p.notes||""]);
     });
   });
   poRows.push([]);
@@ -1746,6 +1753,7 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
                 <div style={{minWidth:0}}>
                   <div style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{it.code||"—"}</div>
                   <div style={{fontSize:12,color:T.textSecondary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acc?.name||"—"}</div>
+                  {suppliers.length>1 && <div style={{fontSize:10,color:T.textMuted,marginTop:1}}>🏢 {itemSupplierName(po,it)}</div>}
                 </div>
                 <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary,flexShrink:0}}>{fmt(it.amount)}</div>
               </div>
@@ -1820,12 +1828,15 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
 function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
-  const emptyForm = () => ({
-    date:new Date().toISOString().slice(0,10), status:"PO Issued",
-    items:[{id:uid(),code:"",amount:""}],
-    suppliers:[{id:uid(), name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}],
-    paymentPlan:"", notes:"",
-  });
+  const emptyForm = () => {
+    const supplierId = uid();
+    return {
+      date:new Date().toISOString().slice(0,10), status:"PO Issued",
+      items:[{id:uid(),code:"",amount:"",supplierId}],
+      suppliers:[{id:supplierId, name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}],
+      paymentPlan:"", notes:"",
+    };
+  };
   const [form,   setForm]   = useState(emptyForm);
   const [editId, setEditId] = useState(null);
   const [filter, setFilter] = useState("All");
@@ -1860,13 +1871,19 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+poTotal(p),0);
 
   // Item (account-code line) row helpers
-  const addItemRow    = () => setForm(f=>({...f, items:[...f.items,{id:uid(),code:"",amount:""}]}));
+  const addItemRow    = () => setForm(f=>({...f, items:[...f.items,{id:uid(),code:"",amount:"",supplierId:f.suppliers[0]?.id||""}]}));
   const removeItemRow = (id) => setForm(f=>({...f, items: f.items.length>1 ? f.items.filter(it=>it.id!==id) : f.items}));
   const updateItemRow = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>it.id===id?{...it,[key]:val}:it)}));
 
   // Supplier row helpers — a PO can involve several suppliers
   const addSupplier    = () => setForm(f=>({...f, suppliers:[...f.suppliers,{id:uid(), name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}]}));
-  const removeSupplier = (sid) => setForm(f=>({...f, suppliers: f.suppliers.length>1 ? f.suppliers.filter(s=>s.id!==sid) : f.suppliers}));
+  const removeSupplier = (sid) => setForm(f=>{
+    if (f.suppliers.length===1) return f;
+    const suppliers = f.suppliers.filter(s=>s.id!==sid);
+    // Items pointing at the removed supplier fall back to whichever supplier is now first
+    const items = f.items.map(it=>it.supplierId===sid ? {...it, supplierId: suppliers[0]?.id||""} : it);
+    return {...f, suppliers, items};
+  });
   const updateSupplier = (sid, key, val) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s,[key]:val}:s)}));
 
   // Payment/delivery round helpers — each supplier can be paid/delivered in
@@ -1879,12 +1896,15 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const formRoundsTotal = form.suppliers.reduce((s,sup)=>s+sup.rounds.reduce((ss,r)=>ss+(parseFloat(r.amount)||0),0),0);
 
   const submit = () => {
-    const validItems = form.items.filter(it=>it.code&&it.amount);
-    if (!validItems.length) return;
     const validSuppliers = form.suppliers
       .filter(s=>s.name.trim())
       .map(s=>({...s, rounds: s.rounds.filter(r=>r.amount||r.plan||r.actual)}));
     if (!validSuppliers.length) { alert("กรุณากรอกชื่อ Supplier อย่างน้อย 1 เจ้า"); return; }
+    const validSupplierIds = new Set(validSuppliers.map(s=>s.id));
+    const validItems = form.items.filter(it=>it.code&&it.amount).map(it =>
+      validSupplierIds.has(it.supplierId) ? it : {...it, supplierId: validSuppliers[0].id}
+    );
+    if (!validItems.length) return;
     const payload = {...form, items:validItems, suppliers:validSuppliers};
     delete payload.supplier; delete payload.poNumber; delete payload.deliveries; // superseded by suppliers[]
     savePO(editId ? poEntries.map(p=>p.id===editId?{...payload,id:editId}:p) : [...poEntries,{...payload,id:uid()}]);
@@ -1894,15 +1914,23 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   };
 
   const openEdit = (p) => {
+    const newSuppliers = poSuppliers(p).map(s=>({
+      ...s,
+      id: s.id&&s.id!=="legacy" ? s.id : uid(),
+      rounds: (s.rounds&&s.rounds.length ? s.rounds : [{amount:"",plan:"",actual:""}])
+        .map(r=>({...r, id: r.id&&r.id!=="legacy-round" ? r.id : uid()})),
+    }));
+    // Old supplier id -> new supplier id, so each item stays linked to the
+    // same supplier after ids get freshly minted for this edit session.
+    const idMap = {};
+    poSuppliers(p).forEach((s,i) => { idMap[s.id] = newSuppliers[i].id; });
     setForm({
       ...emptyForm(), date:p.date, status:p.status, paymentPlan:p.paymentPlan||"", notes:p.notes||"",
-      items: poItems(p).map(it=>({...it, id: it.id&&it.id!=="legacy" ? it.id : uid()})),
-      suppliers: poSuppliers(p).map(s=>({
-        ...s,
-        id: s.id&&s.id!=="legacy" ? s.id : uid(),
-        rounds: (s.rounds&&s.rounds.length ? s.rounds : [{amount:"",plan:"",actual:""}])
-          .map(r=>({...r, id: r.id&&r.id!=="legacy-round" ? r.id : uid()})),
+      items: poItems(p).map(it=>({
+        ...it, id: it.id&&it.id!=="legacy" ? it.id : uid(),
+        supplierId: idMap[it.supplierId] || newSuppliers[0]?.id || "",
       })),
+      suppliers: newSuppliers,
     });
     setEditId(p.id); setView("add"); setDetailId(null);
   };
@@ -1970,34 +1998,11 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 </select>
               </label>
 
-              {/* Account-code line items — one PO can be split across several
-                  codes, each with its own amount; the amounts sum to the PO total. */}
-              <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 หมวดต้นทุน * (แยกได้หลายรหัส)</span>
-              </div>
-              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:8}}>
-                {form.items.map((it,i)=>(
-                  <div key={it.id} style={{display:"grid",gridTemplateColumns:"1fr 160px auto",gap:8,alignItems:"center"}}>
-                    <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
-                      <option value="">— เลือก Account Code —</option>
-                      {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
-                    </select>
-                    <input type="number" placeholder="มูลค่า (THB)" value={it.amount} onChange={e=>updateItemRow(it.id,"amount",e.target.value)} className="input-base"/>
-                    <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
-                      style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
-                  </div>
-                ))}
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Account Code</button>
-                  {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>รวม: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
-                </div>
-              </div>
-
               {/* Suppliers — one PO can involve several vendors, and each
                   vendor can be paid/delivered across several rounds instead
                   of one lump sum. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier * (แบ่งจ่ายได้หลายเจ้า หลายรอบ)</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier * (แบ่งจ่ายได้หลายเจ้า หลายรอบ ระบุก่อน แล้วค่อยผูกกับหมวดต้นทุนด้านล่าง)</span>
               </div>
               <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:12}}>
                 {form.suppliers.map((s,si)=>(
@@ -2033,6 +2038,33 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <button type="button" onClick={addSupplier} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Supplier</button>
                   {formRoundsTotal>0 && <span style={{fontSize:12,color:T.textSecondary}}>รวมทุกรอบ: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formRoundsTotal)}</b></span>}
+                </div>
+              </div>
+
+              {/* Account-code line items — one PO can be split across several
+                  codes, each with its own amount and its own linked supplier;
+                  the amounts sum to the PO total. */}
+              <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 หมวดต้นทุน * (แยกได้หลายรหัส ผูกกับ Supplier ด้านบน)</span>
+              </div>
+              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:8}}>
+                {form.items.map((it,i)=>(
+                  <div key={it.id} style={{display:"grid",gridTemplateColumns:"1fr 1fr 140px auto",gap:8,alignItems:"center"}}>
+                    <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
+                      <option value="">— เลือก Account Code —</option>
+                      {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
+                    </select>
+                    <select value={it.supplierId} onChange={e=>updateItemRow(it.id,"supplierId",e.target.value)} className="input-base">
+                      {form.suppliers.map(s=><option key={s.id} value={s.id}>{s.name.trim() ? `🏢 ${s.name}` : "🏢 (ยังไม่ตั้งชื่อ)"}</option>)}
+                    </select>
+                    <input type="number" placeholder="มูลค่า (THB)" value={it.amount} onChange={e=>updateItemRow(it.id,"amount",e.target.value)} className="input-base"/>
+                    <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
+                      style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
+                  </div>
+                ))}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Account Code</button>
+                  {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>รวม: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
                 </div>
               </div>
 
@@ -2118,7 +2150,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                 onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                                 onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                                 <td style={{padding:"10px 16px",color:T.textMuted,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
-                                <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{poSupplierLabel(p)}</td>
+                                <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
                                 <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
                                 <td style={{padding:"10px 16px",textAlign:"right"}}>
                                   <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
@@ -2284,7 +2316,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
                           onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                           <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
-                          <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{poSupplierLabel(p)}</td>
+                          <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
                           <td style={{padding:"9px 16px",textAlign:"right"}}>
                             <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                             {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
