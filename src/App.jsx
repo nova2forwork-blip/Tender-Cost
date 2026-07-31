@@ -76,6 +76,11 @@ const ACCOUNTS = [
 ];
 
 const GROUPS      = [...new Set(ACCOUNTS.map(a => a.group))];
+// Sort a list of rows (each with a `.group`) so rows of the same category sit
+// together, in the order categories first appear in ACCOUNTS/GROUPS.
+// Stable sort, so rows keep their relative order within each group.
+const byGroupOrder = (rows) =>
+  [...rows].sort((a, b) => GROUPS.indexOf(a.group) - GROUPS.indexOf(b.group));
 const PO_STATUS   = ["Pending","PO Issued","Delivered","Invoiced","Paid"];
 const STATUS_CLR  = { Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#8b5cf6",Paid:"#10b981" };
 const STATUS_BG   = { Pending:"#f1f5f9","PO Issued":"#eff6ff",Delivered:"#fffbeb",Invoiced:"#f5f3ff",Paid:"#f0fdf4" };
@@ -935,6 +940,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
+  const [sortByGroup, setSortByGroup] = useState(false);
   const [saved,  setSaved]  = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addDraft, setAddDraft] = useState({ code:"", name:"", group:GROUPS[0] });
@@ -978,6 +984,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     const childMatch = !a.isExtra && childrenOf(a.code).some(k=>k.name.toLowerCase().includes(q));
     return selfMatch || childMatch;
   });
+  const displayRows = sortByGroup ? byGroupOrder(filtered) : filtered;
 
   const handleSave = () => {
     const merged = {...draft};
@@ -1038,6 +1045,10 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
             🗂 ที่ซ่อนไว้ ({hiddenList.length})
           </button>
         )}
+        <button className="btn-ghost" onClick={()=>setSortByGroup(v=>!v)}
+          style={sortByGroup?{background:T.blueLight,borderColor:T.blue,color:T.blue}:undefined}>
+          {sortByGroup?"✓ ":""}↕️ จัดเรียงตามหมวด
+        </button>
         <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการหลักใหม่</button>
         <button onClick={handleSave} className="btn-primary"
           style={{background:saved?T.green:T.blue,minWidth:140}}>
@@ -1096,7 +1107,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
             </tr>
           </thead>
           <tbody>
-            {filtered.map((a,i)=>{
+            {displayRows.map((a,i)=>{
               const kids = !a.isExtra ? childrenOf(a.code) : [];
               const hasKids = kids.length > 0;
               const isCollapsed = hasKids && collapsed[a.code];
@@ -1206,6 +1217,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const [newMonth, setNewMonth] = useState("");
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
+  const [sortByGroup, setSortByGroup] = useState(false);
   const [draftAdd, setDraftAdd] = useState({...(additions[month]||{})});
   const [saved, setSaved] = useState(false);
   const [addExtraOpen, setAddExtraOpen] = useState(false);
@@ -1272,6 +1284,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const childMatch = childrenOf(r.code).some(k=>k.name.toLowerCase().includes(q));
     return selfMatch || childMatch;
   });
+  const displayRows = sortByGroup ? byGroupOrder(filtered) : filtered;
 
   const handleAddMonth = () => {
     if (!newMonth || months.includes(newMonth)) return;
@@ -1380,6 +1393,10 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
           ))}
         </div>
+        <button className="btn-ghost" onClick={()=>setSortByGroup(v=>!v)}
+          style={sortByGroup?{background:T.blueLight,borderColor:T.blue,color:T.blue}:undefined}>
+          {sortByGroup?"✓ ":""}↕️ จัดเรียงตามหมวด
+        </button>
         <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)}>+ งานพิเศษ</button>
         <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
           {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
@@ -1423,7 +1440,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             </tr>
           </thead>
           <tbody>
-            {filtered.map((r,i) => {
+            {displayRows.map((r,i) => {
               const kids = childrenOf(r.code);
               const hasKids = kids.length > 0;
               const isCollapsed = hasKids && rowCollapsed[r.code];
@@ -1980,6 +1997,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
 // ─── Accounting View ──────────────────────────────────────────────────────────
 function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [view, setView] = useState("dashboard");
+  const [sortByGroup, setSortByGroup] = useState(false);
 
   // Budget = baseline Tender Cost + every monthly addition entered so far,
   // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
@@ -2013,6 +2031,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     const pos=poEntries.filter(p=>p.code===a.code);
     return {...a,budget,committed:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0),pos,over:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0)>budget&&budget>0};
   }).filter(a=>a.budget>0||a.pos.length>0);
+  const displayAccountData = sortByGroup ? byGroupOrder(accountData) : accountData;
 
   const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+(parseFloat(p.amount)||0),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
@@ -2035,7 +2054,12 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
             <button key={v} onClick={()=>setView(v)}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
-          <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
+          {view==="detail" && (
+            <button className="btn-ghost" onClick={()=>setSortByGroup(v=>!v)} style={{marginLeft:"auto",...(sortByGroup?{background:T.blueLight,borderColor:T.blue,color:T.blue}:{})}}>
+              {sortByGroup?"✓ ":""}↕️ จัดเรียงตามหมวด
+            </button>
+          )}
+          <button onClick={onExport} className="btn-ghost" style={{marginLeft:view==="detail"?0:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
             ⬇️ Export Excel
           </button>
         </div>
@@ -2109,7 +2133,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                 </tr>
               </thead>
               <tbody>
-                {accountData.map((a,i)=>{
+                {displayAccountData.map((a,i)=>{
                   const p2=a.budget>0?(a.committed/a.budget*100):a.committed>0?999:0;
                   return (
                     <tr key={a.code} style={{background:a.over?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
