@@ -1198,7 +1198,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   const monthTotal = (m) => allRows.reduce((s,r) => s + (parseFloat(additions[m]?.[r.code]) || 0), 0);
 
-  const baseTotal = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  // Sum only top-level rows (accounts + standalone extras). Do NOT sum
+  // Object.values(tenderCosts) directly — sub-item codes (EX-xxxx with a
+  // parentCode) also have their own entries in tenderCosts, and their total
+  // is already rolled up into their parent's value, so a wholesale sum
+  // double-counts every account that has sub-items.
+  const baseTotal = allRows.reduce((s,r) => s + (parseFloat(tenderCosts[r.code]) || 0), 0);
   const thisMonthAdd = allRows.reduce((s,r) => s + (parseFloat(draftAdd[r.code]) || 0), 0);
   const cumulativeSoFar = months.filter(m=>m<month).reduce((s,m)=>s+monthTotal(m),0) + thisMonthAdd + baseTotal;
 
@@ -1413,7 +1418,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout }) {
+function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [view,   setView]   = useState("list");
   const [form,   setForm]   = useState({code:"",supplier:"",poNumber:"",amount:"",date:new Date().toISOString().slice(0,10),status:"PO Issued",notes:""});
   const [editId, setEditId] = useState(null);
@@ -1428,7 +1433,16 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
       combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
     });
   });
-  const tenderTotal = Object.values(combinedBudget).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  // Sum only top-level codes (accounts not hidden + standalone extras).
+  // combinedBudget also carries an entry for every sub-item (EX-xxxx with a
+  // parentCode) since those persist in tenderCosts/additions individually —
+  // their total is already rolled into their parent's value, so summing
+  // Object.values(combinedBudget) wholesale would double-count them.
+  const topLevelCodes = [
+    ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)).map(a => a.code),
+    ...extraItems.filter(e => !e.parentCode).map(e => e.code),
+  ];
+  const tenderTotal = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm   = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
 
@@ -1569,7 +1583,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout }) {
+function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [view, setView] = useState("dashboard");
 
   // Budget = baseline Tender Cost + every monthly addition entered so far,
@@ -1581,7 +1595,14 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     });
   });
 
-  const tenderTotal   = Object.values(combinedBudget).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  // Sum only top-level codes — see note in ProcurementView. Object.values()
+  // over the whole combinedBudget double-counts sub-items (EX-xxxx rows),
+  // since their value is already folded into their parent account's total.
+  const topLevelCodes = [
+    ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)).map(a => a.code),
+    ...extraItems.filter(e => !e.parentCode).map(e => e.code),
+  ];
+  const tenderTotal   = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm     = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalPaid     = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
