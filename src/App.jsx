@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase, sg, ss, sd } from "./supabase.js";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, AreaChart, Area, CartesianGrid } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
   loadUsers, createUser, resetPassword, toggleActive, deleteUser, loadLogs,
@@ -96,9 +96,47 @@ const todayStr = () => new Date().toISOString().slice(0,10);
 const poItems = (p) => (p.items && p.items.length ? p.items : [{ id:"legacy", code:p.code||"", amount:p.amount||"" }]);
 const poTotal = (p) => poItems(p).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
 const poAmountForCode = (p, code) => poItems(p).filter(it => it.code===code).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
-const poDeliveries = (p) => (p.deliveries && p.deliveries.length
+
+// Pre-multi-supplier records stored one `deliveries` array (or a single
+// `incomingPlan`/`actualReceived` pair) directly on the PO. Kept only to
+// upgrade those older records — new records live under `suppliers[].rounds`.
+const legacyDeliveries = (p) => (p.deliveries && p.deliveries.length
   ? p.deliveries
   : (p.incomingPlan || p.actualReceived ? [{ id:"legacy", plan:p.incomingPlan||"", actual:p.actualReceived||"" }] : []));
+
+// ─── Multi-supplier / multi-round payment helpers ──────────────────────────
+// A single PO can involve several suppliers (e.g. different vendors for the
+// same order), and each supplier can be paid/delivered in several rounds
+// (installments) instead of one lump sum. Records saved before this existed
+// carried one `supplier` + `poNumber` string and one `deliveries` array —
+// this getter transparently upgrades them into one supplier with N rounds so
+// old and new records work everywhere without a one-off migration.
+const poSuppliers = (p) => (p.suppliers && p.suppliers.length
+  ? p.suppliers
+  : [{
+      id: "legacy",
+      name: p.supplier || "",
+      poNumber: p.poNumber || "",
+      rounds: legacyDeliveries(p).length
+        ? legacyDeliveries(p).map(d => ({ id: d.id || "legacy-round", amount: "", plan: d.plan || "", actual: d.actual || "" }))
+        : [{ id: "legacy-round", amount: "", plan: "", actual: "" }],
+    }]);
+
+// Flattened view of every payment/delivery round across every supplier on a
+// PO — each round is tagged with which supplier it belongs to. Also serves
+// as the drop-in replacement for the old `poDeliveries`, since every round
+// still carries the same `plan`/`actual` fields that `deliveryStatus` reads.
+const poRounds = (p) => poSuppliers(p).flatMap(s =>
+  (s.rounds && s.rounds.length ? s.rounds : [{ id:"legacy-round", amount:"", plan:"", actual:"" }])
+    .map(r => ({ ...r, supplierId: s.id, supplierName: s.name, poNumber: s.poNumber }))
+);
+const poDeliveries = poRounds; // backward-compatible alias used by tracking/export code
+
+const poSupplierNames  = (p) => poSuppliers(p).map(s => s.name).filter(Boolean);
+const poSupplierText   = (p) => poSupplierNames(p).join(" ");
+const poSupplierLabel  = (p) => { const n = poSupplierNames(p); return n.length===0 ? "—" : n.length===1 ? n[0] : `${n[0]} +${n.length-1} เจ้า`; };
+const poNumbersLabel   = (p) => { const nums = poSuppliers(p).map(s=>s.poNumber).filter(Boolean); return nums.length ? nums.join(", ") : "—"; };
+const poRoundsAmount   = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.amount)||0),0);
 
 const deliveryStatus = (d) => {
   if (d.actual) return "received";
@@ -236,16 +274,20 @@ function exportToExcel(project, tenderCosts, additions, poEntries) {
   const poRows = [];
   poRows.push([`Project: ${project.name}`, "", "", "", "", "", "", "", ""]);
   poRows.push([]);
-  poRows.push(["PO Date","Acc. Code","Account Name","Group","Supplier","PO Number","Amount","Status","Deliveries","Notes"]);
+  poRows.push(["PO Date","Acc. Code","Account Name","Group","Supplier","PO Number","Amount","Status","Suppliers & Rounds","Notes"]);
   // One row per Account Code line — a PO split across several codes gets one
-  // row per code, each with just that code's share of the amount. The
-  // delivery batches (a PO can arrive in 2-3 shipments) are summarised into
-  // a single "plan → actual" list per row.
+  // row per code, each with just that code's share of the amount. A PO can
+  // now involve several suppliers, each paid/delivered across several
+  // rounds — these are summarised into one "name [PO]: plan→actual (amount)"
+  // list per row so the multi-supplier detail isn't lost in the export.
   poEntries.forEach(p => {
-    const deliveryStr = poDeliveries(p).map(d=>`${d.plan||"-"} → ${d.actual||"รอ"}`).join(" | ") || "-";
+    const supplierStr = poSuppliers(p).map(s => {
+      const roundsStr = (s.rounds||[]).map(r => `${r.plan||"-"}→${r.actual||"รอ"}${r.amount?` (${fmt(r.amount)})`:""}`).join(" & ") || "-";
+      return `${s.name||"—"}${s.poNumber?` [PO:${s.poNumber}]`:""}: ${roundsStr}`;
+    }).join(" | ") || "-";
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
-      poRows.push([p.date, it.code, acc?.name||"", acc?.group||"", p.supplier, p.poNumber, parseFloat(it.amount)||0, p.status, deliveryStr, p.notes||""]);
+      poRows.push([p.date, it.code, acc?.name||"", acc?.group||"", poSupplierText(p), poNumbersLabel(p), parseFloat(it.amount)||0, p.status, supplierStr, p.notes||""]);
     });
   });
   poRows.push([]);
@@ -1321,9 +1363,16 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const cumulativeLive = (uptoMonth) => baseTotal + sortedMonths.filter(m=>m<=uptoMonth).reduce((s,m)=>s+monthTotalLive(m),0);
   const grandTotal = cumulativeLive(sortedMonths[sortedMonths.length-1]);
   const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
+  // Each bar = one stacked column: "previous" (running total up to the
+  // month before) + "added" (that month's increment) in a different color,
+  // so growth is visible within a single bar instead of a smooth area line.
   const chartData = [
-    { label:"เริ่มต้น", cumulative: baseTotal },
-    ...sortedMonths.map(m => ({ label: monthShortLabel(m), cumulative: cumulativeLive(m), added: monthTotalLive(m) })),
+    { label:"เริ่มต้น", cumulative: baseTotal, previous: baseTotal, added: 0 },
+    ...sortedMonths.map(m => {
+      const added = monthTotalLive(m);
+      const cumulative = cumulativeLive(m);
+      return { label: monthShortLabel(m), cumulative, previous: cumulative - added, added };
+    }),
   ];
 
   // "ราคาเดิม (Baseline)" should reflect the running total as of the month
@@ -1417,20 +1466,15 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(grandTotal)}</b> THB</span>
         </div>
         <ResponsiveContainer width="100%" height={170}>
-          <AreaChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}>
-            <defs>
-              <linearGradient id="cumGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={T.blue} stopOpacity={0.3}/>
-                <stop offset="100%" stopColor={T.blue} stopOpacity={0.02}/>
-              </linearGradient>
-            </defs>
+          <BarChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2f7"/>
             <XAxis dataKey="label" tick={{fontSize:11,fill:T.textMuted}} axisLine={false} tickLine={false}/>
             <YAxis tick={{fontSize:10,fill:T.textMuted}} axisLine={false} tickLine={false} tickFormatter={fmtK}/>
-            <Tooltip formatter={(v)=>[`${fmt(v)} THB`,"รวมสะสม"]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
+            <Tooltip formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
               contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
-            <Area type="monotone" dataKey="cumulative" stroke={T.blue} strokeWidth={2.5} fill="url(#cumGrad)"/>
-          </AreaChart>
+            <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" fill={T.blue} radius={[0,0,0,0]}/>
+            <Bar dataKey="added" stackId="cum" name="เพิ่มงวดนี้" fill={T.amber} radius={[4,4,0,0]}/>
+          </BarChart>
         </ResponsiveContainer>
       </div>
 
@@ -1666,7 +1710,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 function PODetailModal({ po, onClose, onEdit, onDelete }) {
   if (!po) return null;
   const items = poItems(po);
-  const deliveries = poDeliveries(po);
+  const suppliers = poSuppliers(po);
   const inc = incomingStatus(po), pay = paymentStatus(po);
 
   const Row = ({ label, value, mono }) => (
@@ -1681,8 +1725,8 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
       <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,padding:26,width:"100%",maxWidth:520,maxHeight:"88vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
           <div>
-            <div style={{fontSize:16,fontWeight:700,color:T.textPrimary}}>{po.supplier || "—"}</div>
-            <div style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>{po.poNumber || "ไม่มีเลข PO"}</div>
+            <div style={{fontSize:16,fontWeight:700,color:T.textPrimary}}>{poSupplierLabel(po)}</div>
+            <div style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>{poNumbersLabel(po)}</div>
           </div>
           <button onClick={onClose} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted,flexShrink:0}}>×</button>
         </div>
@@ -1720,18 +1764,35 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
           <Row label="แผนจ่ายเงิน" value={po.paymentPlan} mono />
         </div>
 
-        {/* Delivery batches — goods on a PO can arrive in 2-3 separate shipments */}
+        {/* Suppliers — a PO can involve several vendors, each paid/delivered
+            across several rounds (installments) instead of one lump sum. */}
         <div style={{marginTop:10}}>
-          <div style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>🚚 การส่งของ {deliveries.length>1?`(${deliveries.length} งวด)`:""}</div>
-          {deliveries.length===0 ? (
-            <div style={{fontSize:12,color:T.textMuted}}>ยังไม่ได้กำหนดแผนของเข้า</div>
-          ) : deliveries.map((d,i)=>{
-            const st = deliveryStatus(d);
+          <div style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>🏢 Supplier {suppliers.length>1?`(${suppliers.length} เจ้า)`:""}</div>
+          {suppliers.map((s,si)=>{
+            const rounds = s.rounds && s.rounds.length ? s.rounds : [];
+            const roundsTotal = rounds.reduce((sum,r)=>sum+(parseFloat(r.amount)||0),0);
             return (
-              <div key={d.id||i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,padding:"7px 0",borderBottom:i<deliveries.length-1?"1px solid #f1f5f9":"none"}}>
-                <span style={{fontSize:12,color:T.textMuted,fontWeight:600,minWidth:18}}>{deliveries.length>1?`#${i+1}`:"—"}</span>
-                <span style={{flex:1,fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{d.plan||"—"} → {d.actual||"รอ"}</span>
-                <span style={{background:INCOMING_BG[st],color:INCOMING_CLR[st],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{INCOMING_LABEL[st]}</span>
+              <div key={s.id||si} style={{background:T.bg,borderRadius:10,padding:"10px 12px",marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
+                  <div>
+                    <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>{s.name||"—"}</span>
+                    {s.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{s.poNumber}</span>}
+                  </div>
+                  {roundsTotal>0 && <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(roundsTotal)}</span>}
+                </div>
+                {rounds.length===0 ? (
+                  <div style={{fontSize:12,color:T.textMuted}}>ยังไม่ได้กำหนดแผนของเข้า</div>
+                ) : rounds.map((r,i)=>{
+                  const st = deliveryStatus(r);
+                  return (
+                    <div key={r.id||i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,padding:"6px 0",borderBottom:i<rounds.length-1?"1px solid #eef2f7":"none"}}>
+                      <span style={{fontSize:11,color:T.textMuted,fontWeight:600,minWidth:18}}>{rounds.length>1?`#${i+1}`:"—"}</span>
+                      <span style={{flex:1,fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{r.plan||"—"} → {r.actual||"รอ"}</span>
+                      {r.amount && <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.textSecondary}}>{fmt(r.amount)}</span>}
+                      <span style={{background:INCOMING_BG[st],color:INCOMING_CLR[st],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{INCOMING_LABEL[st]}</span>
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
@@ -1760,9 +1821,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
   const emptyForm = () => ({
-    supplier:"", poNumber:"", date:new Date().toISOString().slice(0,10), status:"PO Issued",
+    date:new Date().toISOString().slice(0,10), status:"PO Issued",
     items:[{id:uid(),code:"",amount:""}],
-    deliveries:[{id:uid(),plan:"",actual:""}],
+    suppliers:[{id:uid(), name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}],
     paymentPlan:"", notes:"",
   });
   const [form,   setForm]   = useState(emptyForm);
@@ -1803,18 +1864,29 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const removeItemRow = (id) => setForm(f=>({...f, items: f.items.length>1 ? f.items.filter(it=>it.id!==id) : f.items}));
   const updateItemRow = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>it.id===id?{...it,[key]:val}:it)}));
 
-  // Delivery batch row helpers
-  const addDeliveryRow    = () => setForm(f=>({...f, deliveries:[...f.deliveries,{id:uid(),plan:"",actual:""}]}));
-  const removeDeliveryRow = (id) => setForm(f=>({...f, deliveries: f.deliveries.length>1 ? f.deliveries.filter(d=>d.id!==id) : f.deliveries}));
-  const updateDeliveryRow = (id, key, val) => setForm(f=>({...f, deliveries: f.deliveries.map(d=>d.id===id?{...d,[key]:val}:d)}));
+  // Supplier row helpers — a PO can involve several suppliers
+  const addSupplier    = () => setForm(f=>({...f, suppliers:[...f.suppliers,{id:uid(), name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}]}));
+  const removeSupplier = (sid) => setForm(f=>({...f, suppliers: f.suppliers.length>1 ? f.suppliers.filter(s=>s.id!==sid) : f.suppliers}));
+  const updateSupplier = (sid, key, val) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s,[key]:val}:s)}));
+
+  // Payment/delivery round helpers — each supplier can be paid/delivered in
+  // several rounds instead of one lump sum.
+  const addRound    = (sid) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s, rounds:[...s.rounds,{id:uid(),amount:"",plan:"",actual:""}]}:s)}));
+  const removeRound = (sid, rid) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s, rounds: s.rounds.length>1 ? s.rounds.filter(r=>r.id!==rid) : s.rounds}:s)}));
+  const updateRound = (sid, rid, key, val) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s, rounds: s.rounds.map(r=>r.id===rid?{...r,[key]:val}:r)}:s)}));
 
   const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+  const formRoundsTotal = form.suppliers.reduce((s,sup)=>s+sup.rounds.reduce((ss,r)=>ss+(parseFloat(r.amount)||0),0),0);
 
   const submit = () => {
     const validItems = form.items.filter(it=>it.code&&it.amount);
     if (!validItems.length) return;
-    const validDeliveries = form.deliveries.filter(d=>d.plan||d.actual);
-    const payload = {...form, items:validItems, deliveries:validDeliveries};
+    const validSuppliers = form.suppliers
+      .filter(s=>s.name.trim())
+      .map(s=>({...s, rounds: s.rounds.filter(r=>r.amount||r.plan||r.actual)}));
+    if (!validSuppliers.length) { alert("กรุณากรอกชื่อ Supplier อย่างน้อย 1 เจ้า"); return; }
+    const payload = {...form, items:validItems, suppliers:validSuppliers};
+    delete payload.supplier; delete payload.poNumber; delete payload.deliveries; // superseded by suppliers[]
     savePO(editId ? poEntries.map(p=>p.id===editId?{...payload,id:editId}:p) : [...poEntries,{...payload,id:uid()}]);
     setEditId(null);
     setForm(emptyForm());
@@ -1822,9 +1894,15 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   };
 
   const openEdit = (p) => {
-    setForm({...emptyForm(), ...p,
+    setForm({
+      ...emptyForm(), date:p.date, status:p.status, paymentPlan:p.paymentPlan||"", notes:p.notes||"",
       items: poItems(p).map(it=>({...it, id: it.id&&it.id!=="legacy" ? it.id : uid()})),
-      deliveries: poDeliveries(p).length ? poDeliveries(p).map(d=>({...d, id: d.id&&d.id!=="legacy" ? d.id : uid()})) : [{id:uid(),plan:"",actual:""}],
+      suppliers: poSuppliers(p).map(s=>({
+        ...s,
+        id: s.id&&s.id!=="legacy" ? s.id : uid(),
+        rounds: (s.rounds&&s.rounds.length ? s.rounds : [{amount:"",plan:"",actual:""}])
+          .map(r=>({...r, id: r.id&&r.id!=="legacy-round" ? r.id : uid()})),
+      })),
     });
     setEditId(p.id); setView("add"); setDetailId(null);
   };
@@ -1834,7 +1912,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const filtered = poEntries.filter(p=>{
     const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
     return (filter==="All"||p.status===filter)&&
-      (search===""||[itemsText,p.supplier,p.poNumber].join(" ").toLowerCase().includes(search.toLowerCase()));
+      (search===""||[itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(search.toLowerCase()));
   });
 
   // Group the filtered POs by Account Code so long lists stay organised and
@@ -1881,12 +1959,10 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
               <button onClick={closeForm} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
-              {[["ชื่อ Supplier *","supplier","text"],["เลข PO","poNumber","text"],["วันที่สั่ง PO","date","date"]].map(([l,k,t])=>(
-                <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
-                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
-                  <input type={t} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))} className="input-base"/>
-                </label>
-              ))}
+              <label style={{display:"flex",flexDirection:"column",gap:6}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วันที่สั่ง PO</span>
+                <input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} className="input-base"/>
+              </label>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>สถานะ</span>
                 <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} className="input-base">
@@ -1917,27 +1993,47 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 </div>
               </div>
 
-              {/* Delivery batches — goods on one PO can arrive in 2-3 separate shipments */}
+              {/* Suppliers — one PO can involve several vendors, and each
+                  vendor can be paid/delivered across several rounds instead
+                  of one lump sum. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🚚 แผนของเข้า (แยกงวดได้ ถ้าของมาไม่พร้อมกัน)</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier * (แบ่งจ่ายได้หลายเจ้า หลายรอบ)</span>
               </div>
-              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:8}}>
-                {form.deliveries.map((d,i)=>(
-                  <div key={d.id} style={{display:"grid",gridTemplateColumns:"20px 1fr 1fr auto",gap:8,alignItems:"center"}}>
-                    <span style={{fontSize:11,color:T.textMuted,fontWeight:600}}>{form.deliveries.length>1?`#${i+1}`:""}</span>
-                    <label style={{display:"flex",flexDirection:"column",gap:4}}>
-                      {i===0 && <span style={{fontSize:11,color:T.textSecondary}}>แผนของเข้า</span>}
-                      <input type="date" value={d.plan} onChange={e=>updateDeliveryRow(d.id,"plan",e.target.value)} className="input-base"/>
-                    </label>
-                    <label style={{display:"flex",flexDirection:"column",gap:4}}>
-                      {i===0 && <span style={{fontSize:11,color:T.textSecondary}}>รับจริง</span>}
-                      <input type="date" value={d.actual} onChange={e=>updateDeliveryRow(d.id,"actual",e.target.value)} className="input-base"/>
-                    </label>
-                    <button type="button" onClick={()=>removeDeliveryRow(d.id)} disabled={form.deliveries.length===1}
-                      style={{background:"none",border:"none",color:form.deliveries.length===1?T.textMuted:T.red,cursor:form.deliveries.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.deliveries.length===1?0.4:1,alignSelf:i===0?"end":"center",marginBottom:i===0?1:0}}>🗑</button>
+              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:12}}>
+                {form.suppliers.map((s,si)=>(
+                  <div key={s.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:12,background:T.bg}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center",marginBottom:10}}>
+                      <input placeholder="ชื่อ Supplier *" value={s.name} onChange={e=>updateSupplier(s.id,"name",e.target.value)} className="input-base"/>
+                      <input placeholder="เลข PO" value={s.poNumber} onChange={e=>updateSupplier(s.id,"poNumber",e.target.value)} className="input-base"/>
+                      <button type="button" onClick={()=>removeSupplier(s.id)} disabled={form.suppliers.length===1}
+                        style={{background:"none",border:"none",color:form.suppliers.length===1?T.textMuted:T.red,cursor:form.suppliers.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.suppliers.length===1?0.4:1}}>🗑</button>
+                    </div>
+                    <div style={{fontSize:11,fontWeight:600,color:T.textMuted,marginBottom:6}}>รอบจ่ายเงิน / ของเข้า {s.rounds.length>1?`(${s.rounds.length} รอบ)`:""}</div>
+                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      {s.rounds.map((r,ri)=>(
+                        <div key={r.id} style={{display:"grid",gridTemplateColumns:"18px 110px 1fr 1fr auto",gap:8,alignItems:"center"}}>
+                          <span style={{fontSize:11,color:T.textMuted,fontWeight:600}}>{s.rounds.length>1?`#${ri+1}`:""}</span>
+                          <input type="number" placeholder="มูลค่า" value={r.amount} onChange={e=>updateRound(s.id,r.id,"amount",e.target.value)} className="input-base"/>
+                          <label style={{display:"flex",flexDirection:"column",gap:2}}>
+                            {ri===0 && <span style={{fontSize:10,color:T.textSecondary}}>แผนของเข้า</span>}
+                            <input type="date" value={r.plan} onChange={e=>updateRound(s.id,r.id,"plan",e.target.value)} className="input-base"/>
+                          </label>
+                          <label style={{display:"flex",flexDirection:"column",gap:2}}>
+                            {ri===0 && <span style={{fontSize:10,color:T.textSecondary}}>รับจริง</span>}
+                            <input type="date" value={r.actual} onChange={e=>updateRound(s.id,r.id,"actual",e.target.value)} className="input-base"/>
+                          </label>
+                          <button type="button" onClick={()=>removeRound(s.id,r.id)} disabled={s.rounds.length===1}
+                            style={{background:"none",border:"none",color:s.rounds.length===1?T.textMuted:T.red,cursor:s.rounds.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:s.rounds.length===1?0.4:1,alignSelf:ri===0?"end":"center",marginBottom:ri===0?1:0}}>🗑</button>
+                        </div>
+                      ))}
+                    </div>
+                    <button type="button" onClick={()=>addRound(s.id)} className="btn-ghost" style={{padding:"5px 10px",fontSize:11,marginTop:8}}>+ เพิ่มรอบจ่ายเงิน</button>
                   </div>
                 ))}
-                <button type="button" onClick={addDeliveryRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12,alignSelf:"flex-start"}}>+ เพิ่มงวดของเข้า (ของมาไม่พร้อมกัน)</button>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <button type="button" onClick={addSupplier} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Supplier</button>
+                  {formRoundsTotal>0 && <span style={{fontSize:12,color:T.textSecondary}}>รวมทุกรอบ: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formRoundsTotal)}</b></span>}
+                </div>
               </div>
 
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -2022,8 +2118,8 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                 onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                                 onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                                 <td style={{padding:"10px 16px",color:T.textMuted,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
-                                <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{p.supplier}</td>
-                                <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{p.poNumber||"—"}</td>
+                                <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{poSupplierLabel(p)}</td>
+                                <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
                                 <td style={{padding:"10px 16px",textAlign:"right"}}>
                                   <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                                   {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>จาก {poItems(p).length} รหัส · รวม {fmt(poTotal(p))}</div>}
@@ -2076,7 +2172,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
   const q = search.toLowerCase();
   const passesFilter = (p) => {
     const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
-    const matchesSearch = q==="" || [itemsText,p.supplier,p.poNumber].join(" ").toLowerCase().includes(q);
+    const matchesSearch = q==="" || [itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(q);
     const hasIssue = incomingStatus(p)==="late" || paymentStatus(p)==="late";
     return matchesSearch && (!onlyIssues || hasIssue);
   };
@@ -2107,6 +2203,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
   // that arrives in 2-3 batches shows each plan → actual date with its own status.
   const DeliveryList = ({ po }) => {
     const deliveries = poDeliveries(po);
+    const multiSupplier = poSuppliers(po).length > 1;
     if (!deliveries.length) return <span style={{fontSize:12,color:T.textMuted}}>—</span>;
     return (
       <div style={{display:"flex",flexDirection:"column",gap:3}}>
@@ -2115,9 +2212,11 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
           return (
             <div key={d.id||i} style={{display:"flex",alignItems:"center",gap:5}}>
               {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:700,minWidth:14}}>#{i+1}</span>}
+              {multiSupplier && <span style={{fontSize:10,color:T.textSecondary,fontWeight:600,whiteSpace:"nowrap"}}>{d.supplierName||"—"}:</span>}
               <DateCell value={d.plan} lateTint={st==="late"}/>
               <span style={{color:T.textMuted,fontSize:11}}>→</span>
               <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:400}}>{d.actual||"รอ"}</span>
+              {d.amount && <span style={{fontSize:10,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>({fmt(d.amount)})</span>}
             </div>
           );
         })}
@@ -2184,8 +2283,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
                           style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
                           onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
-                          <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{p.poNumber||"—"}</td>
-                          <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{p.supplier}</td>
+                          <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
+                          <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{poSupplierLabel(p)}</td>
                           <td style={{padding:"9px 16px",textAlign:"right"}}>
                             <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                             {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
