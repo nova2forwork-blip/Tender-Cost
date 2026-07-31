@@ -1633,7 +1633,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, columns, saveColu
                 {label:"Account Name", key:"name", align:"left"},
                 {label:"📐 ยอดก่อนหน้า", key:"before", align:"right"},
                 {label:"+", key:null, align:"center", width:20},
-                {label:"➕ เพิ่มในคอลัมน์นี้", key:"add", align:"right"},
+                {label:`➕ ${selectedCol.label}`, key:"add", align:"right"},
                 {label:"=", key:null, align:"center", width:20},
                 {label:"✅ รวมสะสม", key:"cum", align:"right"},
                 {label:"", key:null, width:20},
