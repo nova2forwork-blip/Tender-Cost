@@ -76,11 +76,6 @@ const ACCOUNTS = [
 ];
 
 const GROUPS      = [...new Set(ACCOUNTS.map(a => a.group))];
-// Sort a list of rows (each with a `.group`) so rows of the same category sit
-// together, in the order categories first appear in ACCOUNTS/GROUPS.
-// Stable sort, so rows keep their relative order within each group.
-const byGroupOrder = (rows) =>
-  [...rows].sort((a, b) => GROUPS.indexOf(a.group) - GROUPS.indexOf(b.group));
 const PO_STATUS   = ["Pending","PO Issued","Delivered","Invoiced","Paid"];
 const STATUS_CLR  = { Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#8b5cf6",Paid:"#10b981" };
 const STATUS_BG   = { Pending:"#f1f5f9","PO Issued":"#eff6ff",Delivered:"#fffbeb",Invoiced:"#f5f3ff",Paid:"#f0fdf4" };
@@ -940,7 +935,8 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
-  const [sortByGroup, setSortByGroup] = useState(false);
+  const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "value" | null
+  const [sortDir, setSortDir] = useState(1);       // 1 = asc, -1 = desc
   const [saved,  setSaved]  = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addDraft, setAddDraft] = useState({ code:"", name:"", group:GROUPS[0] });
@@ -984,7 +980,25 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     const childMatch = !a.isExtra && childrenOf(a.code).some(k=>k.name.toLowerCase().includes(q));
     return selfMatch || childMatch;
   });
-  const displayRows = sortByGroup ? byGroupOrder(filtered) : filtered;
+
+  const handleSort = (key) => {
+    if (sortKey === key) setSortDir(d => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+  const displayRows = (() => {
+    if (!sortKey) return filtered;
+    const arr = [...filtered];
+    arr.sort((a, b) => {
+      let av, bv;
+      if (sortKey === "code")       { av = a.code; bv = b.code; }
+      else if (sortKey === "group") { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
+      else if (sortKey === "name")  { av = a.name; bv = b.name; }
+      else                          { av = effectiveValue(a); bv = effectiveValue(b); }
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  })();
 
   const handleSave = () => {
     const merged = {...draft};
@@ -1045,10 +1059,6 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
             🗂 ที่ซ่อนไว้ ({hiddenList.length})
           </button>
         )}
-        <button className="btn-ghost" onClick={()=>setSortByGroup(v=>!v)}
-          style={sortByGroup?{background:T.blueLight,borderColor:T.blue,color:T.blue}:undefined}>
-          {sortByGroup?"✓ ":""}↕️ จัดเรียงตามหมวด
-        </button>
         <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการหลักใหม่</button>
         <button onClick={handleSave} className="btn-primary"
           style={{background:saved?T.green:T.blue,minWidth:140}}>
@@ -1101,8 +1111,17 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
-              {["Acc. Code","Group","Account Name","Tender Cost (THB)",""].map(h=>(
-                <th key={h} style={{padding:"11px 16px",textAlign:h.includes("Cost")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+              {[
+                {label:"Acc. Code", key:"code"},
+                {label:"Group", key:"group"},
+                {label:"Account Name", key:"name"},
+                {label:"Tender Cost (THB)", key:"value"},
+                {label:"", key:null},
+              ].map(({label,key})=>(
+                <th key={label||"__actions"} onClick={()=>key&&handleSort(key)}
+                  style={{padding:"11px 16px",textAlign:label.includes("Cost")?"right":"left",color:sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,cursor:key?"pointer":"default",userSelect:"none",whiteSpace:"nowrap"}}>
+                  {label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}
+                </th>
               ))}
             </tr>
           </thead>
@@ -1217,7 +1236,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const [newMonth, setNewMonth] = useState("");
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
-  const [sortByGroup, setSortByGroup] = useState(false);
+  const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "before" | "add" | "cum" | null
+  const [sortDir, setSortDir] = useState(1);
   const [draftAdd, setDraftAdd] = useState({...(additions[month]||{})});
   const [saved, setSaved] = useState(false);
   const [addExtraOpen, setAddExtraOpen] = useState(false);
@@ -1284,7 +1304,32 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const childMatch = childrenOf(r.code).some(k=>k.name.toLowerCase().includes(q));
     return selfMatch || childMatch;
   });
-  const displayRows = sortByGroup ? byGroupOrder(filtered) : filtered;
+
+  // Mirrors the per-row figures computed inline in the table body, so header
+  // sorting can order rows by the same "ยอดก่อนหน้า / เพิ่มเดือนนี้ / รวมสะสม" values shown.
+  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + (parseFloat(tenderCosts[r.code])||0);
+  const cumOf = (r) => cumBeforeOf(r) + rowMonthValue(r.code, month, draftAdd);
+
+  const handleSort = (key) => {
+    if (sortKey === key) setSortDir(d => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+  const displayRows = (() => {
+    if (!sortKey) return filtered;
+    const arr = [...filtered];
+    arr.sort((a, b) => {
+      let av, bv;
+      if (sortKey === "code")        { av = a.code; bv = b.code; }
+      else if (sortKey === "group")  { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
+      else if (sortKey === "name")   { av = a.name; bv = b.name; }
+      else if (sortKey === "before") { av = cumBeforeOf(a); bv = cumBeforeOf(b); }
+      else if (sortKey === "add")    { av = rowMonthValue(a.code, month, draftAdd); bv = rowMonthValue(b.code, month, draftAdd); }
+      else                           { av = cumOf(a); bv = cumOf(b); }
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  })();
 
   const handleAddMonth = () => {
     if (!newMonth || months.includes(newMonth)) return;
@@ -1393,10 +1438,6 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
           ))}
         </div>
-        <button className="btn-ghost" onClick={()=>setSortByGroup(v=>!v)}
-          style={sortByGroup?{background:T.blueLight,borderColor:T.blue,color:T.blue}:undefined}>
-          {sortByGroup?"✓ ":""}↕️ จัดเรียงตามหมวด
-        </button>
         <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)}>+ งานพิเศษ</button>
         <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
           {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
@@ -1428,15 +1469,22 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
-              <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Acc. Code</th>
-              <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Group</th>
-              <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Account Name</th>
-              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>📐 ยอดก่อนหน้า</th>
-              <th style={{padding:"11px 16px",textAlign:"center",color:T.textMuted,fontWeight:600,fontSize:11,borderBottom:`1px solid ${T.cardBorder}`,width:20}}>+</th>
-              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>➕ เพิ่มเดือนนี้</th>
-              <th style={{padding:"11px 16px",textAlign:"center",color:T.textMuted,fontWeight:600,fontSize:11,borderBottom:`1px solid ${T.cardBorder}`,width:20}}>=</th>
-              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>✅ รวมสะสม</th>
-              <th style={{padding:"11px 16px",borderBottom:`1px solid ${T.cardBorder}`,width:20}}></th>
+              {[
+                {label:"Acc. Code", key:"code", align:"left"},
+                {label:"Group", key:"group", align:"left"},
+                {label:"Account Name", key:"name", align:"left"},
+                {label:"📐 ยอดก่อนหน้า", key:"before", align:"right"},
+                {label:"+", key:null, align:"center", width:20},
+                {label:"➕ เพิ่มเดือนนี้", key:"add", align:"right"},
+                {label:"=", key:null, align:"center", width:20},
+                {label:"✅ รวมสะสม", key:"cum", align:"right"},
+                {label:"", key:null, width:20},
+              ].map(({label,key,align,width},idx)=>(
+                <th key={idx} onClick={()=>key&&handleSort(key)}
+                  style={{padding:"11px 16px",textAlign:align||"left",color:key&&sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:label.length>2?0.8:0,textTransform:label.length>2?"uppercase":"none",borderBottom:`1px solid ${T.cardBorder}`,cursor:key?"pointer":"default",userSelect:"none",whiteSpace:"nowrap",...(width?{width}:{})}}>
+                  {label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -1997,7 +2045,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
 // ─── Accounting View ──────────────────────────────────────────────────────────
 function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [view, setView] = useState("dashboard");
-  const [sortByGroup, setSortByGroup] = useState(false);
+  const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
+  const [sortDir, setSortDir] = useState(1);
 
   // Budget = baseline Tender Cost + every monthly addition entered so far,
   // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
@@ -2031,7 +2080,27 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     const pos=poEntries.filter(p=>p.code===a.code);
     return {...a,budget,committed:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0),pos,over:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0)>budget&&budget>0};
   }).filter(a=>a.budget>0||a.pos.length>0);
-  const displayAccountData = sortByGroup ? byGroupOrder(accountData) : accountData;
+  const pctUsedOf = (a) => a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0 ? 999 : 0);
+  const handleSort = (key) => {
+    if (sortKey === key) setSortDir(d => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+  const displayAccountData = (() => {
+    if (!sortKey) return accountData;
+    const arr = [...accountData];
+    arr.sort((a, b) => {
+      let av, bv;
+      if (sortKey === "code")           { av = a.code; bv = b.code; }
+      else if (sortKey === "group")     { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
+      else if (sortKey === "name")      { av = a.name; bv = b.name; }
+      else if (sortKey === "budget")    { av = a.budget; bv = b.budget; }
+      else if (sortKey === "committed") { av = a.committed; bv = b.committed; }
+      else                              { av = pctUsedOf(a); bv = pctUsedOf(b); }
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  })();
 
   const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+(parseFloat(p.amount)||0),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
@@ -2054,12 +2123,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
             <button key={v} onClick={()=>setView(v)}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
-          {view==="detail" && (
-            <button className="btn-ghost" onClick={()=>setSortByGroup(v=>!v)} style={{marginLeft:"auto",...(sortByGroup?{background:T.blueLight,borderColor:T.blue,color:T.blue}:{})}}>
-              {sortByGroup?"✓ ":""}↕️ จัดเรียงตามหมวด
-            </button>
-          )}
-          <button onClick={onExport} className="btn-ghost" style={{marginLeft:view==="detail"?0:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
+          <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
             ⬇️ Export Excel
           </button>
         </div>
@@ -2127,8 +2191,19 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
-                  {["Acc. Code","Account Name","Group","Budget (QS)","Committed (PO)","% Used",""].map(h=>(
-                    <th key={h} style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(h)?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                  {[
+                    {label:"Acc. Code", key:"code"},
+                    {label:"Account Name", key:"name"},
+                    {label:"Group", key:"group"},
+                    {label:"Budget (QS)", key:"budget"},
+                    {label:"Committed (PO)", key:"committed"},
+                    {label:"% Used", key:"pct"},
+                    {label:"", key:null},
+                  ].map(({label,key})=>(
+                    <th key={label||"__actions"} onClick={()=>key&&handleSort(key)}
+                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,cursor:key?"pointer":"default",userSelect:"none",whiteSpace:"nowrap"}}>
+                      {label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}
+                    </th>
                   ))}
                 </tr>
               </thead>
