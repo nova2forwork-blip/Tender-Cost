@@ -879,10 +879,10 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
   // Two kinds of extra item:
   //  - standalone (has `group`): a brand-new scope item with its own Acc-like code
   //  - sub-item   (has `parentCode`): a breakdown line that rolls up INTO an existing Acc. Code
-  const handleAddExtraItem = ({ name, group, parentCode, code }) => {
+  const handleAddExtraItem = ({ name, group, parentCode, code, scope }) => {
     if (!name.trim()) return;
     const item = parentCode
-      ? { code:`EX-${uid()}`, name:name.trim(), parentCode }
+      ? { code:`EX-${uid()}`, name:name.trim(), parentCode, scope }
       : { code: code || `EX-${uid()}`, name:name.trim(), group };
     saveExtraItems([...extraItems, item]);
     return item.code;
@@ -947,9 +947,11 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
   // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
   // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
+  // Only show sub-items created here on the Baseline tab — Monthly-tab sub-items
+  // are a separate breakdown and are intentionally kept off this tab.
   const subItemsByParent = {};
   extraItems.forEach(e => {
-    if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
+    if (e.parentCode && e.scope !== "monthly") (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
   });
   const standaloneExtras = extraItems.filter(e => !e.parentCode);
   const childrenOf = (code) => subItemsByParent[code] || [];
@@ -1002,7 +1004,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode });
+    onAddExtra({ name:subName, parentCode, scope:"baseline" });
     setCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
@@ -1222,7 +1224,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const allRows = [...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)), ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const subItemsByParent = {};
-  extraItems.forEach(e => { if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e); });
+  extraItems.forEach(e => { if (e.parentCode && e.scope === "monthly") (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e); });
   const childrenOf = (code) => subItemsByParent[code] || [];
 
   // A row's monthly figure is the sum of its sub-items' figures when it has
@@ -1302,7 +1304,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode });
+    onAddExtra({ name:subName, parentCode, scope:"monthly" });
     setRowCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
