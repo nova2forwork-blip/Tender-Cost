@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 import { supabase, sg, ss, sd } from "./supabase.js";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, AreaChart, Area, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
   loadUsers, createUser, resetPassword, toggleActive, deleteUser, loadLogs,
@@ -1188,13 +1188,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // a separate row here.
   const allRows = [...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)), ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
-  const cumulativeThrough = (code, uptoMonth) => {
-    const base = parseFloat(tenderCosts[code]) || 0;
-    const addSum = months.filter(m => m <= uptoMonth).reduce((s,m) => s + (parseFloat(additions[m]?.[code]) || 0), 0);
-    return base + addSum;
-  };
-  const monthTotal      = (m) => allRows.reduce((s,r) => s + (parseFloat(additions[m]?.[r.code]) || 0), 0);
-  const cumulativeTotal = (uptoMonth) => allRows.reduce((s,r) => s + cumulativeThrough(r.code, uptoMonth), 0);
+  const monthTotal = (m) => allRows.reduce((s,r) => s + (parseFloat(additions[m]?.[r.code]) || 0), 0);
 
   const baseTotal = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
   const thisMonthAdd = allRows.reduce((s,r) => s + (parseFloat(draftAdd[r.code]) || 0), 0);
@@ -1206,6 +1200,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const sortedMonths = months.length ? months : [thisMonth];
   const cumulativeLive = (uptoMonth) => baseTotal + sortedMonths.filter(m=>m<=uptoMonth).reduce((s,m)=>s+monthTotalLive(m),0);
   const grandTotal = cumulativeLive(sortedMonths[sortedMonths.length-1]);
+  const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
+  const chartData = [
+    { label:"เริ่มต้น", cumulative: baseTotal },
+    ...sortedMonths.map(m => ({ label: monthShortLabel(m), cumulative: cumulativeLive(m), added: monthTotalLive(m) })),
+  ];
 
   const filtered = allRows.filter(r =>
     (filter==="All" || r.group===filter) &&
@@ -1235,63 +1234,71 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   return (
     <div style={{padding:"4px 28px 24px"}}>
-      {/* Monthly summary — every month + grand total, up top */}
-      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
-        <div style={{padding:"14px 18px",borderBottom:`1px solid ${T.cardBorder}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
-          <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📊 สรุปรายเดือน (รวมทุกเดือน)</span>
-          <span style={{fontSize:12,color:T.textMuted}}>รวมทั้งหมด (ราคาเดิม + เพิ่มสะสมทุกเดือน): <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:14}}>{fmt(grandTotal)}</b></span>
+      {/* Trend chart — the whole project's cost growth over time, at a glance */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6,flexWrap:"wrap",gap:6}}>
+          <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📈 แนวโน้มต้นทุนสะสม</span>
+          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(grandTotal)}</b> THB</span>
         </div>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-          <thead>
-            <tr style={{background:"#f8fafc"}}>
-              {["เดือน","เพิ่มเดือนนั้น (THB)","รวมสะสมถึงเดือนนั้น (THB)"].map(h=>(
-                <th key={h} style={{padding:"9px 16px",textAlign:h==="เดือน"?"left":"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {sortedMonths.map((m,i)=>{
-              const add = monthTotalLive(m);
-              const cum = cumulativeLive(m);
-              const active = m===month;
-              return (
-                <tr key={m} onClick={()=>setMonth(m)}
-                  style={{cursor:"pointer",background:active?T.blueLight:(i%2===0?T.card:"#fafbfd"),borderBottom:"1px solid #f1f5f9"}}>
-                  <td style={{padding:"9px 16px",fontWeight:active?700:500,color:active?T.blue:T.textPrimary}}>
-                    {new Date(m+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})}
-                    {active && <span style={{marginLeft:7,fontSize:10,color:T.blue}}>● กำลังดู</span>}
-                  </td>
-                  <td style={{padding:"9px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(add)}</td>
-                  <td style={{padding:"9px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cum)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-          <tfoot>
-            <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-              <td style={{padding:"10px 16px",color:T.textMuted,fontSize:12,fontWeight:600}}>รวมทุกเดือน</td>
-              <td style={{padding:"10px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>
-                {fmt(sortedMonths.reduce((s,m)=>s+monthTotalLive(m),0))}
-              </td>
-              <td style={{padding:"10px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>{fmt(grandTotal)}</td>
-            </tr>
-          </tfoot>
-        </table>
+        <ResponsiveContainer width="100%" height={170}>
+          <AreaChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}>
+            <defs>
+              <linearGradient id="cumGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={T.blue} stopOpacity={0.3}/>
+                <stop offset="100%" stopColor={T.blue} stopOpacity={0.02}/>
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2f7"/>
+            <XAxis dataKey="label" tick={{fontSize:11,fill:T.textMuted}} axisLine={false} tickLine={false}/>
+            <YAxis tick={{fontSize:10,fill:T.textMuted}} axisLine={false} tickLine={false} tickFormatter={fmtK}/>
+            <Tooltip formatter={(v)=>[`${fmt(v)} THB`,"รวมสะสม"]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
+              contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
+            <Area type="monotone" dataKey="cumulative" stroke={T.blue} strokeWidth={2.5} fill="url(#cumGrad)"/>
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
 
-      {/* Month selector */}
-      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
-        <span style={{fontSize:12,color:T.textSecondary,fontWeight:600}}>เดือน:</span>
-        <select className="input-base" value={month} onChange={e=>setMonth(e.target.value)} style={{width:160,fontWeight:600}}>
-          {(months.length ? months : [thisMonth]).map(m => (
-            <option key={m} value={m}>{new Date(m+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})}</option>
+      {/* Month picker — horizontal chips, click any to switch, "+" chip to add a new month */}
+      <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,marginBottom:16}}>
+        {sortedMonths.map(m=>{
+          const active = m===month;
+          const add = monthTotalLive(m);
+          return (
+            <button key={m} onClick={()=>setMonth(m)}
+              style={{flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
+                background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
+              <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{monthShortLabel(m)}</div>
+              <div style={{fontSize:15,fontWeight:700,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
+              <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} เดือนนี้</div>
+            </button>
+          );
+        })}
+        <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.cardBorder}`}}>
+          <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
+            style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
+          <button className="btn-ghost" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap"}} onClick={handleAddMonth}>+ เพิ่มเดือน</button>
+        </div>
+      </div>
+
+      {/* Stats for selected month */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:20}}>
+        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baseTotal)} sub="รวมทุก Account Code" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="เพิ่มเดือนนี้" value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
+        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมทุกเดือน" color={T.green} icon="✅" accent={T.greenBg}/>
+      </div>
+
+      {/* Toolbar: search + group filter + actions */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
+          className="input-base" style={{width:220}}/>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
+          {["All",...GROUPS].map(g=>(
+            <button key={g} onClick={()=>setFilter(g)}
+              style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
           ))}
-        </select>
-        <input type="month" className="input-base" value={newMonth} onChange={e=>setNewMonth(e.target.value)} style={{width:150}}/>
-        <button className="btn-ghost" onClick={handleAddMonth}>+ เพิ่มเดือนใหม่</button>
-        <div style={{marginLeft:"auto"}}/>
-        <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)}>+ เพิ่มงานพิเศษ (Extra Item)</button>
-        <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:150}}>
+        </div>
+        <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)}>+ งานพิเศษ</button>
+        <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
           {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
         </button>
       </div>
@@ -1312,33 +1319,20 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </div>
       )}
 
-      {/* Stats for selected month */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:20}}>
-        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baseTotal)} sub="รวมทุก Account Code" color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label={`เพิ่มเดือนนี้`} value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
-        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมทุกเดือน" color={T.green} icon="✅" accent={T.greenBg}/>
-      </div>
-
-      {/* Filters */}
-      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
-          className="input-base" style={{width:240}}/>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
-          {["All",...GROUPS].map(g=>(
-            <button key={g} onClick={()=>setFilter(g)}
-              style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
-          ))}
-        </div>
-      </div>
-
-      {/* Main table: เดิม / เพิ่มเดือนนี้ / รวมสะสม */}
-      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginBottom:24}}>
+      {/* Main table: เดิม + เพิ่มเดือนนี้ = รวมสะสม */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
-              {["Acc. Code","Group","Account Name","เดิม (THB)","เพิ่มเดือนนี้ (THB)","รวมสะสม (THB)",""].map(h=>(
-                <th key={h} style={{padding:"11px 16px",textAlign:h.includes("THB")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
-              ))}
+              <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Acc. Code</th>
+              <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Group</th>
+              <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Account Name</th>
+              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>📐 เดิม</th>
+              <th style={{padding:"11px 16px",textAlign:"center",color:T.textMuted,fontWeight:600,fontSize:11,borderBottom:`1px solid ${T.cardBorder}`,width:20}}>+</th>
+              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>➕ เพิ่มเดือนนี้</th>
+              <th style={{padding:"11px 16px",textAlign:"center",color:T.textMuted,fontWeight:600,fontSize:11,borderBottom:`1px solid ${T.cardBorder}`,width:20}}>=</th>
+              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>✅ รวมสะสม</th>
+              <th style={{padding:"11px 16px",borderBottom:`1px solid ${T.cardBorder}`,width:20}}></th>
             </tr>
           </thead>
           <tbody>
@@ -1358,10 +1352,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     {r.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>งานเพิ่ม</span>}
                   </td>
                   <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(baseVal)}</td>
+                  <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                   <td style={{padding:"8px 16px",textAlign:"right"}}>
                     <input type="number" value={draftAdd[r.code]??""} onChange={e=>setDraftAdd(d=>({...d,[r.code]:e.target.value}))}
-                      placeholder="0.00" className="input-base" style={{width:140,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:thisVal!==0?T.amberBg:T.bg}}/>
+                      placeholder="0.00" className="input-base" style={{width:130,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:thisVal!==0?T.amberBg:T.bg}}/>
                   </td>
+                  <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
                   <td style={{padding:"8px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cum)}</td>
                   <td style={{padding:"8px 16px",textAlign:"center"}}>
                     {r.isExtra && (
@@ -1372,6 +1368,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                 </tr>
               );
             })}
+            {filtered.length === 0 && (
+              <tr><td colSpan={9} style={{padding:"28px 16px",textAlign:"center",color:T.textMuted,fontSize:13}}>ไม่พบรายการที่ตรงกับการค้นหา</td></tr>
+            )}
           </tbody>
           <tfoot>
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
@@ -1379,9 +1378,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
                 {fmt(filtered.reduce((s,r)=>s+(parseFloat(tenderCosts[r.code])||0),0))}
               </td>
+              <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
                 {fmt(filtered.reduce((s,r)=>s+(parseFloat(draftAdd[r.code])||0),0))}
               </td>
+              <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,r)=>{
                   const baseVal = parseFloat(tenderCosts[r.code]) || 0;
@@ -1394,36 +1395,6 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           </tfoot>
         </table>
       </div>
-
-      {/* Overview across all months */}
-      {months.length > 0 && (
-        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-          <div style={{padding:"14px 18px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:600,color:T.textPrimary}}>
-            สรุปยอดรวมแต่ละเดือน (ทุกเดือน)
-          </div>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-            <thead>
-              <tr style={{background:"#f8fafc"}}>
-                {["เดือน","เพิ่มเดือนนั้น (THB)","รวมสะสมถึงเดือนนั้น (THB)"].map(h=>(
-                  <th key={h} style={{padding:"10px 16px",textAlign:h.includes("THB")?"right":"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {months.map(m => (
-                <tr key={m} onClick={()=>setMonth(m)}
-                  style={{borderBottom:"1px solid #f1f5f9",cursor:"pointer",background:m===month?T.blueLight:T.card}}>
-                  <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:m===month?700:500}}>
-                    {new Date(m+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})}
-                  </td>
-                  <td style={{padding:"9px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(monthTotal(m))}</td>
-                  <td style={{padding:"9px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cumulativeTotal(m))}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }
