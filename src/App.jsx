@@ -1281,10 +1281,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       </div>
 
       {/* Stats for selected month */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:16,marginBottom:20}}>
         <StatCard label="ราคาเดิม (Baseline)" value={fmt(baseTotal)} sub="รวมทุก Account Code" color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label="เพิ่มเดือนนี้" value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
-        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมทุกเดือน" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="รวมทั้งหมด" value={fmt(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
       </div>
 
       {/* Toolbar: search + group filter + actions */}
@@ -1327,7 +1328,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Acc. Code</th>
               <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Group</th>
               <th style={{padding:"11px 16px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>Account Name</th>
-              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>📐 เดิม</th>
+              <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>📐 ยอดก่อนหน้า</th>
               <th style={{padding:"11px 16px",textAlign:"center",color:T.textMuted,fontWeight:600,fontSize:11,borderBottom:`1px solid ${T.cardBorder}`,width:20}}>+</th>
               <th style={{padding:"11px 16px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>➕ เพิ่มเดือนนี้</th>
               <th style={{padding:"11px 16px",textAlign:"center",color:T.textMuted,fontWeight:600,fontSize:11,borderBottom:`1px solid ${T.cardBorder}`,width:20}}>=</th>
@@ -1351,7 +1352,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     {r.name}
                     {r.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>งานเพิ่ม</span>}
                   </td>
-                  <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(baseVal)}</td>
+                  <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}</td>
                   <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                   <td style={{padding:"8px 16px",textAlign:"right"}}>
                     <input type="number" value={draftAdd[r.code]??""} onChange={e=>setDraftAdd(d=>({...d,[r.code]:e.target.value}))}
@@ -1376,7 +1377,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
               <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
-                {fmt(filtered.reduce((s,r)=>s+(parseFloat(tenderCosts[r.code])||0),0))}
+                {fmt(filtered.reduce((s,r)=>{
+                  const baseVal = parseFloat(tenderCosts[r.code]) || 0;
+                  const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
+                  return s + cumBefore;
+                },0))}
               </td>
               <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
