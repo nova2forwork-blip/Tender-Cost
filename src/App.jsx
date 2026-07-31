@@ -85,10 +85,39 @@ const GRP_COLORS  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"
 // A PO's incoming status is derived from its planned/actual dates rather than
 // stored directly, so it's always in sync with today's date.
 const todayStr = () => new Date().toISOString().slice(0,10);
+
+// ─── Multi-code / multi-batch PO helpers ───────────────────────────────────
+// A single PO can now be split across several Account Codes (each with its
+// own amount that rolls up into the PO total) and can arrive in several
+// delivery batches instead of a single date. Older records saved before this
+// existed still carry a single `code`/`amount` and a single
+// `incomingPlan`/`actualReceived` — these getters transparently upgrade them
+// so both old and new records work everywhere without a one-off migration.
+const poItems = (p) => (p.items && p.items.length ? p.items : [{ id:"legacy", code:p.code||"", amount:p.amount||"" }]);
+const poTotal = (p) => poItems(p).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
+const poAmountForCode = (p, code) => poItems(p).filter(it => it.code===code).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
+const poDeliveries = (p) => (p.deliveries && p.deliveries.length
+  ? p.deliveries
+  : (p.incomingPlan || p.actualReceived ? [{ id:"legacy", plan:p.incomingPlan||"", actual:p.actualReceived||"" }] : []));
+
+const deliveryStatus = (d) => {
+  if (d.actual) return "received";
+  if (d.plan && d.plan < todayStr()) return "late";
+  if (d.plan) return "pending";
+  return "unset";
+};
+// PO-level incoming status aggregates every delivery batch: fully received
+// only once every batch has arrived; "partial" once some (but not all)
+// batches are in, so a PO that comes in 2-3 shipments is tracked accurately.
 const incomingStatus = (p) => {
-  if (p.actualReceived) return "received";
-  if (p.incomingPlan && p.incomingPlan < todayStr()) return "late";
-  if (p.incomingPlan) return "pending";
+  const deliveries = poDeliveries(p);
+  if (!deliveries.length) return "unset";
+  const sts = deliveries.map(deliveryStatus);
+  const receivedCount = sts.filter(s=>s==="received").length;
+  if (receivedCount === deliveries.length) return "received";
+  if (sts.some(s=>s==="late")) return "late";
+  if (receivedCount > 0) return "partial";
+  if (sts.some(s=>s==="pending")) return "pending";
   return "unset";
 };
 const paymentStatus = (p) => {
@@ -97,9 +126,9 @@ const paymentStatus = (p) => {
   if (p.paymentPlan) return "pending";
   return "unset";
 };
-const INCOMING_LABEL = { received:"รับแล้ว", late:"ของเข้าล่าช้า", pending:"รอของเข้า", unset:"ยังไม่กำหนด" };
-const INCOMING_CLR   = { received:"#10b981", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
-const INCOMING_BG    = { received:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
+const INCOMING_LABEL = { received:"รับแล้ว", partial:"รับบางส่วน", late:"ของเข้าล่าช้า", pending:"รอของเข้า", unset:"ยังไม่กำหนด" };
+const INCOMING_CLR   = { received:"#10b981", partial:"#3b82f6", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
+const INCOMING_BG    = { received:"#f0fdf4", partial:"#eff6ff", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
 const PAYMENT_LABEL  = { paid:"จ่ายแล้ว", late:"เกินกำหนดจ่าย", pending:"รอจ่ายเงิน", unset:"ยังไม่กำหนด" };
 const PAYMENT_CLR    = { paid:"#10b981", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
 const PAYMENT_BG     = { paid:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
@@ -180,7 +209,7 @@ function exportToExcel(project, tenderCosts, additions, poEntries) {
   let grandBudget=0, grandCommitted=0;
   ACCOUNTS.forEach(a => {
     const budget    = parseFloat(combinedBudget[a.code]) || 0;
-    const committed = poEntries.filter(p=>p.code===a.code).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+    const committed = poEntries.reduce((s,p)=>s+poAmountForCode(p,a.code),0);
     const remaining = budget - committed;
     const pctUsed   = budget > 0 ? committed/budget : (committed>0?999:0);
     const status    = committed > budget && budget > 0 ? "OVER BUDGET" : committed>0 ? "OK" : budget>0 ? "No PO" : "-";
@@ -205,17 +234,24 @@ function exportToExcel(project, tenderCosts, additions, poEntries) {
   XLSX.utils.book_append_sheet(wb, ws1, "Summary");
 
   const poRows = [];
-  poRows.push([`Project: ${project.name}`, "", "", "", "", "", "", ""]);
+  poRows.push([`Project: ${project.name}`, "", "", "", "", "", "", "", ""]);
   poRows.push([]);
-  poRows.push(["PO Date","Acc. Code","Account Name","Group","Supplier","PO Number","Amount","Status","Notes"]);
+  poRows.push(["PO Date","Acc. Code","Account Name","Group","Supplier","PO Number","Amount","Status","Deliveries","Notes"]);
+  // One row per Account Code line — a PO split across several codes gets one
+  // row per code, each with just that code's share of the amount. The
+  // delivery batches (a PO can arrive in 2-3 shipments) are summarised into
+  // a single "plan → actual" list per row.
   poEntries.forEach(p => {
-    const acc = ACCOUNTS.find(a=>a.code===p.code);
-    poRows.push([p.date, p.code, acc?.name||"", acc?.group||"", p.supplier, p.poNumber, parseFloat(p.amount)||0, p.status, p.notes||""]);
+    const deliveryStr = poDeliveries(p).map(d=>`${d.plan||"-"} → ${d.actual||"รอ"}`).join(" | ") || "-";
+    poItems(p).forEach(it => {
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      poRows.push([p.date, it.code, acc?.name||"", acc?.group||"", p.supplier, p.poNumber, parseFloat(it.amount)||0, p.status, deliveryStr, p.notes||""]);
+    });
   });
   poRows.push([]);
-  poRows.push(["","","","","","TOTAL", poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0), "",""]);
+  poRows.push(["","","","","","TOTAL", poEntries.reduce((s,p)=>s+poTotal(p),0), "","",""]);
   const ws2 = XLSX.utils.aoa_to_sheet(poRows);
-  ws2["!cols"] = [{wch:12},{wch:10},{wch:38},{wch:14},{wch:24},{wch:16},{wch:18},{wch:12},{wch:30}];
+  ws2["!cols"] = [{wch:12},{wch:10},{wch:38},{wch:14},{wch:24},{wch:16},{wch:18},{wch:12},{wch:34},{wch:30}];
   for (let r=2; r<poRows.length; r++) {
     const ref = XLSX.utils.encode_cell({r, c:6});
     if (ws2[ref] && typeof ws2[ref].v === "number") ws2[ref].z = '#,##0.00';
@@ -226,7 +262,7 @@ function exportToExcel(project, tenderCosts, additions, poEntries) {
   GROUPS.forEach(g => {
     const codes = ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
     const b = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
-    const c2 = poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+    const c2 = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
     if (b>0||c2>0) grpRows.push([g,b,c2,b-c2,b>0?c2/b:0]);
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(grpRows), "By Group");
@@ -1118,9 +1154,9 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                 {label:"Tender Cost (THB)", key:"value"},
                 {label:"", key:null},
               ].map(({label,key})=>(
-                <th key={label||"__actions"} onClick={()=>key&&handleSort(key)}
-                  style={{padding:"11px 16px",textAlign:label.includes("Cost")?"right":"left",color:sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,cursor:key?"pointer":"default",userSelect:"none",whiteSpace:"nowrap"}}>
-                  {label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}
+                <th key={label||"__actions"}
+                  style={{padding:"11px 16px",textAlign:label.includes("Cost")?"right":"left",color:sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                 </th>
               ))}
             </tr>
@@ -1480,9 +1516,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                 {label:"✅ รวมสะสม", key:"cum", align:"right"},
                 {label:"", key:null, width:20},
               ].map(({label,key,align,width},idx)=>(
-                <th key={idx} onClick={()=>key&&handleSort(key)}
-                  style={{padding:"11px 16px",textAlign:align||"left",color:key&&sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:label.length>2?0.8:0,textTransform:label.length>2?"uppercase":"none",borderBottom:`1px solid ${T.cardBorder}`,cursor:key?"pointer":"default",userSelect:"none",whiteSpace:"nowrap",...(width?{width}:{})}}>
-                  {label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}
+                <th key={idx}
+                  style={{padding:"11px 16px",textAlign:align||"left",color:key&&sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:label.length>2?0.8:0,textTransform:label.length>2?"uppercase":"none",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap",...(width?{width}:{})}}>
+                  <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                 </th>
               ))}
             </tr>
@@ -1629,7 +1665,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 // Edit / Delete from the same place.
 function PODetailModal({ po, onClose, onEdit, onDelete }) {
   if (!po) return null;
-  const acc = ACCOUNTS.find(a => a.code === po.code);
+  const items = poItems(po);
+  const deliveries = poDeliveries(po);
   const inc = incomingStatus(po), pay = paymentStatus(po);
 
   const Row = ({ label, value, mono }) => (
@@ -1644,33 +1681,68 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
       <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,padding:26,width:"100%",maxWidth:520,maxHeight:"88vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
           <div>
-            <div style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{po.code}</div>
-            <div style={{fontSize:16,fontWeight:700,color:T.textPrimary,marginTop:2}}>{acc?.name || "—"}</div>
+            <div style={{fontSize:16,fontWeight:700,color:T.textPrimary}}>{po.supplier || "—"}</div>
+            <div style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>{po.poNumber || "ไม่มีเลข PO"}</div>
           </div>
           <button onClick={onClose} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted,flexShrink:0}}>×</button>
         </div>
 
-        <div style={{display:"flex",gap:6,margin:"12px 0 4px"}}>
+        <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap"}}>
           <span style={{background:STATUS_BG[po.status],color:STATUS_CLR[po.status],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{po.status}</span>
           <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{INCOMING_LABEL[inc]}</span>
           <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_LABEL[pay]}</span>
         </div>
 
-        <div style={{marginTop:14}}>
-          <Row label="Supplier" value={po.supplier} />
-          <Row label="เลข PO" value={po.poNumber} mono />
-          <Row label="มูลค่า (THB)" value={fmt(po.amount)} mono />
-          <Row label="วันที่สั่ง PO" value={po.date} mono />
-          <Row label="แผนของเข้า" value={po.incomingPlan} mono />
-          <Row label="รับจริง" value={po.actualReceived} mono />
-          <Row label="แผนจ่ายเงิน" value={po.paymentPlan} mono />
-          {po.notes && (
-            <div style={{padding:"10px 0"}}>
-              <div style={{fontSize:12,color:T.textMuted,fontWeight:500,marginBottom:4}}>หมายเหตุ</div>
-              <div style={{fontSize:13,color:T.textPrimary,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{po.notes}</div>
+        {/* Account-code line items — a PO can split its total across several codes */}
+        <div style={{marginTop:14,background:T.bg,borderRadius:10,padding:"4px 12px"}}>
+          {items.map((it,i)=>{
+            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            return (
+              <div key={it.id||i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<items.length-1?`1px solid ${T.cardBorder}`:"none"}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{it.code||"—"}</div>
+                  <div style={{fontSize:12,color:T.textSecondary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acc?.name||"—"}</div>
+                </div>
+                <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary,flexShrink:0}}>{fmt(it.amount)}</div>
+              </div>
+            );
+          })}
+          {items.length>1 && (
+            <div style={{display:"flex",justifyContent:"space-between",padding:"9px 0",fontSize:12,fontWeight:700}}>
+              <span style={{color:T.textMuted}}>รวมทั้ง PO</span>
+              <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(poTotal(po))}</span>
             </div>
           )}
         </div>
+
+        <div style={{marginTop:4}}>
+          <Row label="วันที่สั่ง PO" value={po.date} mono />
+          <Row label="แผนจ่ายเงิน" value={po.paymentPlan} mono />
+        </div>
+
+        {/* Delivery batches — goods on a PO can arrive in 2-3 separate shipments */}
+        <div style={{marginTop:10}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>🚚 การส่งของ {deliveries.length>1?`(${deliveries.length} งวด)`:""}</div>
+          {deliveries.length===0 ? (
+            <div style={{fontSize:12,color:T.textMuted}}>ยังไม่ได้กำหนดแผนของเข้า</div>
+          ) : deliveries.map((d,i)=>{
+            const st = deliveryStatus(d);
+            return (
+              <div key={d.id||i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,padding:"7px 0",borderBottom:i<deliveries.length-1?"1px solid #f1f5f9":"none"}}>
+                <span style={{fontSize:12,color:T.textMuted,fontWeight:600,minWidth:18}}>{deliveries.length>1?`#${i+1}`:"—"}</span>
+                <span style={{flex:1,fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{d.plan||"—"} → {d.actual||"รอ"}</span>
+                <span style={{background:INCOMING_BG[st],color:INCOMING_CLR[st],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{INCOMING_LABEL[st]}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {po.notes && (
+          <div style={{padding:"10px 0 0"}}>
+            <div style={{fontSize:12,color:T.textMuted,fontWeight:500,marginBottom:4}}>หมายเหตุ</div>
+            <div style={{fontSize:13,color:T.textPrimary,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{po.notes}</div>
+          </div>
+        )}
 
         <div style={{display:"flex",gap:10,marginTop:20}}>
           <button onClick={()=>onEdit(po)} className="btn-primary" style={{background:T.amber,color:"#fff"}}>✏️ แก้ไข</button>
@@ -1687,7 +1759,13 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
 function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
-  const [form,   setForm]   = useState({code:"",supplier:"",poNumber:"",amount:"",date:new Date().toISOString().slice(0,10),status:"PO Issued",incomingPlan:"",actualReceived:"",paymentPlan:"",notes:""});
+  const emptyForm = () => ({
+    supplier:"", poNumber:"", date:new Date().toISOString().slice(0,10), status:"PO Issued",
+    items:[{id:uid(),code:"",amount:""}],
+    deliveries:[{id:uid(),plan:"",actual:""}],
+    paymentPlan:"", notes:"",
+  });
+  const [form,   setForm]   = useState(emptyForm);
   const [editId, setEditId] = useState(null);
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
@@ -1717,34 +1795,59 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     ...extraItems.filter(e => !e.parentCode).map(e => e.code),
   ];
   const tenderTotal = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
-  const totalComm   = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
-  const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+  const totalComm   = poEntries.reduce((s,p)=>s+poTotal(p),0);
+  const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+poTotal(p),0);
 
-  const emptyForm = () => ({code:"",supplier:"",poNumber:"",amount:"",date:new Date().toISOString().slice(0,10),status:"PO Issued",incomingPlan:"",actualReceived:"",paymentPlan:"",notes:""});
+  // Item (account-code line) row helpers
+  const addItemRow    = () => setForm(f=>({...f, items:[...f.items,{id:uid(),code:"",amount:""}]}));
+  const removeItemRow = (id) => setForm(f=>({...f, items: f.items.length>1 ? f.items.filter(it=>it.id!==id) : f.items}));
+  const updateItemRow = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>it.id===id?{...it,[key]:val}:it)}));
+
+  // Delivery batch row helpers
+  const addDeliveryRow    = () => setForm(f=>({...f, deliveries:[...f.deliveries,{id:uid(),plan:"",actual:""}]}));
+  const removeDeliveryRow = (id) => setForm(f=>({...f, deliveries: f.deliveries.length>1 ? f.deliveries.filter(d=>d.id!==id) : f.deliveries}));
+  const updateDeliveryRow = (id, key, val) => setForm(f=>({...f, deliveries: f.deliveries.map(d=>d.id===id?{...d,[key]:val}:d)}));
+
+  const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
 
   const submit = () => {
-    if (!form.code||!form.amount) return;
-    savePO(editId ? poEntries.map(p=>p.id===editId?{...form,id:editId}:p) : [...poEntries,{...form,id:uid()}]);
+    const validItems = form.items.filter(it=>it.code&&it.amount);
+    if (!validItems.length) return;
+    const validDeliveries = form.deliveries.filter(d=>d.plan||d.actual);
+    const payload = {...form, items:validItems, deliveries:validDeliveries};
+    savePO(editId ? poEntries.map(p=>p.id===editId?{...payload,id:editId}:p) : [...poEntries,{...payload,id:uid()}]);
     setEditId(null);
     setForm(emptyForm());
     setView("browse");
   };
 
-  const openEdit = (p) => { setForm({...emptyForm(),...p}); setEditId(p.id); setView("add"); setDetailId(null); };
+  const openEdit = (p) => {
+    setForm({...emptyForm(), ...p,
+      items: poItems(p).map(it=>({...it, id: it.id&&it.id!=="legacy" ? it.id : uid()})),
+      deliveries: poDeliveries(p).length ? poDeliveries(p).map(d=>({...d, id: d.id&&d.id!=="legacy" ? d.id : uid()})) : [{id:uid(),plan:"",actual:""}],
+    });
+    setEditId(p.id); setView("add"); setDetailId(null);
+  };
   const deletePO = (id) => { savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null); };
   const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
 
   const filtered = poEntries.filter(p=>{
-    const acc=ACCOUNTS.find(a=>a.code===p.code);
+    const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
     return (filter==="All"||p.status===filter)&&
-      (search===""||[acc?.name,p.code,p.supplier,p.poNumber].join(" ").toLowerCase().includes(search.toLowerCase()));
+      (search===""||[itemsText,p.supplier,p.poNumber].join(" ").toLowerCase().includes(search.toLowerCase()));
   });
 
   // Group the filtered POs by Account Code so long lists stay organised and
-  // scannable — each group collapses independently and shows its own subtotal.
+  // scannable — a PO split across several codes appears once per code, with
+  // only that code's share of the amount counted in that group's subtotal.
   const groupedFiltered = {};
-  filtered.forEach(p => { (groupedFiltered[p.code] = groupedFiltered[p.code] || []).push(p); });
-  const groupTotals = Object.fromEntries(Object.entries(groupedFiltered).map(([c,rows])=>[c, rows.reduce((s,p)=>s+(parseFloat(p.amount)||0),0)]));
+  filtered.forEach(p => {
+    poItems(p).forEach(it => {
+      if (!it.code) return;
+      (groupedFiltered[it.code] = groupedFiltered[it.code] || []).push({ po:p, item:it });
+    });
+  });
+  const groupTotals = Object.fromEntries(Object.entries(groupedFiltered).map(([c,rows])=>[c, rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0)]));
   const sortedGroupCodes = Object.keys(groupedFiltered).sort();
 
   return (
@@ -1778,14 +1881,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
               <button onClick={closeForm} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
-              <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
-                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>หมวดต้นทุน *</span>
-                <select value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))} className="input-base">
-                  <option value="">— เลือก Account Code —</option>
-                  {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
-                </select>
-              </label>
-              {[["ชื่อ Supplier *","supplier","text"],["เลข PO","poNumber","text"],["มูลค่า (THB) *","amount","number"],["วันที่สั่ง PO","date","date"]].map(([l,k,t])=>(
+              {[["ชื่อ Supplier *","supplier","text"],["เลข PO","poNumber","text"],["วันที่สั่ง PO","date","date"]].map(([l,k,t])=>(
                 <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
                   <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
                   <input type={t} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))} className="input-base"/>
@@ -1798,15 +1894,56 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 </select>
               </label>
 
+              {/* Account-code line items — one PO can be split across several
+                  codes, each with its own amount; the amounts sum to the PO total. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🚚 แผนของเข้า / การจ่ายเงิน</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 หมวดต้นทุน * (แยกได้หลายรหัส)</span>
               </div>
-              {[["แผนของเข้า (Incoming Plan)","incomingPlan"],["รับจริง (Actual Received)","actualReceived"],["แผนจ่ายเงิน (Payment Plan)","paymentPlan"]].map(([l,k])=>(
-                <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
-                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
-                  <input type="date" value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))} className="input-base"/>
-                </label>
-              ))}
+              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:8}}>
+                {form.items.map((it,i)=>(
+                  <div key={it.id} style={{display:"grid",gridTemplateColumns:"1fr 160px auto",gap:8,alignItems:"center"}}>
+                    <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
+                      <option value="">— เลือก Account Code —</option>
+                      {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
+                    </select>
+                    <input type="number" placeholder="มูลค่า (THB)" value={it.amount} onChange={e=>updateItemRow(it.id,"amount",e.target.value)} className="input-base"/>
+                    <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
+                      style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
+                  </div>
+                ))}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Account Code</button>
+                  {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>รวม: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
+                </div>
+              </div>
+
+              {/* Delivery batches — goods on one PO can arrive in 2-3 separate shipments */}
+              <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🚚 แผนของเข้า (แยกงวดได้ ถ้าของมาไม่พร้อมกัน)</span>
+              </div>
+              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:8}}>
+                {form.deliveries.map((d,i)=>(
+                  <div key={d.id} style={{display:"grid",gridTemplateColumns:"20px 1fr 1fr auto",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:11,color:T.textMuted,fontWeight:600}}>{form.deliveries.length>1?`#${i+1}`:""}</span>
+                    <label style={{display:"flex",flexDirection:"column",gap:4}}>
+                      {i===0 && <span style={{fontSize:11,color:T.textSecondary}}>แผนของเข้า</span>}
+                      <input type="date" value={d.plan} onChange={e=>updateDeliveryRow(d.id,"plan",e.target.value)} className="input-base"/>
+                    </label>
+                    <label style={{display:"flex",flexDirection:"column",gap:4}}>
+                      {i===0 && <span style={{fontSize:11,color:T.textSecondary}}>รับจริง</span>}
+                      <input type="date" value={d.actual} onChange={e=>updateDeliveryRow(d.id,"actual",e.target.value)} className="input-base"/>
+                    </label>
+                    <button type="button" onClick={()=>removeDeliveryRow(d.id)} disabled={form.deliveries.length===1}
+                      style={{background:"none",border:"none",color:form.deliveries.length===1?T.textMuted:T.red,cursor:form.deliveries.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.deliveries.length===1?0.4:1,alignSelf:i===0?"end":"center",marginBottom:i===0?1:0}}>🗑</button>
+                  </div>
+                ))}
+                <button type="button" onClick={addDeliveryRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12,alignSelf:"flex-start"}}>+ เพิ่มงวดของเข้า (ของมาไม่พร้อมกัน)</button>
+              </div>
+
+              <label style={{display:"flex",flexDirection:"column",gap:6}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>แผนจ่ายเงิน (Payment Plan)</span>
+                <input type="date" value={form.paymentPlan} onChange={e=>setForm(f=>({...f,paymentPlan:e.target.value}))} className="input-base"/>
+              </label>
 
               <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>หมายเหตุ</span>
@@ -1854,9 +1991,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 {sortedGroupCodes.map(code => {
                   const acc  = ACCOUNTS.find(a=>a.code===code);
-                  const rows = groupedFiltered[code].slice().sort((a,b)=> (b.date||"").localeCompare(a.date||""));
+                  const rows = groupedFiltered[code].slice().sort((a,b)=> (b.po.date||"").localeCompare(a.po.date||""));
                   const isCollapsed = !!collapsed[code];
-                  const groupTotal = rows.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+                  const groupTotal = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
                   return (
                     <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
                       <div onClick={()=>toggleGroup(code)} style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
@@ -1877,15 +2014,20 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                             </tr>
                           </thead>
                           <tbody>
-                            {rows.map((p,i)=>(
-                              <tr key={p.id} onClick={()=>openDetail(p)}
+                            {rows.map(({po:p,item},i)=>{
+                              const splitAcrossCodes = poItems(p).length>1;
+                              return (
+                              <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>openDetail(p)}
                                 style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:"pointer"}}
                                 onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                                 onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                                 <td style={{padding:"10px 16px",color:T.textMuted,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
                                 <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{p.supplier}</td>
                                 <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{p.poNumber||"—"}</td>
-                                <td style={{padding:"10px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(p.amount)}</td>
+                                <td style={{padding:"10px 16px",textAlign:"right"}}>
+                                  <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+                                  {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>จาก {poItems(p).length} รหัส · รวม {fmt(poTotal(p))}</div>}
+                                </td>
                                 <td style={{padding:"10px 16px"}}>
                                   <span style={{background:STATUS_BG[p.status],color:STATUS_CLR[p.status],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{p.status}</span>
                                 </td>
@@ -1894,7 +2036,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                   <button onClick={()=>deletePO(p.id)} style={{background:"none",border:"none",color:T.red,cursor:"pointer",padding:"2px 6px",borderRadius:6}}>🗑</button>
                                 </td>
                               </tr>
-                            ))}
+                            );})}
                           </tbody>
                         </table>
                       )}
@@ -1903,7 +2045,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 })}
                 <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
                   <span>{filtered.length} รายการทั้งหมด</span>
-                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+(parseFloat(p.amount)||0),0))}</span>
+                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}</span>
                 </div>
               </div>
             )}
@@ -1933,17 +2075,24 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
 
   const q = search.toLowerCase();
   const passesFilter = (p) => {
-    const acc = ACCOUNTS.find(a=>a.code===p.code);
-    const matchesSearch = q==="" || [acc?.name,acc?.code,p.supplier,p.poNumber].join(" ").toLowerCase().includes(q);
+    const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
+    const matchesSearch = q==="" || [itemsText,p.supplier,p.poNumber].join(" ").toLowerCase().includes(q);
     const hasIssue = incomingStatus(p)==="late" || paymentStatus(p)==="late";
     return matchesSearch && (!onlyIssues || hasIssue);
   };
 
   const filteredEntries = poEntries.filter(passesFilter);
 
-  // Group by Account Code, sorted by code, only codes that actually have POs.
+  // Group by Account Code (via each PO's line items), sorted by code — a PO
+  // split across several codes shows once per code, sharing the same
+  // delivery-batch info since deliveries belong to the whole PO.
   const groups = {};
-  filteredEntries.forEach(p => { (groups[p.code] = groups[p.code] || []).push(p); });
+  filteredEntries.forEach(p => {
+    poItems(p).forEach(it => {
+      if (!it.code) return;
+      (groups[it.code] = groups[it.code] || []).push({ po:p, item:it });
+    });
+  });
   const sortedCodes = Object.keys(groups).sort();
 
   const DateCell = ({ value, lateTint }) => (
@@ -1954,6 +2103,27 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
   const Badge = ({ text, clr, bg }) => (
     <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{text}</span>
   );
+  // Renders every delivery batch on a PO — one line per shipment, so a PO
+  // that arrives in 2-3 batches shows each plan → actual date with its own status.
+  const DeliveryList = ({ po }) => {
+    const deliveries = poDeliveries(po);
+    if (!deliveries.length) return <span style={{fontSize:12,color:T.textMuted}}>—</span>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {deliveries.map((d,i)=>{
+          const st = deliveryStatus(d);
+          return (
+            <div key={d.id||i} style={{display:"flex",alignItems:"center",gap:5}}>
+              {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:700,minWidth:14}}>#{i+1}</span>}
+              <DateCell value={d.plan} lateTint={st==="late"}/>
+              <span style={{color:T.textMuted,fontSize:11}}>→</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:400}}>{d.actual||"รอ"}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -1987,7 +2157,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
           {sortedCodes.map(code => {
             const acc = ACCOUNTS.find(a=>a.code===code);
             const rows = groups[code];
-            const lateCount = rows.filter(p=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
+            const lateCount = rows.filter(({po:p})=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
             return (
               <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
                 <div style={{padding:"12px 18px",background:"#f8fafc",borderBottom:`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10}}>
@@ -2000,24 +2170,27 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                   <thead>
                     <tr>
-                      {["PO No.","Supplier","มูลค่า (THB)","แผนของเข้า","รับจริง","แผนจ่ายเงิน","สถานะ",""].map(h=>(
+                      {["PO No.","Supplier","มูลค่า (THB)","การส่งของ","แผนจ่ายเงิน","สถานะ",""].map(h=>(
                         <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:10,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((p,i) => {
+                    {rows.map(({po:p,item},i) => {
                       const inc = incomingStatus(p), pay = paymentStatus(p);
+                      const splitAcrossCodes = poItems(p).length>1;
                       return (
-                        <tr key={p.id} onClick={()=>onView?.(p)}
+                        <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>onView?.(p)}
                           style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
                           onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                           <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{p.poNumber||"—"}</td>
                           <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{p.supplier}</td>
-                          <td style={{padding:"9px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(p.amount)}</td>
-                          <td style={{padding:"9px 16px"}}><DateCell value={p.incomingPlan} lateTint={inc==="late"}/></td>
-                          <td style={{padding:"9px 16px"}}><DateCell value={p.actualReceived}/></td>
+                          <td style={{padding:"9px 16px",textAlign:"right"}}>
+                            <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+                            {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
+                          </td>
+                          <td style={{padding:"9px 16px"}}><DeliveryList po={p}/></td>
                           <td style={{padding:"9px 16px"}}><DateCell value={p.paymentPlan} lateTint={pay==="late"}/></td>
                           <td style={{padding:"9px 16px"}}>
                             <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
@@ -2065,20 +2238,26 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     ...extraItems.filter(e => !e.parentCode).map(e => e.code),
   ];
   const tenderTotal   = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
-  const totalComm     = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
-  const totalPaid     = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
-  const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+  const totalComm     = poEntries.reduce((s,p)=>s+poTotal(p),0);
+  const totalPaid     = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+poTotal(p),0);
+  const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
   const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
 
   const groupData = GROUPS.map((g,i)=>{
     const codes=ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
-    return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed:poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0),color:GRP_COLORS[i%GRP_COLORS.length]};
+    const committed = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
+    return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed,color:GRP_COLORS[i%GRP_COLORS.length]};
   }).filter(g=>g.budget>0||g.committed>0);
 
   const accountData = ACCOUNTS.map(a=>{
     const budget=parseFloat(combinedBudget[a.code])||0;
-    const pos=poEntries.filter(p=>p.code===a.code);
-    return {...a,budget,committed:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0),pos,over:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0)>budget&&budget>0};
+    // Every PO line item booked to this Account Code, whether the PO is
+    // single-code or split across several — pos.length still counts POs (a
+    // PO with two lines on the same code only counts once).
+    const items = poEntries.flatMap(p=>poItems(p).filter(it=>it.code===a.code));
+    const poCount = new Set(poEntries.filter(p=>poItems(p).some(it=>it.code===a.code)).map(p=>p.id)).size;
+    const committed = items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+    return {...a,budget,committed,pos:{length:poCount},over:committed>budget&&budget>0};
   }).filter(a=>a.budget>0||a.pos.length>0);
   const pctUsedOf = (a) => a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0 ? 999 : 0);
   const handleSort = (key) => {
@@ -2102,7 +2281,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     return arr;
   })();
 
-  const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+(parseFloat(p.amount)||0),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
+  const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+poTotal(p),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
   const CT = ({active,payload}) => {
     if (!active||!payload?.length) return null;
@@ -2200,9 +2379,9 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                     {label:"% Used", key:"pct"},
                     {label:"", key:null},
                   ].map(({label,key})=>(
-                    <th key={label||"__actions"} onClick={()=>key&&handleSort(key)}
-                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,cursor:key?"pointer":"default",userSelect:"none",whiteSpace:"nowrap"}}>
-                      {label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}
+                    <th key={label||"__actions"}
+                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                      <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                     </th>
                   ))}
                 </tr>
