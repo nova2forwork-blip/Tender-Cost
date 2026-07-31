@@ -137,8 +137,16 @@ const GLOBAL_CSS = `
 `;
 
 // ─── Excel Export ─────────────────────────────────────────────────────────────
-function exportToExcel(project, tenderCosts, poEntries) {
+function exportToExcel(project, tenderCosts, additions, poEntries) {
   const wb = XLSX.utils.book_new();
+
+  // Budget = baseline Tender Cost + every monthly addition entered so far, combined per Acc. Code
+  const combinedBudget = {...tenderCosts};
+  Object.values(additions || {}).forEach(monthObj => {
+    Object.entries(monthObj || {}).forEach(([code, val]) => {
+      combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
+    });
+  });
 
   const summaryRows = [];
   summaryRows.push([`Project: ${project.name}`, "", "", "", "", ""]);
@@ -148,7 +156,7 @@ function exportToExcel(project, tenderCosts, poEntries) {
   summaryRows.push(["Acc. Code","Account Name","Group","Budget / Tender Cost","Committed (PO)","Remaining","% Used","Status"]);
   let grandBudget=0, grandCommitted=0;
   ACCOUNTS.forEach(a => {
-    const budget    = parseFloat(tenderCosts[a.code]) || 0;
+    const budget    = parseFloat(combinedBudget[a.code]) || 0;
     const committed = poEntries.filter(p=>p.code===a.code).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
     const remaining = budget - committed;
     const pctUsed   = budget > 0 ? committed/budget : (committed>0?999:0);
@@ -194,7 +202,7 @@ function exportToExcel(project, tenderCosts, poEntries) {
   const grpRows = [["Group","Budget","Committed","Remaining","% Used"]];
   GROUPS.forEach(g => {
     const codes = ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
-    const b = codes.reduce((s,c)=>s+(parseFloat(tenderCosts[c])||0),0);
+    const b = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
     const c2 = poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
     if (b>0||c2>0) grpRows.push([g,b,c2,b-c2,b>0?c2/b:0]);
   });
@@ -321,7 +329,7 @@ export default function App() {
       {screen === "app" && effectiveRole === "qs"          && <QSView          {...sharedProps} />}
       {screen === "app" && effectiveRole === "procurement" && <ProcurementView {...sharedProps} />}
       {screen === "app" && effectiveRole === "accounting"  && (
-        <AccountingView {...sharedProps} onExport={() => exportToExcel(activeProject, tenderCosts, poEntries)} />
+        <AccountingView {...sharedProps} onExport={() => exportToExcel(activeProject, tenderCosts, additions, poEntries)} />
       )}
     </>
   );
@@ -1405,14 +1413,22 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout }) {
+function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout }) {
   const [view,   setView]   = useState("list");
   const [form,   setForm]   = useState({code:"",supplier:"",poNumber:"",amount:"",date:new Date().toISOString().slice(0,10),status:"PO Issued",notes:""});
   const [editId, setEditId] = useState(null);
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
 
-  const tenderTotal = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  // Budget (QS) = baseline Tender Cost + every monthly addition entered so far,
+  // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
+  const combinedBudget = {...tenderCosts};
+  Object.values(additions || {}).forEach(monthObj => {
+    Object.entries(monthObj || {}).forEach(([code, val]) => {
+      combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
+    });
+  });
+  const tenderTotal = Object.values(combinedBudget).reduce((s,v)=>s+(parseFloat(v)||0),0);
   const totalComm   = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
 
@@ -1434,7 +1450,7 @@ function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, sync
     <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
-          <StatCard label="Budget (QS)" value={fmt(tenderTotal)} sub="Tender Cost รวม" color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label="Budget (QS)" value={fmt(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
           <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
           <StatCard label="ชำระแล้ว" value={fmt(totalPaid)} sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
           <StatCard label="Budget คงเหลือ" value={fmt(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
@@ -1553,10 +1569,19 @@ function ProcurementView({ project, tenderCosts, poEntries, savePO, onBack, sync
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout }) {
+function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout }) {
   const [view, setView] = useState("dashboard");
 
-  const tenderTotal   = Object.values(tenderCosts).reduce((s,v)=>s+(parseFloat(v)||0),0);
+  // Budget = baseline Tender Cost + every monthly addition entered so far,
+  // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
+  const combinedBudget = {...tenderCosts};
+  Object.values(additions || {}).forEach(monthObj => {
+    Object.entries(monthObj || {}).forEach(([code, val]) => {
+      combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
+    });
+  });
+
+  const tenderTotal   = Object.values(combinedBudget).reduce((s,v)=>s+(parseFloat(v)||0),0);
   const totalComm     = poEntries.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalPaid     = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
@@ -1564,11 +1589,11 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
 
   const groupData = GROUPS.map((g,i)=>{
     const codes=ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
-    return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(tenderCosts[c])||0),0),committed:poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0),color:GRP_COLORS[i%GRP_COLORS.length]};
+    return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed:poEntries.filter(p=>codes.includes(p.code)).reduce((s,p)=>s+(parseFloat(p.amount)||0),0),color:GRP_COLORS[i%GRP_COLORS.length]};
   }).filter(g=>g.budget>0||g.committed>0);
 
   const accountData = ACCOUNTS.map(a=>{
-    const budget=parseFloat(tenderCosts[a.code])||0;
+    const budget=parseFloat(combinedBudget[a.code])||0;
     const pos=poEntries.filter(p=>p.code===a.code);
     return {...a,budget,committed:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0),pos,over:pos.reduce((s,p)=>s+(parseFloat(p.amount)||0),0)>budget&&budget>0};
   }).filter(a=>a.budget>0||a.pos.length>0);
@@ -1602,7 +1627,7 @@ function AccountingView({ project, tenderCosts, poEntries, onBack, onExport, syn
         {view==="dashboard" ? (
           <>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
-              <StatCard label="งบประมาณ (QS)" value={fmt(tenderTotal)} sub="Tender Cost" color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="งบประมาณ (QS)" value={fmt(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
               <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
               <StatCard label="Invoiced" value={fmt(totalInvoiced)} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
               <StatCard label="ชำระแล้ว (Paid)" value={fmt(totalPaid)} sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
