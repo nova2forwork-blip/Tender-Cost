@@ -1330,6 +1330,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const [subFor, setSubFor] = useState(null);   // code of row currently adding a sub-item
   const [subName, setSubName] = useState("");
   const [rowCollapsed, setRowCollapsed] = useState({}); // code -> true means sub-items hidden
+  const [gridFor, setGridFor] = useState(null); // code of row currently showing the monthly grid modal
 
   useEffect(() => { setDraftAdd({...(additions[month]||{})}); }, [month, additions]);
   useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
@@ -1607,6 +1608,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
                         + รายการย่อย
                       </button>
+                      {hasKids && (
+                        <button onClick={(e)=>{e.stopPropagation(); setGridFor(r.code);}} title="ดูตารางรายเดือนของรายการย่อยทั้งหมด (ทุกเดือนในตารางเดียว)"
+                          style={{marginLeft:6,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
+                          📊 ตารางรายเดือน
+                        </button>
+                      )}
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}</td>
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
@@ -1705,6 +1712,165 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             </tr>
           </tfoot>
         </table>
+      </div>
+
+      {gridFor && (
+        <SubItemGridModal
+          parentCode={gridFor}
+          parentName={(allRows.find(r=>r.code===gridFor)||{}).name || gridFor}
+          kids={childrenOf(gridFor)}
+          months={sortedMonths}
+          additions={additions}
+          saveAdditions={saveAdditions}
+          onAddExtra={onAddExtra}
+          onDeleteExtra={handleDeleteExtra}
+          onClose={()=>setGridFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── QS Tab 2b: Sub-item monthly grid modal ────────────────────────────────
+// Shows every sub-item of one Acc. Code as a row, with every month (past AND
+// any future months already created elsewhere in the app) as a column, so a
+// sub-item added in any month automatically gets an editable slot in every
+// other month too — none of them are ever tied to just the month they were
+// created in. New sub-item rows and new month columns can both be added
+// directly from here without leaving the grid.
+function SubItemGridModal({ parentCode, parentName, kids, months, additions, saveAdditions, onAddExtra, onDeleteExtra, onClose }) {
+  const sortedMonths = [...months].sort();
+  const monthLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
+
+  const cellKey = (code,m) => `${code}|${m}`;
+  const buildDraft = () => {
+    const d = {};
+    kids.forEach(k => sortedMonths.forEach(m => { d[cellKey(k.code,m)] = additions[m]?.[k.code] ?? ""; }));
+    return d;
+  };
+  const [draft, setDraft] = useState(buildDraft);
+  // Whenever a new sub-item row or a new month column shows up (added from
+  // within this modal or elsewhere), fill in a blank/editable slot for every
+  // combination that doesn't have one yet — existing edited values are kept.
+  useEffect(() => {
+    setDraft(d => {
+      const next = {...d};
+      kids.forEach(k => sortedMonths.forEach(m => {
+        const key = cellKey(k.code,m);
+        if (!(key in next)) next[key] = additions[m]?.[k.code] ?? "";
+      }));
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kids.length, sortedMonths.length]);
+
+  const [subName, setSubName] = useState("");
+  const [newMonth, setNewMonth] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const cell    = (code,m)   => draft[cellKey(code,m)] ?? "";
+  const setCell = (code,m,v) => setDraft(d => ({...d,[cellKey(code,m)]:v}));
+  const rowTotal = (code) => sortedMonths.reduce((s,m)=>s+(parseFloat(cell(code,m))||0),0);
+  const colTotal = (m)    => kids.reduce((s,k)=>s+(parseFloat(cell(k.code,m))||0),0);
+  const grand    = sortedMonths.reduce((s,m)=>s+colTotal(m),0);
+
+  const handleSave = () => {
+    const next = {...additions};
+    sortedMonths.forEach(m => {
+      const obj = {...(next[m]||{})};
+      kids.forEach(k => {
+        const v = cell(k.code,m);
+        if (v!=="" && !isNaN(v) && parseFloat(v)!==0) obj[k.code] = parseFloat(v);
+        else delete obj[k.code];
+      });
+      next[m] = obj;
+    });
+    saveAdditions(next);
+    setSaved(true); setTimeout(()=>setSaved(false),1800);
+  };
+
+  const handleAddSub = () => {
+    if (!subName.trim()) return;
+    onAddExtra({ name:subName, parentCode, scope:"monthly" });
+    setSubName("");
+  };
+
+  const handleAddMonthCol = () => {
+    if (!newMonth || sortedMonths.includes(newMonth)) return;
+    saveAdditions({ ...additions, [newMonth]: additions[newMonth] || {} });
+    setNewMonth("");
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:20}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,padding:22,width:"min(96vw,1150px)",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:14,boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:11,color:T.textMuted,fontWeight:600,letterSpacing:0.5,textTransform:"uppercase"}}>ตารางรายเดือน · รายการย่อย</div>
+            <div style={{fontSize:16,fontWeight:700,color:T.textPrimary}}>{parentCode} — {parentName}</div>
+          </div>
+          <button onClick={onClose} className="btn-ghost" style={{padding:"6px 12px"}}>✕ ปิด</button>
+        </div>
+
+        <div style={{overflow:"auto",border:`1px solid ${T.cardBorder}`,borderRadius:12,flex:1}}>
+          <table style={{borderCollapse:"collapse",fontSize:12,width:"100%"}}>
+            <thead>
+              <tr style={{background:"#f8fafc"}}>
+                <th style={{position:"sticky",left:0,background:"#f8fafc",padding:"9px 14px",textAlign:"left",borderBottom:`1px solid ${T.cardBorder}`,minWidth:180,zIndex:2}}>รายการย่อย</th>
+                {sortedMonths.map(m => (
+                  <th key={m} style={{padding:"9px 12px",textAlign:"right",borderBottom:`1px solid ${T.cardBorder}`,color:T.textMuted,fontWeight:600,minWidth:110}}>{monthLabel(m)}</th>
+                ))}
+                <th style={{padding:"9px 12px",textAlign:"right",borderBottom:`1px solid ${T.cardBorder}`,color:T.green,fontWeight:700,minWidth:110}}>รวม</th>
+                <th style={{width:30,borderBottom:`1px solid ${T.cardBorder}`}}/>
+              </tr>
+            </thead>
+            <tbody>
+              {kids.length===0 && (
+                <tr><td colSpan={sortedMonths.length+3} style={{padding:"20px 14px",textAlign:"center",color:T.textMuted}}>ยังไม่มีรายการย่อย — เพิ่มด้านล่าง</td></tr>
+              )}
+              {kids.map((k,i) => (
+                <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd"}}>
+                  <td style={{position:"sticky",left:0,background:i%2===0?T.card:"#fafbfd",padding:"7px 14px",fontStyle:"italic",color:T.green,borderBottom:"1px solid #f1f5f9"}}>{k.name}</td>
+                  {sortedMonths.map(m => (
+                    <td key={m} style={{padding:"5px 8px",borderBottom:"1px solid #f1f5f9"}}>
+                      <input type="number" value={cell(k.code,m)} onChange={e=>setCell(k.code,m,e.target.value)}
+                        placeholder="0.00" className="input-base" style={{width:100,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,padding:"6px 8px"}}/>
+                    </td>
+                  ))}
+                  <td style={{padding:"7px 14px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green,borderBottom:"1px solid #f1f5f9"}}>{fmt(rowTotal(k.code))}</td>
+                  <td style={{textAlign:"center",borderBottom:"1px solid #f1f5f9"}}>
+                    <button onClick={()=>onDeleteExtra(k.code)} title="ลบรายการย่อยนี้" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+                <td style={{position:"sticky",left:0,background:"#f8fafc",padding:"9px 14px",fontWeight:700,color:T.textMuted}}>รวมทุกเดือน</td>
+                {sortedMonths.map(m => (
+                  <td key={m} style={{padding:"9px 12px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(colTotal(m))}</td>
+                ))}
+                <td style={{padding:"9px 12px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green}}>{fmt(grand)}</td>
+                <td/>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
+              placeholder="+ ชื่อรายการย่อยใหม่" style={{width:220}} onKeyDown={e=>e.key==="Enter"&&handleAddSub()}/>
+            <button className="btn-ghost" onClick={handleAddSub}>+ เพิ่มรายการย่อย</button>
+            <span style={{width:1,height:24,background:T.cardBorder}}/>
+            <input type="month" className="input-base" value={newMonth} onChange={e=>setNewMonth(e.target.value)} style={{width:130}}/>
+            <button className="btn-ghost" onClick={handleAddMonthCol}>+ เพิ่มคอลัมน์เดือน</button>
+          </div>
+          <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:160}}>
+            {saved?"✓ บันทึกแล้ว":"บันทึกตารางนี้"}
+          </button>
+        </div>
+        <p style={{margin:0,fontSize:11,color:T.textMuted}}>* รายการย่อยแต่ละรายการจะมีช่องกรอกครบทุกเดือนโดยอัตโนมัติ ถ้าเดือนก่อนหน้ามีรายการนี้อยู่ เดือนถัดไปก็จะมีช่องให้กรอกด้วยเสมอ และเพิ่มรายการย่อย/เดือนใหม่ได้ตลอดจากที่นี่</p>
       </div>
     </div>
   );
