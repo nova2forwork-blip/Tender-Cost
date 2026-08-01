@@ -85,6 +85,14 @@ const GRP_COLORS  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"
 // A PO's incoming status is derived from its planned/actual dates rather than
 // stored directly, so it's always in sync with today's date.
 const todayStr = () => new Date().toISOString().slice(0,10);
+// "2026-07-31" + 30 -> "2026-08-30" — used to auto-suggest a payment due
+// date for credit-term POs (credit = pay 30 days after order date).
+const addDays = (dateStr, days) => {
+  if (!dateStr) return "";
+  const d = new Date(dateStr+"T00:00:00");
+  d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+};
 
 // ─── Multi-code / multi-batch PO helpers ───────────────────────────────────
 // A single PO can now be split across several Account Codes (each with its
@@ -138,6 +146,36 @@ const poSupplierLabel  = (p) => { const n = poSupplierNames(p); return n.length=
 const poNumbersLabel   = (p) => { const nums = poSuppliers(p).map(s=>s.poNumber).filter(Boolean); return nums.length ? nums.join(", ") : "—"; };
 const poRoundsAmount   = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.amount)||0),0);
 
+// ─── Edit history / audit log ──────────────────────────────────────────────
+// Every PO keeps a short log of who changed what and when, so procurement
+// can update a status in one click and everyone can still see the trail
+// later (e.g. "ใครเปลี่ยนเป็น Delivered เมื่อไหร่"). Capped at 40 entries per
+// PO so it never grows unbounded.
+const HISTORY_ICON = { created:"🆕", status:"🔄", edited:"✏️" };
+const historyEntry = (session, action, message) => ({
+  id: uid(), at: new Date().toISOString(),
+  user: session?.name || "—", role: session?.role ? (ROLE_LABELS[session.role] || session.role) : "",
+  action, message,
+});
+const poHistory     = (p) => (p.history && p.history.length) ? p.history.slice().sort((a,b)=>(b.at||"").localeCompare(a.at||"")) : [];
+const poLastUpdate  = (p) => poHistory(p)[0] || null;
+const withHistory   = (po, entry) => ({ ...po, history: [entry, ...(po.history||[])].slice(0,40) });
+
+// "2026-07-31T09:12:00Z" -> "2 วันที่แล้ว" — short, glanceable, always in Thai.
+const relativeTime = (iso) => {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const min = Math.floor(diffMs/60000);
+  if (min < 1)  return "เมื่อสักครู่";
+  if (min < 60) return `${min} นาทีที่แล้ว`;
+  const hr = Math.floor(min/60);
+  if (hr < 24)  return `${hr} ชม.ที่แล้ว`;
+  const day = Math.floor(hr/24);
+  if (day < 30) return `${day} วันที่แล้ว`;
+  return new Date(iso).toLocaleDateString("th-TH",{day:"numeric",month:"short",year:"2-digit"});
+};
+const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:"numeric",month:"short",year:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
+
 // Which supplier a given account-code line item was ordered from. Items
 // carry their own `supplierId` so, on a PO with several suppliers, each
 // item can be traced to exactly one of them; items saved before this link
@@ -177,6 +215,12 @@ const INCOMING_BG    = { received:"#f0fdf4", partial:"#eff6ff", late:"#fef2f2", 
 const PAYMENT_LABEL  = { paid:"จ่ายแล้ว", late:"เกินกำหนดจ่าย", pending:"รอจ่ายเงิน", unset:"ยังไม่กำหนด" };
 const PAYMENT_CLR    = { paid:"#10b981", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
 const PAYMENT_BG     = { paid:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
+// Payment method — cash pays right away, credit gives suppliers a 30-day term,
+// so a credit PO's payment due date is auto-suggested as order date + 30 days.
+const PAYMENT_TYPE_LABEL = { cash:"เงินสด", credit30:"เครดิต 30 วัน" };
+const PAYMENT_TYPE_ICON  = { cash:"💵", credit30:"💳" };
+const PAYMENT_TYPE_CLR   = { cash:"#10b981", credit30:"#2563eb" };
+const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit30:"#eff6ff" };
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
 // "2026-08" -> "ส.ค. 69" — used wherever a month key needs a short Thai label
@@ -1975,11 +2019,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 // Read-only detail view opened by clicking any PO row. Lets the user confirm
 // exactly what was entered without hunting through a wide table, and offers
 // Edit / Delete from the same place.
-function PODetailModal({ po, onClose, onEdit, onDelete }) {
+function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
+  const [historyOpen, setHistoryOpen] = useState(false);
   if (!po) return null;
   const items = poItems(po);
   const suppliers = poSuppliers(po);
   const inc = incomingStatus(po), pay = paymentStatus(po);
+  const history = poHistory(po);
+  const lastUpd = poLastUpdate(po);
 
   const Row = ({ label, value, mono }) => (
     <div style={{display:"flex",justifyContent:"space-between",gap:16,padding:"10px 0",borderBottom:`1px solid #f1f5f9`}}>
@@ -1999,14 +2046,24 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
           <button onClick={onClose} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted,flexShrink:0}}>×</button>
         </div>
 
-        <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap"}}>
-          <span style={{background:STATUS_BG[po.status],color:STATUS_CLR[po.status],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{po.status}</span>
+        {/* Status is a live dropdown here too — the most natural place to
+            update it right after reviewing everything else on the PO. */}
+        <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap",alignItems:"center"}}>
+          <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)}/>
           <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{INCOMING_LABEL[inc]}</span>
           <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_LABEL[pay]}</span>
+          {po.paymentType && (
+            <span style={{background:PAYMENT_TYPE_BG[po.paymentType],color:PAYMENT_TYPE_CLR[po.paymentType],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_TYPE_ICON[po.paymentType]} {PAYMENT_TYPE_LABEL[po.paymentType]}</span>
+          )}
         </div>
+        {lastUpd && (
+          <div style={{fontSize:11,color:T.textMuted,marginBottom:4}}>
+            🕓 อัปเดตล่าสุด {relativeTime(lastUpd.at)} โดย <b style={{color:T.textSecondary}}>{lastUpd.user}</b>
+          </div>
+        )}
 
         {/* Account-code line items — a PO can split its total across several codes */}
-        <div style={{marginTop:14,background:T.bg,borderRadius:10,padding:"4px 12px"}}>
+        <div style={{marginTop:10,background:T.bg,borderRadius:10,padding:"4px 12px"}}>
           {items.map((it,i)=>{
             const acc = ACCOUNTS.find(a=>a.code===it.code);
             return (
@@ -2030,6 +2087,7 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
 
         <div style={{marginTop:4}}>
           <Row label="วันที่สั่ง PO" value={po.date} mono />
+          <Row label="วิธีจ่ายเงิน" value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${PAYMENT_TYPE_LABEL[po.paymentType]}` : "—"} />
           <Row label="แผนจ่ายเงิน" value={po.paymentPlan} mono />
         </div>
 
@@ -2074,6 +2132,31 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
           </div>
         )}
 
+        {/* Edit history — a running log of who changed what, so status
+            changes and edits are always traceable after the fact. */}
+        {history.length > 0 && (
+          <div style={{marginTop:14,borderTop:`1px solid ${T.cardBorder}`,paddingTop:10}}>
+            <button onClick={()=>setHistoryOpen(v=>!v)}
+              style={{background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>
+              <span style={{transition:"transform 0.15s",transform:historyOpen?"rotate(90deg)":"none",display:"inline-block"}}>▸</span>
+              📜 ประวัติการแก้ไข ({history.length})
+            </button>
+            {historyOpen && (
+              <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:0}}>
+                {history.map((h,i)=>(
+                  <div key={h.id||i} style={{display:"flex",gap:10,padding:"7px 0",borderBottom:i<history.length-1?"1px solid #f1f5f9":"none"}}>
+                    <span style={{fontSize:14,flexShrink:0}}>{HISTORY_ICON[h.action]||"•"}</span>
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{fontSize:12,color:T.textPrimary,fontWeight:500}}>{h.message}</div>
+                      <div style={{fontSize:11,color:T.textMuted,marginTop:1}}>{formatDateTime(h.at)} · {h.user}{h.role?` (${h.role})`:""}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{display:"flex",gap:10,marginTop:20}}>
           <button onClick={()=>onEdit(po)} className="btn-primary" style={{background:T.amber,color:"#fff"}}>✏️ แก้ไข</button>
           <button onClick={()=>{ if(window.confirm("ลบรายการ PO นี้?")) onDelete(po.id); }} className="btn-ghost" style={{color:T.red,borderColor:T.red}}>🗑 ลบ</button>
@@ -2085,9 +2168,22 @@ function PODetailModal({ po, onClose, onEdit, onDelete }) {
   );
 }
 
+// A status badge that's also a dropdown — lets anyone change a PO's status
+// in one click from wherever it's shown, instead of opening the full edit form.
+function StatusPicker({ status, onChange, compact }) {
+  return (
+    <select value={status} onClick={e=>e.stopPropagation()} onChange={e=>{ e.stopPropagation(); onChange(e.target.value); }}
+      style={{background:STATUS_BG[status],color:STATUS_CLR[status],fontSize:compact?11:12,padding:compact?"3px 8px":"5px 10px",
+        borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[status]}40`,cursor:"pointer",outline:"none"}}>
+      {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
+    </select>
+  );
+}
+
 // ─── Procurement View ─────────────────────────────────────────────────────────
 function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
+  const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
   const emptyForm = () => {
     const supplierId = uid();
@@ -2095,7 +2191,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
       date:new Date().toISOString().slice(0,10), status:"PO Issued",
       items:[{id:uid(),code:"",amount:"",supplierId}],
       suppliers:[{id:supplierId, name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}],
-      paymentPlan:"", notes:"",
+      paymentPlan:"", paymentType:"", notes:"",
     };
   };
   const [form,   setForm]   = useState(emptyForm);
@@ -2132,6 +2228,11 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const tenderTotal = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm   = poEntries.reduce((s,p)=>s+poTotal(p),0);
   const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+poTotal(p),0);
+
+  // Late-item alert counts, shown as a banner regardless of which tab is
+  // active so problems surface immediately instead of only inside "ติดตามของเข้า/จ่ายเงิน".
+  const lateIncomingCount = poEntries.filter(p=>incomingStatus(p)==="late").length;
+  const latePaymentCount  = poEntries.filter(p=>paymentStatus(p)==="late" && p.status!=="Paid").length;
 
   // Item (account-code line) row helpers
   const addItemRow    = () => setForm(f=>({...f, items:[...f.items,{id:uid(),code:"",amount:"",supplierId:f.suppliers[0]?.id||""}]}));
@@ -2170,10 +2271,29 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     if (!validItems.length) return;
     const payload = {...form, items:validItems, suppliers:validSuppliers};
     delete payload.supplier; delete payload.poNumber; delete payload.deliveries; // superseded by suppliers[]
-    savePO(editId ? poEntries.map(p=>p.id===editId?{...payload,id:editId}:p) : [...poEntries,{...payload,id:uid()}]);
+
+    // Log who edited this PO and when. If the status changed as part of this
+    // save, call that out specifically so the history reads like a timeline
+    // ("เปลี่ยนสถานะ...") instead of a vague "แก้ไขข้อมูล" every time.
+    const prev = editId ? poEntries.find(x=>x.id===editId) : null;
+    const entries = [];
+    if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `เปลี่ยนสถานะ: ${prev.status} → ${payload.status}`));
+    entries.push(historyEntry(session, prev ? "edited" : "created", prev ? "แก้ไขข้อมูล PO" : "สร้างรายการ PO"));
+    const withLog = { ...payload, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
+
+    savePO(editId ? poEntries.map(p=>p.id===editId?{...withLog,id:editId}:p) : [...poEntries,{...withLog,id:uid()}]);
     setEditId(null);
     setForm(emptyForm());
     setView("browse");
+  };
+
+  // One-click status change — used by the StatusPicker wherever a PO is
+  // listed, so procurement doesn't need to open the full edit form just to
+  // move a PO from "PO Issued" to "Delivered". Still fully logged.
+  const changeStatus = (po, newStatus) => {
+    if (newStatus === po.status) return;
+    const updated = withHistory({ ...po, status:newStatus }, historyEntry(session, "status", `เปลี่ยนสถานะ: ${po.status} → ${newStatus}`));
+    savePO(poEntries.map(x=>x.id===po.id?updated:x));
   };
 
   const openEdit = (p) => {
@@ -2188,7 +2308,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     const idMap = {};
     poSuppliers(p).forEach((s,i) => { idMap[s.id] = newSuppliers[i].id; });
     setForm({
-      ...emptyForm(), date:p.date, status:p.status, paymentPlan:p.paymentPlan||"", notes:p.notes||"",
+      ...emptyForm(), date:p.date, status:p.status, paymentPlan:p.paymentPlan||"", paymentType:p.paymentType||"", notes:p.notes||"",
       items: poItems(p).map(it=>({
         ...it, id: it.id&&it.id!=="legacy" ? it.id : uid(),
         supplierId: idMap[it.supplierId] || newSuppliers[0]?.id || "",
@@ -2229,6 +2349,23 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
           <StatCard label="Budget คงเหลือ" value={fmt(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
         </div>
 
+        {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
+          <div onClick={()=>{ setTab("tracking"); setTrackingOnlyIssues(true); }}
+            style={{background:T.redBg,border:`1.5px solid #fecaca`,borderRadius:12,padding:"12px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}>
+            <span style={{fontSize:20}}>⚠️</span>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,fontWeight:700,color:T.red}}>
+                มีรายการที่ต้องรีบดู
+                {lateIncomingCount>0 && <span> — ของเข้าล่าช้า {lateIncomingCount} รายการ</span>}
+                {lateIncomingCount>0 && latePaymentCount>0 && <span>,</span>}
+                {latePaymentCount>0 && <span> จ่ายเงินเกินกำหนด {latePaymentCount} รายการ</span>}
+              </div>
+              <div style={{fontSize:11.5,color:"#b91c1c",marginTop:1}}>คลิกเพื่อดูรายละเอียดทั้งหมด</div>
+            </div>
+            <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>ดูรายการ →</span>
+          </div>
+        )}
+
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:16}}>
             {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"]].map(([id,label])=>(
@@ -2252,7 +2389,10 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วันที่สั่ง PO</span>
-                <input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} className="input-base"/>
+                <input type="date" value={form.date} onChange={e=>{
+                    const nd = e.target.value;
+                    setForm(f=>({...f, date:nd, paymentPlan: f.paymentType==="credit30" ? addDays(nd,30) : f.paymentType==="cash" ? nd : f.paymentPlan}));
+                  }} className="input-base"/>
               </label>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>สถานะ</span>
@@ -2331,6 +2471,23 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 </div>
               </div>
 
+              <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วิธีจ่ายเงิน</span>
+                <div style={{display:"flex",gap:8}}>
+                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"cash",paymentPlan:f.date}))}
+                    style={{flex:1,padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="cash"?T.green:T.cardBorder}`,background:form.paymentType==="cash"?T.greenBg:T.card,color:form.paymentType==="cash"?T.green:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
+                    💵 เงินสด <span style={{fontWeight:400,fontSize:11,opacity:0.8}}>(จ่ายทันที)</span>
+                  </button>
+                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"credit30",paymentPlan:addDays(f.date,30)}))}
+                    style={{flex:1,padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="credit30"?T.blue:T.cardBorder}`,background:form.paymentType==="credit30"?T.blueLight:T.card,color:form.paymentType==="credit30"?T.blue:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
+                    💳 เครดิต <span style={{fontWeight:400,fontSize:11,opacity:0.8}}>(ครบกำหนด 30 วัน)</span>
+                  </button>
+                </div>
+                {form.paymentType==="credit30" && (
+                  <span style={{fontSize:11,color:T.blue}}>ระบบคำนวณวันครบกำหนดจ่ายให้อัตโนมัติ (สั่ง PO + 30 วัน) แก้ไขวันที่ด้านล่างได้ตามจริง</span>
+                )}
+              </label>
+
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>แผนจ่ายเงิน (Payment Plan)</span>
                 <input type="date" value={form.paymentPlan} onChange={e=>setForm(f=>({...f,paymentPlan:e.target.value}))} className="input-base"/>
@@ -2347,7 +2504,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
             </div>
           </div>
         ) : tab==="tracking" ? (
-          <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={()=>setView("add")} />
+          <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={()=>setView("add")}
+            onStatusChange={changeStatus} session={session}
+            onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -2399,7 +2558,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
-                              {["วันที่","Supplier","PO No.","มูลค่า (THB)","สถานะ",""].map(h=>(
+                              {["วันที่","Supplier","PO No.","มูลค่า (THB)","การส่งของ / จ่ายเงิน","สถานะ",""].map(h=>(
                                 <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:10,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                               ))}
                             </tr>
@@ -2407,6 +2566,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                           <tbody>
                             {rows.map(({po:p,item},i)=>{
                               const splitAcrossCodes = poItems(p).length>1;
+                              const inc = incomingStatus(p), pay = paymentStatus(p);
                               return (
                               <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>openDetail(p)}
                                 style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:"pointer"}}
@@ -2420,7 +2580,19 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                   {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>จาก {poItems(p).length} รหัส · รวม {fmt(poTotal(p))}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px"}}>
-                                  <span style={{background:STATUS_BG[p.status],color:STATUS_CLR[p.status],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{p.status}</span>
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                                    <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{INCOMING_LABEL[inc]}</span>
+                                    {p.status!=="Paid" && (
+                                      <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_LABEL[pay]}</span>
+                                    )}
+                                    {p.paymentType && (
+                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_TYPE_ICON[p.paymentType]} {PAYMENT_TYPE_LABEL[p.paymentType]}</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td style={{padding:"10px 16px"}}>
+                                  <StatusPicker status={p.status} onChange={s=>changeStatus(p,s)} compact/>
+                                  {poLastUpdate(p) && <div style={{fontSize:9,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
                                   <button onClick={()=>openEdit(p)} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:"2px 6px",borderRadius:6,marginRight:4}}>✏️</button>
@@ -2443,7 +2615,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
           </>
         )}
       </div>
-      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} />
+      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} />
     </Shell>
   );
 }
@@ -2451,9 +2623,8 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 // ─── Procurement: Incoming / Payment Tracking tab ─────────────────────────────
 // Groups every PO by its Account Code so the team can see, at a glance and per
 // cost line, which deliveries and payments are on track vs. overdue.
-function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
+function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session }) {
   const [search, setSearch] = useState("");
-  const [onlyIssues, setOnlyIssues] = useState(false);
 
   const counts = poEntries.reduce((acc,p) => {
     const inc = incomingStatus(p), pay = paymentStatus(p);
@@ -2564,7 +2735,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                   <thead>
                     <tr>
-                      {["PO No.","Supplier","มูลค่า (THB)","การส่งของ","แผนจ่ายเงิน","สถานะ",""].map(h=>(
+                      {["PO No.","สถานะ PO","Supplier","มูลค่า (THB)","การส่งของ","แผนจ่ายเงิน","ติดตาม",""].map(h=>(
                         <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:10,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                       ))}
                     </tr>
@@ -2579,13 +2750,24 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew }) {
                           onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                           <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
+                          <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
+                            <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} compact/>
+                            {poLastUpdate(p) && <div style={{fontSize:9,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)}</div>}
+                          </td>
                           <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
                           <td style={{padding:"9px 16px",textAlign:"right"}}>
                             <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                             {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
                           </td>
                           <td style={{padding:"9px 16px"}}><DeliveryList po={p}/></td>
-                          <td style={{padding:"9px 16px"}}><DateCell value={p.paymentPlan} lateTint={pay==="late"}/></td>
+                          <td style={{padding:"9px 16px"}}>
+                            <DateCell value={p.paymentPlan} lateTint={pay==="late"}/>
+                            {p.paymentType && (
+                              <div style={{marginTop:3}}>
+                                <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${PAYMENT_TYPE_LABEL[p.paymentType]}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+                              </div>
+                            )}
+                          </td>
                           <td style={{padding:"9px 16px"}}>
                             <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
                               <Badge text={INCOMING_LABEL[inc]} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
