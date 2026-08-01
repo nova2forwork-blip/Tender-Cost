@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
-import * as XLSX from "xlsx";
+import * as XLSX from "xlsx-js-style";
 import { supabase, sg, ss, sd } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
@@ -306,91 +306,320 @@ const GLOBAL_CSS = `
 `;
 
 // ─── Excel Export ─────────────────────────────────────────────────────────────
-function exportToExcel(project, tenderCosts, additions, poEntries) {
-  const wb = XLSX.utils.book_new();
-
-  // Budget = baseline Tender Cost + every monthly addition entered so far, combined per Acc. Code
-  const combinedBudget = {...tenderCosts};
+// Every department gets its own styled workbook — xlsx-js-style (a SheetJS
+// fork) lets us actually write cell colors/fonts/borders, which the plain
+// community "xlsx" package silently drops on write.
+const buildCombinedBudget = (tenderCosts, additions) => {
+  const combined = {...tenderCosts};
   Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
-    if (mKey.startsWith("$")) return; // skip project-level meta keys like $columns
+    if (mKey.startsWith("$")) return;
     Object.entries(monthObj || {}).forEach(([code, val]) => {
-      if (code.startsWith("$") || code.includes(":")) return; // skip meta keys / per-column sub-entries, already rolled into the plain code key
-      combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
+      if (code.startsWith("$") || code.includes(":")) return;
+      combined[code] = (parseFloat(combined[code]) || 0) + (parseFloat(val) || 0);
     });
   });
+  return combined;
+};
+const exportAccountList = (extraItems=[], hiddenAccounts=[]) => [
+  ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)),
+  ...extraItems.filter(e => !e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group||"Other" })),
+];
 
-  const summaryRows = [];
-  summaryRows.push([`Project: ${project.name}`, "", "", "", "", ""]);
-  summaryRows.push([`Area: ${project.area} ft²`, "", `Panels: ${project.panels}`, "", "", ""]);
-  summaryRows.push([`Export Date: ${new Date().toLocaleDateString("th-TH")}`, "", "", "", "", ""]);
-  summaryRows.push([]);
-  summaryRows.push(["Acc. Code","Account Name","Group","Budget / Tender Cost","Committed (PO)","Remaining","% Used","Status"]);
-  let grandBudget=0, grandCommitted=0;
-  ACCOUNTS.forEach(a => {
+// ─── Styling helper ─────────────────────────────────────────────────────────
+// Lays down a colored title bar (merged across every column), optional gray
+// info sub-rows, a bold colored header row with autofilter, zebra-striped
+// bordered data rows with right-aligned money/% columns, and an optional
+// bold total row — everything an aoa_to_sheet grid needs to read like a
+// real report instead of a raw data dump.
+const BORDER_THIN = (rgb) => ({ style:"thin", color:{rgb} });
+const BORDER_MED  = (rgb) => ({ style:"medium", color:{rgb} });
+function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart, dataEnd,
+                           totalRow=null, moneyCols=[], pctCols=[], centerCols=[], theme,
+                           // rowGroups: array aligned to dataStart..dataEnd holding a "group key" per
+                           // row. When given, rows are shaded in solid blocks per group (instead of
+                           // plain every-other-row zebra) and a heavier divider line marks where one
+                           // group ends and the next begins — a long list then reads as clustered
+                           // sections instead of a flat grid.
+                           // groupDisplayCol: column index holding the group's label, bolded/tinted so
+                           // the eye can track straight down that column.
+                           rowGroups = null, groupDisplayCol = null }) {
+  ws["!rows"]   = ws["!rows"] || [];
+  ws["!merges"] = ws["!merges"] || [];
+
+  ws["!merges"].push({ s:{r:titleRow,c:0}, e:{r:titleRow,c:numCols-1} });
+  for (let c=0; c<numCols; c++) {
+    const ref = XLSX.utils.encode_cell({r:titleRow,c});
+    if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    ws[ref].s = { font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Arial"},
+      fill:{fgColor:{rgb:theme.dark}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
+  }
+  ws["!rows"][titleRow] = { hpx:30 };
+
+  subRows.forEach(r => {
+    for (let c=0; c<numCols; c++) {
+      const ref = XLSX.utils.encode_cell({r,c});
+      if (ws[ref]) ws[ref].s = { font:{italic:true,sz:9.5,color:{rgb:"64748B"},name:"Arial"} };
+    }
+    ws["!rows"][r] = { hpx:16 };
+  });
+
+  for (let c=0; c<numCols; c++) {
+    const ref = XLSX.utils.encode_cell({r:headerRow,c});
+    if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:"FFFFFF"},name:"Arial"},
+      fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"center",wrapText:true},
+      border:{ top:BORDER_THIN(theme.main), bottom:BORDER_THIN(theme.main), left:BORDER_THIN("FFFFFF"), right:BORDER_THIN("FFFFFF") } };
+  }
+  ws["!rows"][headerRow] = { hpx:26 };
+  ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s:{r:headerRow,c:0}, e:{r:headerRow,c:numCols-1} }) };
+
+  let band = 0, prevGroup;
+  for (let r=dataStart; r<=dataEnd; r++) {
+    const idx = r - dataStart;
+    let zebra, isGroupStart = false;
+    if (rowGroups) {
+      const g = rowGroups[idx];
+      isGroupStart = idx > 0 && g !== prevGroup;
+      if (idx === 0 || isGroupStart) band = 1 - band;
+      prevGroup = g;
+      zebra = band === 1;
+    } else {
+      zebra = idx % 2 === 1;
+    }
+    for (let c=0; c<numCols; c++) {
+      const ref = XLSX.utils.encode_cell({r,c});
+      if (!ws[ref]) continue;
+      const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
+      const isGroupLabel = groupDisplayCol != null && c === groupDisplayCol;
+      const s = { font: isGroupLabel
+          ? {sz:10,name:"Arial",bold:true,color:{rgb:theme.dark}}
+          : {sz:10,name:"Arial",color:{rgb:"1F2937"}},
+        alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true },
+        border:{ top: isGroupStart?BORDER_MED("CBD5E1"):BORDER_THIN("E5E7EB"), bottom:BORDER_THIN("E5E7EB"),
+                 left:BORDER_THIN("E5E7EB"), right:BORDER_THIN("E5E7EB") } };
+      if (zebra)   s.fill   = { fgColor:{rgb:"F8FAFC"} };
+      if (isMoney) s.numFmt = "#,##0";
+      if (isPct)   s.numFmt = "0.0%";
+      ws[ref].s = s;
+    }
+  }
+
+  if (totalRow != null) {
+    for (let c=0; c<numCols; c++) {
+      const ref = XLSX.utils.encode_cell({r:totalRow,c});
+      if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+      const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c);
+      ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.dark}},
+        alignment:{vertical:"center",horizontal:isMoney||isPct?"right":"left"},
+        numFmt: isMoney?"#,##0":isPct?"0.0%":undefined };
+    }
+    ws["!rows"][totalRow] = { hpx:24 };
+  }
+}
+
+// ─── QS: budget / tender-cost export ───────────────────────────────────────
+function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"2563EB", dark:"1D4ED8" };
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+
+  // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
+  const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม (Baseline)","เพิ่มรายเดือน (รวม)","งบรวมทั้งหมด"]);
+  const dataStart1 = rows1.length;
+  let gB=0, gA=0, gT=0;
+  const rowGroups1 = [];
+  accounts.forEach(a => {
+    const baseline = parseFloat(tenderCosts[a.code]) || 0;
+    const total    = parseFloat(combinedBudget[a.code]) || 0;
+    if (total<=0 && baseline<=0) return;
+    const added = total - baseline;
+    rows1.push([a.code, a.name, a.group, baseline, added, total]);
+    rowGroups1.push(a.group);
+    gB += baseline; gA += added; gT += total;
+  });
+  const dataEnd1 = rows1.length-1;
+  rows1.push(["","TOTAL","",gB,gA,gT]);
+  const totalRow1 = rows1.length-1;
+  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
+  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18}];
+  styleSheet(ws1, { numCols:6, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:[3,4,5], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+  XLSX.utils.book_append_sheet(wb, ws1, "งบประมาณ");
+
+  // Sheet 2 — one column per month, so QS can see exactly how the budget grew
+  const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const rows2 = [[`รายการเพิ่มรายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows2.push(["Acc. Code","Account Name","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"]);
+  const dataStart2 = rows2.length;
+  const monthTotals = months.map(()=>0);
+  let gB2=0, gT2=0;
+  const rowGroups2 = [];
+  accounts.forEach(a => {
+    const baseline  = parseFloat(tenderCosts[a.code]) || 0;
+    const monthVals = months.map(m => parseFloat((additions[m]||{})[a.code]) || 0);
+    const total = baseline + monthVals.reduce((s,v)=>s+v,0);
+    if (total<=0 && baseline<=0) return;
+    rows2.push([a.code, a.name, baseline, ...monthVals, total]);
+    rowGroups2.push(a.group);
+    monthVals.forEach((v,i) => monthTotals[i]+=v);
+    gB2 += baseline; gT2 += total;
+  });
+  const dataEnd2 = rows2.length-1;
+  rows2.push(["","TOTAL",gB2, ...monthTotals, gT2]);
+  const totalRow2 = rows2.length-1;
+  const numCols2 = 4 + months.length;
+  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
+  ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}];
+  styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
+    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length], theme, rowGroups:rowGroups2 });
+  XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน");
+
+  XLSX.writeFile(wb, `QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// ─── Procurement: PO tracking export ───────────────────────────────────────
+function exportProcurementExcel(project, poEntries) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"F59E0B", dark:"B45309" };
+
+  // Sheet 1 — every PO line, with open/delivery/payment dates side by side
+  const rows1 = [[`รายการ PO — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}  ·  ทั้งหมด ${poEntries.length} PO`], []];
+  rows1.push(["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"]);
+  const dataStart1 = rows1.length;
+  let grand1 = 0;
+  const rowGroups1 = [];
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
+    const pay = paymentStatus(p);
+    const deliveryStr = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
+    poItems(p).forEach(it => {
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      const amount = parseFloat(it.amount) || 0;
+      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p,it), poNumbersLabel(p), amount, p.status, deliveryStr, p.paymentPlan||"-", PAYMENT_LABEL[pay], p.notes||""]);
+      rowGroups1.push(acc?.group || "-");
+      grand1 += amount;
+    });
+  });
+  const dataEnd1 = rows1.length-1;
+  rows1.push(["","","","","TOTAL", grand1,"","","","",""]);
+  const totalRow1 = rows1.length-1;
+  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
+  ws1["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
+  styleSheet(ws1, { numCols:11, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:[5], centerCols:[6,9], theme, rowGroups:rowGroups1 });
+  XLSX.utils.book_append_sheet(wb, ws1, "PO Entries");
+
+  // Sheet 2 — status pipeline at a glance
+  const rows2 = [[`สรุปสถานะ PO — ${project.name}`], [], ["สถานะ","จำนวน PO","มูลค่ารวม (THB)"]];
+  const dataStart2 = 3;
+  PO_STATUS.forEach(s => {
+    const list = poEntries.filter(p => p.status === s);
+    if (!list.length) return;
+    rows2.push([s, list.length, list.reduce((sum,p)=>sum+poTotal(p),0)]);
+  });
+  const dataEnd2 = rows2.length-1;
+  rows2.push(["TOTAL", poEntries.length, poEntries.reduce((s,p)=>s+poTotal(p),0)]);
+  const totalRow2 = rows2.length-1;
+  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
+  ws2["!cols"] = [{wch:16},{wch:14},{wch:18}];
+  styleSheet(ws2, { numCols:3, headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:[2], centerCols:[1], theme });
+  XLSX.utils.book_append_sheet(wb, ws2, "สรุปสถานะ");
+
+  XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// ─── Accounting: full financial export ─────────────────────────────────────
+function exportAccountingExcel(project, tenderCosts, additions, poEntries, extraItems=[], hiddenAccounts=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"10B981", dark:"047857" };
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+
+  // Sheet 1 — Budget vs Committed vs Variance per Acc. Code
+  const rows1 = [[`สรุปงบประมาณ — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows1.push(["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Committed (PO)","ส่วนต่าง","% ใช้ไป","สถานะ"]);
+  const dataStart1 = rows1.length;
+  let gB=0, gC=0;
+  const rowGroups1 = [];
+  accounts.forEach(a => {
     const budget    = parseFloat(combinedBudget[a.code]) || 0;
     const committed = poEntries.reduce((s,p)=>s+poAmountForCode(p,a.code),0);
-    const remaining = budget - committed;
-    const pctUsed   = budget > 0 ? committed/budget : (committed>0?999:0);
-    const status    = committed > budget && budget > 0 ? "OVER BUDGET" : committed>0 ? "OK" : budget>0 ? "No PO" : "-";
-    if (budget > 0 || committed > 0) {
-      summaryRows.push([a.code, a.name, a.group, budget, committed, remaining, pctUsed, status]);
-      grandBudget += budget; grandCommitted += committed;
-    }
+    if (budget<=0 && committed<=0) return;
+    const variance = budget - committed;
+    const pctUsed  = budget>0 ? committed/budget : (committed>0 ? 9.99 : 0);
+    const status   = committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
+    rows1.push([a.code, a.name, a.group, budget, committed, variance, pctUsed, status]);
+    rowGroups1.push(a.group);
+    gB += budget; gC += committed;
   });
-  summaryRows.push([]);
-  summaryRows.push(["","TOTAL","",grandBudget,grandCommitted,grandBudget-grandCommitted,grandBudget>0?grandCommitted/grandBudget:0,""]);
-
-  const ws1 = XLSX.utils.aoa_to_sheet(summaryRows);
-  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:20},{wch:20},{wch:18},{wch:10},{wch:14}];
-  for (let r=5; r<summaryRows.length; r++) {
-    const cellRef = XLSX.utils.encode_cell({r, c:6});
-    if (ws1[cellRef] && typeof ws1[cellRef].v === "number") ws1[cellRef].z = "0.0%";
-    ["D","E","F"].forEach((_,i) => {
-      const ref = XLSX.utils.encode_cell({r, c:3+i});
-      if (ws1[ref] && typeof ws1[ref].v === "number") ws1[ref].z = '#,##0.00';
-    });
+  const dataEnd1 = rows1.length-1;
+  rows1.push(["","TOTAL","",gB,gC,gB-gC,gB>0?gC/gB:0,""]);
+  const totalRow1 = rows1.length-1;
+  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
+  ws1["!cols"] = [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12}];
+  styleSheet(ws1, { numCols:8, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:[3,4,5], pctCols:[6], centerCols:[7], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+  // Flag over-budget rows in red so they jump out without opening the app
+  for (let r=dataStart1; r<=dataEnd1; r++) {
+    const varRef = XLSX.utils.encode_cell({r,c:5});
+    const stRef  = XLSX.utils.encode_cell({r,c:7});
+    if (ws1[varRef] && typeof ws1[varRef].v === "number" && ws1[varRef].v < 0) {
+      ws1[varRef].s = { ...ws1[varRef].s, font:{...ws1[varRef].s.font, color:{rgb:"DC2626"}, bold:true} };
+    }
+    if (ws1[stRef] && ws1[stRef].v === "เกินงบ") {
+      ws1[stRef].s = { ...ws1[stRef].s, font:{...ws1[stRef].s.font, color:{rgb:"DC2626"}, bold:true} };
+    }
   }
   XLSX.utils.book_append_sheet(wb, ws1, "Summary");
 
-  const poRows = [];
-  poRows.push([`Project: ${project.name}`, "", "", "", "", "", "", "", ""]);
-  poRows.push([]);
-  poRows.push(["PO Date","Acc. Code","Account Name","Group","Supplier","PO Number","Amount","Status","Suppliers & Rounds","Notes"]);
-  // One row per Account Code line — a PO split across several codes gets one
-  // row per code, each with just that code's share of the amount. A PO can
-  // now involve several suppliers, each paid/delivered across several
-  // rounds — these are summarised into one "name [PO]: plan→actual (amount)"
-  // list per row so the multi-supplier detail isn't lost in the export.
-  poEntries.forEach(p => {
-    const supplierStr = poSuppliers(p).map(s => {
-      const roundsStr = (s.rounds||[]).map(r => `${r.plan||"-"}→${r.actual||"รอ"}${r.amount?` (${fmt(r.amount)})`:""}`).join(" & ") || "-";
-      return `${s.name||"—"}${s.poNumber?` [PO:${s.poNumber}]`:""}: ${roundsStr}`;
-    }).join(" | ") || "-";
+  // Sheet 2 — every PO line, full date + status detail
+  const rows2 = [[`รายการ PO ทั้งหมด — ${project.name}`], [`ทั้งหมด ${poEntries.length} PO  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows2.push(["วันเปิด PO","Acc. Code","Account Name","Group","Supplier","PO No.","มูลค่า (THB)","สถานะ","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่าย"]);
+  const dataStart2 = rows2.length;
+  let grand2 = 0;
+  const rowGroups2 = [];
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
+    const pay = paymentStatus(p);
+    const deliveryStr = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
-      poRows.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p,it), poNumbersLabel(p), parseFloat(it.amount)||0, p.status, supplierStr, p.notes||""]);
+      const amount = parseFloat(it.amount) || 0;
+      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p,it), poNumbersLabel(p), amount, p.status, deliveryStr, p.paymentPlan||"-", PAYMENT_LABEL[pay]]);
+      rowGroups2.push(acc?.group || "-");
+      grand2 += amount;
     });
   });
-  poRows.push([]);
-  poRows.push(["","","","","","TOTAL", poEntries.reduce((s,p)=>s+poTotal(p),0), "","",""]);
-  const ws2 = XLSX.utils.aoa_to_sheet(poRows);
-  ws2["!cols"] = [{wch:12},{wch:10},{wch:38},{wch:14},{wch:24},{wch:16},{wch:18},{wch:12},{wch:34},{wch:30}];
-  for (let r=2; r<poRows.length; r++) {
-    const ref = XLSX.utils.encode_cell({r, c:6});
-    if (ws2[ref] && typeof ws2[ref].v === "number") ws2[ref].z = '#,##0.00';
-  }
+  const dataEnd2 = rows2.length-1;
+  rows2.push(["","","","","","TOTAL", grand2,"","","",""]);
+  const totalRow2 = rows2.length-1;
+  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
+  ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},{wch:12},{wch:26},{wch:16},{wch:16}];
+  styleSheet(ws2, { numCols:11, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
+    moneyCols:[6], centerCols:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
   XLSX.utils.book_append_sheet(wb, ws2, "PO Entries");
 
-  const grpRows = [["Group","Budget","Committed","Remaining","% Used"]];
+  // Sheet 3 — roll-up by Group
+  const rows3 = [[`สรุปตามกลุ่ม — ${project.name}`], [], ["Group","Budget","Committed","ส่วนต่าง","% ใช้ไป"]];
+  const dataStart3 = 3;
+  let g3B=0, g3C=0;
   GROUPS.forEach(g => {
-    const codes = ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
-    const b = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
+    const codes = accounts.filter(a=>a.group===g).map(a=>a.code);
+    const b  = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
     const c2 = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
-    if (b>0||c2>0) grpRows.push([g,b,c2,b-c2,b>0?c2/b:0]);
+    if (b<=0 && c2<=0) return;
+    rows3.push([g,b,c2,b-c2,b>0?c2/b:0]);
+    g3B += b; g3C += c2;
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(grpRows), "By Group");
+  const dataEnd3 = rows3.length-1;
+  rows3.push(["TOTAL",g3B,g3C,g3B-g3C,g3B>0?g3C/g3B:0]);
+  const totalRow3 = rows3.length-1;
+  const ws3 = XLSX.utils.aoa_to_sheet(rows3);
+  ws3["!cols"] = [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10}];
+  styleSheet(ws3, { numCols:5, headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:[1,2,3], pctCols:[4], theme });
+  XLSX.utils.book_append_sheet(wb, ws3, "By Group");
 
-  XLSX.writeFile(wb, `TenderCost_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
@@ -508,10 +737,14 @@ export default function App() {
         <RoleSelect project={activeProject} updateProject={updateProject}
           onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
       )}
-      {screen === "app" && effectiveRole === "qs"          && <QSView          {...sharedProps} />}
-      {screen === "app" && effectiveRole === "procurement" && <ProcurementView {...sharedProps} />}
+      {screen === "app" && effectiveRole === "qs"          && (
+        <QSView {...sharedProps} onExport={() => exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts)} />
+      )}
+      {screen === "app" && effectiveRole === "procurement" && (
+        <ProcurementView {...sharedProps} onExport={() => exportProcurementExcel(activeProject, poEntries)} />
+      )}
       {screen === "app" && effectiveRole === "accounting"  && (
-        <AccountingView {...sharedProps} onExport={() => exportToExcel(activeProject, tenderCosts, additions, poEntries)} />
+        <AccountingView {...sharedProps} onExport={() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts)} />
       )}
     </>
   );
@@ -1030,7 +1263,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout }) {
+function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
@@ -1074,13 +1307,16 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
   return (
     <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"20px 28px 0"}}>
-        <div style={{display:"flex",gap:8,marginBottom:20}}>
+        <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
           {[["baseline","📐 ราคาเดิม (Baseline)"],["monthly","📅 รายการเพิ่มรายเดือน"]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
             </button>
           ))}
+          <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.blue,color:T.blue}}>
+            ⬇️ Export Excel
+          </button>
         </div>
       </div>
       {tab === "baseline"
@@ -2218,7 +2454,7 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
+function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport }) {
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
@@ -2411,13 +2647,16 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
         )}
 
         {view!=="add" && (
-          <div style={{display:"flex",gap:8,marginBottom:16}}>
+          <div style={{display:"flex",gap:8,marginBottom:16,alignItems:"center"}}>
             {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"]].map(([id,label])=>(
               <button key={id} onClick={()=>setTab(id)}
                 style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
                 {label}
               </button>
             ))}
+            <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.amber,color:T.amber}}>
+              ⬇️ Export Excel
+            </button>
           </div>
         )}
 
@@ -3021,7 +3260,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:24,alignItems:"center"}}>
-          {[["dashboard","📊 Dashboard"],["detail","📋 รายละเอียด"],["dates","📅 วันที่ (Cash Flow)"]].map(([v,l])=>(
+          {[["dashboard","📊 Dashboard"],["dates","📅 วันที่ (Cash Flow)"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
@@ -3087,9 +3326,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                 }
               </div>
             </div>
-          </>
-        ) : view==="detail" ? (
-          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+            <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginTop:20}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
@@ -3143,7 +3380,8 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                 </tr>
               </tfoot>
             </table>
-          </div>
+            </div>
+          </>
         ) : (
           <div>
             {/* Grand totals across every Acc. Code that has a budget or a PO */}
