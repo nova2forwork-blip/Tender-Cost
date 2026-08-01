@@ -2889,6 +2889,13 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
   const [view, setView] = useState("dashboard");
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
+  // Which Acc. Code groups are collapsed on the "วันที่ (Cash Flow)" tab.
+  const [dateCollapsed, setDateCollapsed] = useState(() => new Set());
+  const toggleDateGroup = (code) => setDateCollapsed(prev => {
+    const next = new Set(prev);
+    next.has(code) ? next.delete(code) : next.add(code);
+    return next;
+  });
 
   // Budget = baseline Tender Cost + every monthly addition entered so far,
   // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
@@ -2931,6 +2938,21 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     return {...a,budget,committed,pos:{length:poCount},over:committed>budget&&budget>0};
   }).filter(a=>a.budget>0||a.pos.length>0);
   const pctUsedOf = (a) => a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0 ? 999 : 0);
+
+  // ─── Cash-flow-by-date view ──────────────────────────────────────────────
+  // For each Acc. Code: budget vs. committed (+ variance / variance %), plus
+  // every PO booked to it with its three key dates — when the PO was opened,
+  // when goods are due in (plan → actual per delivery batch), and when
+  // payment is due — so accounting can see cash timing at a glance.
+  const dateGroups = accountData.map(a => {
+    const rows = poEntries
+      .filter(p => poItems(p).some(it => it.code === a.code))
+      .map(p => ({ po: p, item: poItems(p).find(it => it.code === a.code) }))
+      .sort((x, y) => (x.po.date || "").localeCompare(y.po.date || ""));
+    const variance = a.budget - a.committed;
+    const variancePct = a.budget > 0 ? (variance / a.budget) * 100 : (a.committed > 0 ? null : 0);
+    return { ...a, rows, variance, variancePct };
+  }).sort((x, y) => x.code.localeCompare(y.code));
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => -d);
     else { setSortKey(key); setSortDir(1); }
@@ -2964,12 +2986,42 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     );
   };
 
+  const DateCell = ({ value, lateTint }) => (
+    <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:value?(lateTint?T.red:T.textPrimary):T.textMuted,fontWeight:value&&lateTint?700:400}}>
+      {value || "—"}
+    </span>
+  );
+  const Badge = ({ text, clr, bg }) => (
+    <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{text}</span>
+  );
+  // Every delivery batch of a PO, one line per shipment: plan → actual date
+  // with its own on-time/late/received status, same as Procurement's view.
+  const DeliveryDates = ({ po }) => {
+    const deliveries = poDeliveries(po);
+    if (!deliveries.length) return <span style={{fontSize:12,color:T.textMuted}}>—</span>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {deliveries.map((d,i)=>{
+          const st = deliveryStatus(d);
+          return (
+            <div key={d.id||i} style={{display:"flex",alignItems:"center",gap:5}}>
+              {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:700,minWidth:14}}>#{i+1}</span>}
+              <DateCell value={d.plan} lateTint={st==="late"}/>
+              <span style={{color:T.textMuted,fontSize:11}}>→</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:400}}>{d.actual||"รอ"}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <Shell role="accounting" color={T.green} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:24,alignItems:"center"}}>
-          {[["dashboard","📊 Dashboard"],["detail","📋 รายละเอียด"]].map(([v,l])=>(
+          {[["dashboard","📊 Dashboard"],["detail","📋 รายละเอียด"],["dates","📅 วันที่ (Cash Flow)"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
@@ -3036,7 +3088,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               </div>
             </div>
           </>
-        ) : (
+        ) : view==="detail" ? (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
               <thead>
@@ -3091,6 +3143,101 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                 </tr>
               </tfoot>
             </table>
+          </div>
+        ) : (
+          <div>
+            {/* Grand totals across every Acc. Code that has a budget or a PO */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+              <StatCard label="งบประมาณรวม" value={fmt(dateGroups.reduce((s,a)=>s+a.budget,0))} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="PO รวม" value={fmt(dateGroups.reduce((s,a)=>s+a.committed,0))} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label="ส่วนต่างรวม" value={fmt(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))}
+                sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"เกินงบ":"คงเหลือ"}
+                color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
+                icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
+                accent={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.redBg:T.greenBg}/>
+              <StatCard label="รอจ่ายเงิน" value={poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length}
+                sub={`${poEntries.filter(p=>paymentStatus(p)==="late").length} เกินกำหนด`} color={T.red} icon="⏳" accent={T.redBg}/>
+            </div>
+
+            {dateGroups.length===0 ? (
+              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+                <div style={{fontSize:32,marginBottom:12}}>📅</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>ยังไม่มีงบหรือ PO ให้แสดง</div>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {dateGroups.map(a => {
+                  const isCollapsed = dateCollapsed.has(a.code);
+                  const varClr = a.variancePct===null ? T.textMuted : a.variance<0 ? T.red : T.green;
+                  return (
+                    <div key={a.code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                      <div onClick={()=>toggleDateGroup(a.code)}
+                        style={{padding:"12px 18px",background:a.over?"#fff5f5":"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:16,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
+                        <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
+                        <div style={{minWidth:180}}>
+                          <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,marginRight:8}}>{a.code}</span>
+                          <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{a.name}</span>
+                        </div>
+                        <div style={{flex:1}}/>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>งบ</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{a.budget>0?fmt(a.budget):"—"}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>PO</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
+                        </div>
+                        <div style={{textAlign:"right",minWidth:110}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>ส่วนต่าง</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
+                            {a.variancePct===null ? "No Budget" : `${a.variance<0?"-":"+"}${fmt(Math.abs(a.variance))}`}
+                          </div>
+                        </div>
+                        <div style={{textAlign:"right",minWidth:70}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>% ต่าง</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
+                            {a.variancePct===null ? "—" : `${a.variancePct<0?"-":"+"}${Math.abs(a.variancePct).toFixed(1)}%`}
+                          </div>
+                        </div>
+                        {a.over && <Badge text="⚠ เกินงบ" clr={T.red} bg={T.redBg}/>}
+                      </div>
+                      {!isCollapsed && (
+                        a.rows.length===0 ? (
+                          <div style={{padding:"14px 18px",fontSize:12,color:T.textMuted}}>ยังไม่มี PO ผูกกับ Acc. Code นี้</div>
+                        ) : (
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                          <thead>
+                            <tr>
+                              {["วันเปิด PO (แพลน)","Supplier","PO No.","มูลค่า (THB)","ของเข้า (แผน→จริง)","ต้องจ่ายเงินวันไหน","สถานะจ่าย"].map(h=>(
+                                <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:10,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {a.rows.map(({po:p,item},i)=>{
+                              const pay = paymentStatus(p);
+                              return (
+                                <tr key={p.id+"-"+(item.id||item.code)}
+                                  style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
+                                  <td style={{padding:"9px 16px"}}><DateCell value={p.date}/></td>
+                                  <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
+                                  <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
+                                  <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}</td>
+                                  <td style={{padding:"9px 16px"}}><DeliveryDates po={p}/></td>
+                                  <td style={{padding:"9px 16px"}}><DateCell value={p.paymentPlan} lateTint={pay==="late"}/></td>
+                                  <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                        )
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
