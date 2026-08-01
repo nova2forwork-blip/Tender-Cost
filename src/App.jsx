@@ -206,7 +206,10 @@ const itemSupplierName = (p, it) => itemSupplier(p, it)?.name || "—";
 
 
 const deliveryStatus = (d) => {
-  if (d.actual) return "received";
+  // A delivery only counts as "received" once its actual date has really
+  // arrived — an actual date typed in for the future (e.g. entered ahead of
+  // time) shouldn't flip the badge to "received" before that day comes.
+  if (d.actual) return d.actual <= todayStr() ? "received" : "pending";
   if (d.plan && d.plan < todayStr()) return "late";
   if (d.plan) return "pending";
   return "unset";
