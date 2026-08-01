@@ -526,6 +526,40 @@ function exportProcurementExcel(project, poEntries) {
   styleSheet(ws2, { numCols:3, headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:[2], centerCols:[1], theme });
   XLSX.utils.book_append_sheet(wb, ws2, "สรุปสถานะ");
 
+  // Sheet 3 — spend per month, broken down by material group, so trends
+  // (which group is driving spend each month) are visible at a glance
+  const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
+  if (poMonths.length) {
+    const rows3 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+    rows3.push(["Group", ...poMonths.map(monthShortLabel), "รวมทั้งหมด"]);
+    const dataStart3 = rows3.length;
+    const monthTotals3 = poMonths.map(()=>0);
+    let grand3 = 0;
+    const rowGroups3 = [];
+    GROUPS.forEach(g => {
+      const codes = ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
+      const monthVals = poMonths.map(m =>
+        poEntries.filter(p => (p.date||"").slice(0,7) === m)
+          .reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0)
+      );
+      const total = monthVals.reduce((s,v)=>s+v,0);
+      if (total<=0) return;
+      rows3.push([g, ...monthVals, total]);
+      rowGroups3.push(g);
+      monthVals.forEach((v,i)=>monthTotals3[i]+=v);
+      grand3 += total;
+    });
+    const dataEnd3 = rows3.length-1;
+    rows3.push(["TOTAL", ...monthTotals3, grand3]);
+    const totalRow3 = rows3.length-1;
+    const numCols3 = 2 + poMonths.length;
+    const ws3 = XLSX.utils.aoa_to_sheet(rows3);
+    ws3["!cols"] = [{wch:18}, ...poMonths.map(()=>({wch:12})), {wch:16}];
+    styleSheet(ws3, { numCols:numCols3, subRows:[1], headerRow:3, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3,
+      moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
+    XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน");
+  }
+
   XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
@@ -618,6 +652,32 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   ws3["!cols"] = [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10}];
   styleSheet(ws3, { numCols:5, headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:[1,2,3], pctCols:[4], theme });
   XLSX.utils.book_append_sheet(wb, ws3, "By Group");
+
+  // Sheet 4 — monthly cash-flow: how much budget was added and how much got
+  // committed (PO'd) each month, plus the running cumulative totals, so
+  // Accounting can see the trend over time rather than just a snapshot
+  const additionMonths = Object.keys(additions||{}).filter(k=>!k.startsWith("$"));
+  const poEntryMonths  = poEntries.map(p=>(p.date||"").slice(0,7)).filter(Boolean);
+  const allMonths = [...new Set([...additionMonths, ...poEntryMonths])].sort();
+  if (allMonths.length) {
+    const rows4 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+    rows4.push(["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม"]);
+    const dataStart4 = rows4.length;
+    const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
+    let cumB = baselineTotal, cumC = 0;
+    allMonths.forEach(m => {
+      const addedThisMonth     = accounts.reduce((s,a)=>s+(parseFloat((additions[m]||{})[a.code])||0),0);
+      const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0);
+      cumB += addedThisMonth;
+      cumC += committedThisMonth;
+      rows4.push([monthShortLabel(m), addedThisMonth, cumB, committedThisMonth, cumC, cumB>0?cumC/cumB:0]);
+    });
+    const dataEnd4 = rows4.length-1;
+    const ws4 = XLSX.utils.aoa_to_sheet(rows4);
+    ws4["!cols"] = [{wch:14},{wch:18},{wch:16},{wch:18},{wch:16},{wch:12}];
+    styleSheet(ws4, { numCols:6, subRows:[1], headerRow:3, dataStart:dataStart4, dataEnd:dataEnd4, moneyCols:[1,2,3,4], pctCols:[5], theme });
+    XLSX.utils.book_append_sheet(wb, ws4, "รายเดือน");
+  }
 
   XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
