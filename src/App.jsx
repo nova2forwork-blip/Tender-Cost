@@ -1058,7 +1058,11 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
   });
   const standaloneExtras = extraItems.filter(e => !e.parentCode);
-  const childrenOf = (code) => subItemsByParent[code] || [];
+  // Baseline only ever shows sub-items that were created as part of the baseline
+  // itself (no addedInMonth). Ones added later from the Monthly tab live only
+  // there, starting from the month they were added — they don't belong to
+  // "ราคาเดิม (Baseline)" and would be confusing to show here with a 0.00 baseline value.
+  const childrenOf = (code) => (subItemsByParent[code] || []).filter(k => !k.addedInMonth);
 
   // Effective value of a row: sum of its sub-items if it has any, else its own draft value.
   const effectiveValue = (row) => {
@@ -1883,17 +1887,17 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     const isNewThisMonth = k.addedInMonth === month;
                     return (
                       <tr key={k.code} style={{background:isNewThisMonth?T.greenBg:i%2===0?T.card:"#fafbfd",borderLeft:`3px solid ${isNewThisMonth?T.green:"#e2e8f0"}`,borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none",transition:"background 0.2s"}}>
-                        <td style={{padding:"7px 16px 7px 27px",color:T.textMuted,fontSize:13}}>↳</td>
+                        <td style={{padding:"7px 16px 7px 27px",color:T.green,fontSize:13}}>↳</td>
                         <td/>
-                        <td style={{padding:"7px 16px",color:T.textPrimary,fontSize:12.5}}>
+                        <td style={{padding:"7px 16px",color:T.green,fontSize:12.5,fontStyle:"italic"}}>
                           {k.name}
                           {k.addedInMonth && (
                             isNewThisMonth ? (
-                              <span title="รายการนี้เพิ่งเพิ่มเข้ามาในเดือนนี้" style={{marginLeft:8,fontSize:10,background:T.green,color:"#fff",padding:"2px 8px",borderRadius:6,fontWeight:700,letterSpacing:0.2}}>
+                              <span title="รายการนี้เพิ่งเพิ่มเข้ามาในเดือนนี้" style={{marginLeft:8,fontSize:10,background:T.green,color:"#fff",padding:"2px 8px",borderRadius:6,fontWeight:700,fontStyle:"normal",letterSpacing:0.2}}>
                                 ✨ ใหม่เดือนนี้
                               </span>
                             ) : (
-                              <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น — เดือนก่อนหน้านั้นจะไม่แสดงรายการนี้" style={{marginLeft:8,fontSize:10,background:T.amberBg,color:T.amber,padding:"2px 8px",borderRadius:6,fontWeight:600}}>
+                              <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น — เดือนก่อนหน้านั้นจะไม่แสดงรายการนี้" style={{marginLeft:8,fontSize:10,background:T.amberBg,color:T.amber,padding:"2px 8px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
                                 เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
                               </span>
                             )
