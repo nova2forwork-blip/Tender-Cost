@@ -2683,6 +2683,14 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 // cost line, which deliveries and payments are on track vs. overdue.
 function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session }) {
   const [search, setSearch] = useState("");
+  // Which Account-Code groups are collapsed — lets a busy board with many
+  // PO rows be tidied away group by group instead of scrolling forever.
+  const [collapsed, setCollapsed] = useState(() => new Set());
+  const toggleGroup = (code) => setCollapsed(prev => {
+    const next = new Set(prev);
+    next.has(code) ? next.delete(code) : next.add(code);
+    return next;
+  });
 
   const counts = poEntries.reduce((acc,p) => {
     const inc = incomingStatus(p), pay = paymentStatus(p);
@@ -2765,6 +2773,14 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
           ⚠️ แสดงเฉพาะรายการล่าช้า
         </button>
+        <button onClick={()=>setCollapsed(new Set(sortedCodes))}
+          style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
+          ▲ ย่อทั้งหมด
+        </button>
+        <button onClick={()=>setCollapsed(new Set())}
+          style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
+          ▼ ขยายทั้งหมด
+        </button>
         <div style={{flex:1}}/>
         <button onClick={onAddNew} className="btn-primary" style={{background:T.amber}}>+ เพิ่ม PO</button>
       </div>
@@ -2781,15 +2797,19 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
             const acc = ACCOUNTS.find(a=>a.code===code);
             const rows = groups[code];
             const lateCount = rows.filter(({po:p})=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
+            const isCollapsed = collapsed.has(code);
             return (
               <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-                <div style={{padding:"12px 18px",background:"#f8fafc",borderBottom:`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10}}>
+                <div onClick={()=>toggleGroup(code)}
+                  style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none"}}>
+                  <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
                   <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{code}</span>
                   <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                   <span style={{flex:1}}/>
                   <span style={{color:T.textMuted,fontSize:11}}>{rows.length} PO</span>
                   {lateCount>0 && <Badge text={`⚠️ ${lateCount} ล่าช้า`} clr={T.red} bg={T.redBg}/>}
                 </div>
+                {!isCollapsed && (
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                   <thead>
                     <tr>
@@ -2854,6 +2874,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                     })}
                   </tbody>
                 </table>
+                )}
               </div>
             );
           })}
