@@ -3266,6 +3266,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
       else if (sortKey === "name")      { av = a.name; bv = b.name; }
       else if (sortKey === "budget")    { av = a.budget; bv = b.budget; }
       else if (sortKey === "committed") { av = a.committed; bv = b.committed; }
+      else if (sortKey === "variance")  { av = a.budget-a.committed; bv = b.budget-b.committed; }
       else                              { av = pctUsedOf(a); bv = pctUsedOf(b); }
       if (typeof av === "string") return av.localeCompare(bv) * sortDir;
       return (av - bv) * sortDir;
@@ -3396,11 +3397,12 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                     {label:"Group", key:"group"},
                     {label:"Budget (QS)", key:"budget"},
                     {label:"Committed (PO)", key:"committed"},
+                    {label:"ส่วนต่าง", key:"variance"},
                     {label:"% Used", key:"pct"},
                     {label:"", key:null},
                   ].map(({label,key})=>(
                     <th key={label||"__actions"}
-                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","ส่วนต่าง","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                       <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                     </th>
                   ))}
@@ -3409,6 +3411,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <tbody>
                 {displayAccountData.map((a,i)=>{
                   const p2=a.budget>0?(a.committed/a.budget*100):a.committed>0?999:0;
+                  const variance = a.budget - a.committed;
                   return (
                     <tr key={a.code} style={{background:a.over?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
                       <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12,fontWeight:500}}>{a.code}</td>
@@ -3418,6 +3421,9 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                       </td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?700:500}}>
+                        {a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—"}
+                      </td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:p2>100?T.red:p2>80?T.amber:T.green,fontSize:12,fontWeight:600}}>
                         {a.budget>0?`${p2.toFixed(1)}%`:a.committed>0?"No Budget":"—"}
                       </td>
@@ -3436,6 +3442,14 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                   <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{accountData.length} รายการ</td>
                   <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}</td>
                   <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.amber,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}</td>
+                  {(() => {
+                    const totalVariance = accountData.reduce((s,a)=>s+(a.budget-a.committed),0);
+                    return (
+                      <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:totalVariance<0?T.red:T.textSecondary,fontWeight:700,fontSize:14}}>
+                        {totalVariance<0?"-":""}{fmt(Math.abs(totalVariance))}
+                      </td>
+                    );
+                  })()}
                   <td colSpan={2}/>
                 </tr>
               </tfoot>
