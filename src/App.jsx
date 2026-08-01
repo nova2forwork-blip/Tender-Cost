@@ -1058,6 +1058,29 @@ function SyncBadge({ syncing, syncedAt }) {
   );
 }
 
+// ─── Search input with a clear (×) button ──────────────────────────────────
+// Small wrapper around the standard .input-base search box used across QS,
+// Procurement, and Accounting toolbars — shows an × to instantly clear the
+// text once something has been typed, instead of having to select-and-delete.
+function SearchInput({ value, onChange, placeholder, width = 240 }) {
+  return (
+    <div style={{position:"relative",width}}>
+      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        className="input-base" style={{width:"100%",paddingRight:value?30:13}}/>
+      {value && (
+        <button type="button" onClick={()=>onChange("")} title="ล้างคำค้นหา"
+          style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",width:20,height:20,border:"none",
+            borderRadius:"50%",background:"transparent",color:T.textMuted,fontSize:15,lineHeight:1,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
+          onMouseEnter={e=>{e.currentTarget.style.background="#e2e8f0";e.currentTarget.style.color=T.textPrimary;}}
+          onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=T.textMuted;}}>
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── StatCard ─────────────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color, icon, accent }) {
   return (
@@ -1522,8 +1545,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
       {/* Filters + Add row + Save */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
-          className="input-base" style={{width:240}}/>
+        <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account Code / ชื่อ..." width={240}/>
         <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
           {["All",...GROUPS].map(g=>(
             <button key={g} onClick={()=>setFilter(g)}
@@ -2021,8 +2043,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Toolbar: search + group filter + actions */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account Code / ชื่อ..."
-          className="input-base" style={{width:220}}/>
+        <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account Code / ชื่อ..." width={220}/>
         <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
           {["All",...GROUPS].map(g=>(
             <button key={g} onClick={()=>setFilter(g)}
@@ -2853,8 +2874,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Account, supplier, PO..."
-                className="input-base" style={{width:240}}/>
+              <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account, supplier, PO..." width={240}/>
               <div style={{display:"flex",gap:5,flex:1,flexWrap:"wrap"}}>
                 {["All",...PO_STATUS].map(s=>(
                   <button key={s} onClick={()=>setFilter(s)}
@@ -3066,8 +3086,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
       </div>
 
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 ค้นหา Acc. Code, supplier, PO..."
-          className="input-base" style={{width:240}}/>
+        <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Acc. Code, supplier, PO..." width={240}/>
         <button onClick={()=>setOnlyIssues(v=>!v)}
           style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
           ⚠️ แสดงเฉพาะรายการล่าช้า
