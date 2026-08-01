@@ -239,8 +239,10 @@ function exportToExcel(project, tenderCosts, additions, poEntries) {
 
   // Budget = baseline Tender Cost + every monthly addition entered so far, combined per Acc. Code
   const combinedBudget = {...tenderCosts};
-  Object.values(additions || {}).forEach(monthObj => {
+  Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
+    if (mKey.startsWith("$")) return; // skip project-level meta keys like $columns
     Object.entries(monthObj || {}).forEach(([code, val]) => {
+      if (code.startsWith("$") || code.includes(":")) return; // skip meta keys / per-column sub-entries, already rolled into the plain code key
       combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
     });
   });
@@ -1029,8 +1031,16 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const [subName, setSubName] = useState("");
   const [collapsed, setCollapsed] = useState({});   // code -> true means sub-items hidden
   const [showHidden, setShowHidden] = useState(false);
+  const [forceEdit, setForceEdit] = useState(false); // user explicitly clicked "แก้ไข" to unlock an already-saved baseline
 
   useEffect(() => setDraft({...tenderCosts}), [tenderCosts]);
+
+  // The baseline counts as "saved" (and therefore locked, requiring "แก้ไข"
+  // to unlock) once it carries the explicit $saved flag, or — for baselines
+  // saved before this flag existed — once it already has any real value.
+  const hasData = Object.entries(tenderCosts||{}).some(([k,v]) => !k.startsWith("$") && parseFloat(v));
+  const baselineSaved = tenderCosts.$saved === true || hasData;
+  const editingUnlocked = !baselineSaved || forceEdit;
 
   // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
   // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
@@ -1092,8 +1102,13 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
       if (kids.length) merged[a.code] = kids.reduce((s,k)=>s+(parseFloat(merged[k.code])||0),0);
     });
     const clean = {};
-    Object.entries(merged).forEach(([k,v]) => { if(v!==""&&!isNaN(v)&&parseFloat(v)>0) clean[k]=parseFloat(v); });
+    Object.entries(merged).forEach(([k,v]) => {
+      if (k.startsWith("$")) return; // meta keys ($saved) are re-added explicitly below
+      if(v!==""&&!isNaN(v)&&parseFloat(v)>0) clean[k]=parseFloat(v);
+    });
+    clean.$saved = true;
     saveTenders(clean);
+    setForceEdit(false); setAddOpen(false); setSubFor(null);
     setSaved(true); setTimeout(()=>setSaved(false),2000);
   };
 
@@ -1144,11 +1159,23 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
             🗂 ที่ซ่อนไว้ ({hiddenList.length})
           </button>
         )}
-        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มรายการหลักใหม่</button>
-        <button onClick={handleSave} className="btn-primary"
-          style={{background:saved?T.green:T.blue,minWidth:140}}>
-          {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
-        </button>
+        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)} disabled={!editingUnlocked}
+          style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ เพิ่มรายการหลักใหม่</button>
+        {!editingUnlocked && (
+          <span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.textMuted,background:"#f1f5f9",padding:"6px 12px",borderRadius:8,fontWeight:600}}>
+            🔒 บันทึกแล้ว
+          </span>
+        )}
+        {editingUnlocked ? (
+          <button onClick={handleSave} className="btn-primary"
+            style={{background:saved?T.green:T.blue,minWidth:140}}>
+            {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
+          </button>
+        ) : (
+          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:140}}>
+            ✏️ แก้ไข Tender Cost
+          </button>
+        )}
       </div>
 
       {/* Hidden accounts panel */}
@@ -1236,7 +1263,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                       {a.name}
                       {a.isExtra && <span style={{marginLeft:7,fontSize:10,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการใหม่</span>}
                       {hasKids && <span style={{marginLeft:7,fontSize:10,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} รายการย่อย</span>}
-                      {!a.isExtra && (
+                      {!a.isExtra && editingUnlocked && (
                         <button onClick={(e)=>{e.stopPropagation(); setSubFor(subFor===a.code?null:a.code); setSubName(""); setCollapsed(c=>({...c,[a.code]:false}));}} title="เพิ่มรายการย่อยใต้ Acc. Code นี้"
                           style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:10,padding:"1px 7px"}}>
                           + รายการย่อย
@@ -1248,17 +1275,19 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                         <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.blueLight,borderRadius:8,color:T.blue,fontWeight:700,fontSize:13}}>
                           {fmt(rowVal)}
                         </div>
-                      ) : (
+                      ) : editingUnlocked ? (
                         <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))} onClick={e=>e.stopPropagation()}
                           placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
+                      ) : (
+                        <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}</div>
                       )}
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
-                      {a.isExtra
+                      {editingUnlocked && (a.isExtra
                         ? <button onClick={(e)=>{e.stopPropagation(); handleDeleteRow(a.code);}} title="ลบรายการนี้"
                             style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
                         : <button onClick={(e)=>{e.stopPropagation(); onHideAccount(a.code);}} title="นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)"
-                            style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14}}>✕</button>}
+                            style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14}}>✕</button>)}
                     </td>
                   </tr>
 
@@ -1269,12 +1298,18 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                       <td/>
                       <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>{k.name}</td>
                       <td style={{padding:"6px 16px",textAlign:"right"}}>
-                        <input type="number" value={draft[k.code]??""} onChange={e=>setDraft(d=>({...d,[k.code]:e.target.value}))}
-                          placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:draft[k.code]>0?T.greenBg:T.bg}}/>
+                        {editingUnlocked ? (
+                          <input type="number" value={draft[k.code]??""} onChange={e=>setDraft(d=>({...d,[k.code]:e.target.value}))}
+                            placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:draft[k.code]>0?T.greenBg:T.bg}}/>
+                        ) : (
+                          <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}</div>
+                        )}
                       </td>
                       <td style={{padding:"6px 16px",textAlign:"center"}}>
-                        <button onClick={()=>handleDeleteRow(k.code)} title="ลบรายการย่อยนี้"
-                          style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                        {editingUnlocked && (
+                          <button onClick={()=>handleDeleteRow(k.code)} title="ลบรายการย่อยนี้"
+                            style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -1330,7 +1365,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const [subFor, setSubFor] = useState(null);   // code of row currently adding a sub-item
   const [subName, setSubName] = useState("");
   const [rowCollapsed, setRowCollapsed] = useState({}); // code -> true means sub-items hidden
-  const [addColOpen, setAddColOpen] = useState(false);  // "+ ไส้ใน" inline form open?
+  const [addColOpen, setAddColOpen] = useState(false);  // "+ เพิ่มรายการ" inline form open?
   const [newColName, setNewColName] = useState("");
   const [forceEdit, setForceEdit] = useState(false);    // user explicitly clicked "แก้ไข" to unlock an already-saved month
 
@@ -1338,11 +1373,15 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
   useEffect(() => { setForceEdit(false); setAddColOpen(false); }, [month]); // switching months always re-locks until "แก้ไข" is clicked again
 
-  // "ไส้ใน" — named sub-columns inside the selected month (e.g. CC#16, CC#17),
-  // each holding its own set of per-Account-Code entries that add up to that
-  // month's total. Months created before this feature has no $columns and
-  // behave exactly as before: one plain entry field per row.
-  const columns = additions[month]?.$columns || [];
+  // "เพิ่มรายการ" — named sub-columns (e.g. CC#16, CC#17), each holding its own
+  // set of per-Account-Code entries that add up to a row's monthly total.
+  // The column set itself is stored once at the project level ($columns on
+  // the additions object, a sibling of the month keys) so a column created
+  // in any month automatically carries forward into every other month too —
+  // it isn't something you have to re-create month by month. Projects
+  // created before this feature has no $columns and behave exactly as
+  // before: one plain entry field per row.
+  const columns = additions.$columns || [];
   const isMultiCol = columns.length > 0;
 
   // A month counts as "saved" (and therefore locked, requiring "แก้ไข" to
@@ -1369,8 +1408,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const kids = childrenOf(code);
     if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[m])?.[k.code])||0),0);
     const src  = draft || additions[m];
-    const cols = additions[m]?.$columns || [];
-    if (cols.length) return cols.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0);
+    if (columns.length) return columns.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0);
     return parseFloat(src?.[code]) || 0;
   };
 
@@ -1421,7 +1459,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   // Mirrors the per-row figures computed inline in the table body, so header
   // sorting can order rows by the same "ยอดก่อนหน้า / เพิ่มเดือนนี้ / รวมสะสม" values shown.
-  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + (parseFloat(tenderCosts[r.code])||0);
+  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+rowMonthValue(r.code, m),0) + (parseFloat(tenderCosts[r.code])||0);
   const cumOf = (r) => cumBeforeOf(r) + rowMonthValue(r.code, month, draftAdd);
 
   const handleSort = (key) => {
@@ -1460,13 +1498,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     });
     const clean = {};
     Object.entries(merged).forEach(([k,v]) => {
-      if (k.startsWith("$")) return; // meta keys ($columns, $saved) are re-added explicitly below
+      if (k.startsWith("$")) return; // meta keys ($saved) are re-added explicitly below
       if(v!==""&&!isNaN(v)&&parseFloat(v)!==0) clean[k]=parseFloat(v);
     });
-    if (columns.length) clean.$columns = columns;
     clean.$saved = true;
     saveAdditions({ ...additions, [month]: clean });
-    setForceEdit(false);
+    setForceEdit(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false);
     setSaved(true); setTimeout(()=>setSaved(false),2000);
   };
 
@@ -1493,40 +1530,58 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     setDraftAdd(d => { const n = {...d}; delete n[code]; return n; });
   };
 
-  // Add a new named "ไส้ใน" (sub-column) to the selected month, e.g. "CC#17".
-  // On the very first column, any existing simple-mode values are folded into
-  // an implicit "รายการหลัก" column first, so nothing already entered is lost.
+  // Add a new named "เพิ่มรายการ" (sub-column) to the project. Because the
+  // column list lives at the project level, this one column now shows up in
+  // every month automatically — past ones and any created later — instead of
+  // having to be re-added month by month. On the very first column ever
+  // created, every month's existing plain-mode value is folded into an
+  // implicit "รายการหลัก" column first, so nothing already entered is lost.
   const handleAddColumn = () => {
     const name = newColName.trim();
     if (!name) return;
     const newCol = { id: uid(), name };
-    let monthObj = { ...(additions[month]||{}) };
+    const nextAdditions = { ...additions };
+
     if (columns.length === 0) {
       const seedCol = { id:"legacy", name:"รายการหลัก" };
-      allRows.forEach(r => {
-        const v = draftAdd[r.code];
-        if (v!==undefined && v!=="" && parseFloat(v)) monthObj[`${r.code}:legacy`] = v;
+      Object.keys(nextAdditions).forEach(mKey => {
+        if (mKey.startsWith("$")) return;
+        const src = mKey === month ? draftAdd : (nextAdditions[mKey] || {});
+        const monthObj = { ...(nextAdditions[mKey] || {}) };
+        allRows.forEach(r => {
+          const v = src[r.code];
+          if (v !== undefined && v !== "" && parseFloat(v)) monthObj[`${r.code}:legacy`] = v;
+        });
+        nextAdditions[mKey] = monthObj;
       });
-      monthObj.$columns = [seedCol, newCol];
+      nextAdditions.$columns = [seedCol, newCol];
       setDraftAdd(d => {
-        const n = {...d};
+        const n = { ...d };
         allRows.forEach(r => { if (n[r.code]!==undefined && n[r.code]!=="") n[`${r.code}:legacy`] = n[r.code]; });
         return n;
       });
     } else {
-      monthObj.$columns = [...columns, newCol];
+      nextAdditions.$columns = [...columns, newCol];
     }
-    saveAdditions({ ...additions, [month]: monthObj });
+    saveAdditions(nextAdditions);
     setNewColName(""); setAddColOpen(false);
   };
 
+  // Removing a column removes it — and every month's entries under it —
+  // project-wide, since the column is shared across all months.
   const handleRemoveColumn = (colId) => {
-    if (!confirm("ลบไส้ในนี้? ค่าที่กรอกไว้ในไส้ในนี้จะถูกลบไปด้วย")) return;
+    if (!confirm("ลบรายการนี้? ค่าที่กรอกไว้ในรายการนี้จะถูกลบไปทุกเดือน")) return;
     const nextCols = columns.filter(c=>c.id!==colId);
-    const monthObj = { ...(additions[month]||{}) };
-    if (nextCols.length) monthObj.$columns = nextCols; else delete monthObj.$columns;
-    Object.keys(monthObj).forEach(k => { if (k.endsWith(`:${colId}`)) delete monthObj[k]; });
-    saveAdditions({ ...additions, [month]: monthObj });
+    const nextAdditions = { ...additions };
+    if (nextCols.length) nextAdditions.$columns = nextCols; else delete nextAdditions.$columns;
+    Object.keys(nextAdditions).forEach(mKey => {
+      if (mKey.startsWith("$")) return;
+      const monthObj = { ...(nextAdditions[mKey] || {}) };
+      let changed = false;
+      Object.keys(monthObj).forEach(k => { if (k.endsWith(`:${colId}`)) { delete monthObj[k]; changed = true; } });
+      if (changed) nextAdditions[mKey] = monthObj;
+    });
+    saveAdditions(nextAdditions);
     setDraftAdd(d => { const n = {...d}; Object.keys(n).forEach(k=>{ if(k.endsWith(`:${colId}`)) delete n[k]; }); return n; });
   };
 
@@ -1663,7 +1718,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     <th key={c.id} style={{padding:"6px 12px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:10.5,borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:5}}>
                         <span>{c.name}</span>
-                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title="ลบไส้ในนี้" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:11,padding:0}}>✕</button>}
+                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title="ลบรายการนี้ (ลบทุกเดือน)" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:11,padding:0}}>✕</button>}
                       </div>
                     </th>
                   ))}
@@ -1677,7 +1732,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         <button onClick={()=>setAddColOpen(false)} className="btn-ghost" style={{padding:"4px 7px",fontSize:11}}>×</button>
                       </div>
                     ) : (
-                      <button onClick={()=>setAddColOpen(true)} className="btn-ghost" style={{padding:"4px 10px",fontSize:11,whiteSpace:"nowrap"}}>+ ไส้ใน</button>
+                      <button onClick={()=>setAddColOpen(true)} className="btn-ghost" style={{padding:"4px 10px",fontSize:11,whiteSpace:"nowrap"}}>+ เพิ่มรายการ</button>
                     ))}
                   </th>
                 </tr>
@@ -1709,7 +1764,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             <button onClick={()=>setAddColOpen(false)} className="btn-ghost" style={{padding:"4px 7px",fontSize:11}}>×</button>
                           </div>
                         ) : (
-                          <button onClick={(e)=>{e.stopPropagation();setAddColOpen(true);}} className="btn-ghost" style={{padding:"3px 8px",fontSize:10,whiteSpace:"nowrap",textTransform:"none"}}>+ ไส้ใน</button>
+                          <button onClick={(e)=>{e.stopPropagation();setAddColOpen(true);}} className="btn-ghost" style={{padding:"3px 8px",fontSize:10,whiteSpace:"nowrap",textTransform:"none"}}>+ เพิ่มรายการ</button>
                         ))}
                       </div>
                     ) : (
@@ -1725,8 +1780,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               const kids = childrenOf(r.code);
               const hasKids = kids.length > 0;
               const isCollapsed = hasKids && rowCollapsed[r.code];
-              const baseVal = parseFloat(tenderCosts[r.code]) || 0;
-              const cumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[r.code])||0),0) + baseVal;
+              const cumBefore = cumBeforeOf(r);
               const thisVal = rowMonthValue(r.code, month, draftAdd);
               const cum = cumBefore + thisVal;
               return (
@@ -1862,11 +1916,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
               <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
-                {fmt(filtered.reduce((s,r)=>{
-                  const baseVal = parseFloat(tenderCosts[r.code]) || 0;
-                  const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
-                  return s + cumBefore;
-                },0))}
+                {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
               </td>
               <td/>
               <td colSpan={isMultiCol?columns.length:undefined} style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
@@ -1874,11 +1924,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               </td>
               <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
-                {fmt(filtered.reduce((s,r)=>{
-                  const baseVal = parseFloat(tenderCosts[r.code]) || 0;
-                  const cumBefore = months.filter(m=>m<month).reduce((ss,m)=>ss+(parseFloat(additions[m]?.[r.code])||0),0)+baseVal;
-                  return s + cumBefore + rowMonthValue(r.code, month, draftAdd);
-                },0))}
+                {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0))}
               </td>
               <td/>
             </tr>
@@ -2031,8 +2077,10 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   // Budget (QS) = baseline Tender Cost + every monthly addition entered so far,
   // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
   const combinedBudget = {...tenderCosts};
-  Object.values(additions || {}).forEach(monthObj => {
+  Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
+    if (mKey.startsWith("$")) return; // skip project-level meta keys like $columns
     Object.entries(monthObj || {}).forEach(([code, val]) => {
+      if (code.startsWith("$") || code.includes(":")) return; // skip meta keys / per-column sub-entries, already rolled into the plain code key
       combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
     });
   });
@@ -2534,8 +2582,10 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
   // Budget = baseline Tender Cost + every monthly addition entered so far,
   // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
   const combinedBudget = {...tenderCosts};
-  Object.values(additions || {}).forEach(monthObj => {
+  Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
+    if (mKey.startsWith("$")) return; // skip project-level meta keys like $columns
     Object.entries(monthObj || {}).forEach(([code, val]) => {
+      if (code.startsWith("$") || code.includes(":")) return; // skip meta keys / per-column sub-entries, already rolled into the plain code key
       combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
     });
   });
