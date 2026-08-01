@@ -176,12 +176,34 @@ const relativeTime = (iso) => {
 };
 const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:"numeric",month:"short",year:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
 
+// ─── Actual received / paid dates ──────────────────────────────────────────
+// Every round already carries its own "received" date; a PO's overall
+// received date(s) are just the distinct actual dates across every round.
+const poReceivedDates = (p) => [...new Set(poRounds(p).map(r=>r.actual).filter(Boolean))].sort();
+// There's no separate "actual paid" field — a PO is considered paid the
+// moment its status is set to "Paid", so the paid date is read straight out
+// of the audit log entry that made that status change (the most recent one,
+// in case it was ever toggled back and forth).
+const poPaidDate = (p) => {
+  if (p.status !== "Paid") return null;
+  const entry = poHistory(p).find(h => h.action==="status" && /→\s*Paid\s*$/.test(h.message||""));
+  return entry ? entry.at.slice(0,10) : null;
+};
+
+// ─── Lock completed POs ─────────────────────────────────────────────────────
+// Once a PO has been fully received AND fully paid, its numbers are final —
+// only an admin can still edit or delete it, so the paper trail for a closed
+// PO can't quietly change after the fact.
+const isPOLocked = (p) => incomingStatus(p)==="received" && paymentStatus(p)==="paid";
+const canEditPO  = (p, session) => !isPOLocked(p) || session?.role==="admin";
+
 // Which supplier a given account-code line item was ordered from. Items
 // carry their own `supplierId` so, on a PO with several suppliers, each
 // item can be traced to exactly one of them; items saved before this link
 // existed (or with a stale/missing id) fall back to the PO's first supplier.
 const itemSupplier     = (p, it) => { const sups = poSuppliers(p); return sups.find(s=>s.id===it.supplierId) || sups[0] || null; };
 const itemSupplierName = (p, it) => itemSupplier(p, it)?.name || "—";
+
 
 const deliveryStatus = (d) => {
   if (d.actual) return "received";
@@ -2019,7 +2041,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 // Read-only detail view opened by clicking any PO row. Lets the user confirm
 // exactly what was entered without hunting through a wide table, and offers
 // Edit / Delete from the same place.
-function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
+function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange, session }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   if (!po) return null;
   const items = poItems(po);
@@ -2027,6 +2049,9 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
   const inc = incomingStatus(po), pay = paymentStatus(po);
   const history = poHistory(po);
   const lastUpd = poLastUpdate(po);
+  const locked = !canEditPO(po, session);
+  const receivedDates = poReceivedDates(po);
+  const paidDate = poPaidDate(po);
 
   const Row = ({ label, value, mono }) => (
     <div style={{display:"flex",justifyContent:"space-between",gap:16,padding:"10px 0",borderBottom:`1px solid #f1f5f9`}}>
@@ -2046,10 +2071,16 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
           <button onClick={onClose} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted,flexShrink:0}}>×</button>
         </div>
 
+        {locked && (
+          <div style={{display:"flex",alignItems:"center",gap:6,background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:11,color:"#92400e"}}>
+            🔒 รับของและจ่ายเงินครบแล้ว — แก้ไข/ลบได้เฉพาะ Admin
+          </div>
+        )}
+
         {/* Status is a live dropdown here too — the most natural place to
             update it right after reviewing everything else on the PO. */}
         <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap",alignItems:"center"}}>
-          <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)}/>
+          <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)} disabled={locked}/>
           <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{INCOMING_LABEL[inc]}</span>
           <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_LABEL[pay]}</span>
           {po.paymentType && (
@@ -2086,7 +2117,9 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
         </div>
 
         <div style={{marginTop:4}}>
-          <Row label="วันที่สั่ง PO" value={po.date} mono />
+          <Row label="วันเปิด PO" value={po.date} mono />
+          <Row label="วันรับของ" value={receivedDates.length ? receivedDates.join(", ") : "ยังไม่ได้รับ"} mono={receivedDates.length>0} />
+          <Row label="วันจ่ายเงิน" value={paidDate || "ยังไม่ได้จ่าย"} mono={!!paidDate} />
           <Row label="วิธีจ่ายเงิน" value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${PAYMENT_TYPE_LABEL[po.paymentType]}` : "—"} />
           <Row label="แผนจ่ายเงิน" value={po.paymentPlan} mono />
         </div>
@@ -2158,8 +2191,8 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
         )}
 
         <div style={{display:"flex",gap:10,marginTop:20}}>
-          <button onClick={()=>onEdit(po)} className="btn-primary" style={{background:T.amber,color:"#fff"}}>✏️ แก้ไข</button>
-          <button onClick={()=>{ if(window.confirm("ลบรายการ PO นี้?")) onDelete(po.id); }} className="btn-ghost" style={{color:T.red,borderColor:T.red}}>🗑 ลบ</button>
+          <button onClick={()=>onEdit(po)} disabled={locked} className="btn-primary" style={{background:locked?"#e2e8f0":T.amber,color:locked?"#94a3b8":"#fff",cursor:locked?"not-allowed":"pointer"}}>{locked?"🔒":"✏️"} แก้ไข</button>
+          <button onClick={()=>{ if(window.confirm("ลบรายการ PO นี้?")) onDelete(po.id); }} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
           <div style={{flex:1}}/>
           <button onClick={onClose} className="btn-ghost">ปิด</button>
         </div>
@@ -2170,11 +2203,12 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange }) {
 
 // A status badge that's also a dropdown — lets anyone change a PO's status
 // in one click from wherever it's shown, instead of opening the full edit form.
-function StatusPicker({ status, onChange, compact }) {
+function StatusPicker({ status, onChange, compact, disabled }) {
   return (
-    <select value={status} onClick={e=>e.stopPropagation()} onChange={e=>{ e.stopPropagation(); onChange(e.target.value); }}
+    <select value={status} disabled={disabled} onClick={e=>e.stopPropagation()} onChange={e=>{ e.stopPropagation(); onChange(e.target.value); }}
       style={{background:STATUS_BG[status],color:STATUS_CLR[status],fontSize:compact?11:12,padding:compact?"3px 8px":"5px 10px",
-        borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[status]}40`,cursor:"pointer",outline:"none"}}>
+        borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[status]}40`,cursor:disabled?"not-allowed":"pointer",outline:"none",
+        opacity:disabled?0.65:1}} title={disabled?"รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin":undefined}>
       {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
     </select>
   );
@@ -2289,14 +2323,17 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 
   // One-click status change — used by the StatusPicker wherever a PO is
   // listed, so procurement doesn't need to open the full edit form just to
-  // move a PO from "PO Issued" to "Delivered". Still fully logged.
+  // move a PO from "PO Issued" to "Delivered". Still fully logged. Locked
+  // once a PO is fully received + fully paid, unless the current user is admin.
   const changeStatus = (po, newStatus) => {
     if (newStatus === po.status) return;
+    if (!canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin"); return; }
     const updated = withHistory({ ...po, status:newStatus }, historyEntry(session, "status", `เปลี่ยนสถานะ: ${po.status} → ${newStatus}`));
     savePO(poEntries.map(x=>x.id===po.id?updated:x));
   };
 
   const openEdit = (p) => {
+    if (!canEditPO(p, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin"); return; }
     const newSuppliers = poSuppliers(p).map(s=>({
       ...s,
       id: s.id&&s.id!=="legacy" ? s.id : uid(),
@@ -2317,7 +2354,11 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     });
     setEditId(p.id); setView("add"); setDetailId(null);
   };
-  const deletePO = (id) => { savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null); };
+  const deletePO = (id) => {
+    const po = poEntries.find(x=>x.id===id);
+    if (po && !canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin"); return; }
+    savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
+  };
   const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
 
   const filtered = poEntries.filter(p=>{
@@ -2558,7 +2599,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
-                              {["วันที่","Supplier","PO No.","มูลค่า (THB)","การส่งของ / จ่ายเงิน","สถานะ",""].map(h=>(
+                              {["วันเปิด PO","Supplier","PO No.","มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ / จ่ายเงิน","สถานะ",""].map(h=>(
                                 <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:10,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
                               ))}
                             </tr>
@@ -2567,6 +2608,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                             {rows.map(({po:p,item},i)=>{
                               const splitAcrossCodes = poItems(p).length>1;
                               const inc = incomingStatus(p), pay = paymentStatus(p);
+                              const locked = !canEditPO(p, session);
+                              const receivedDates = poReceivedDates(p);
+                              const paidDate = poPaidDate(p);
                               return (
                               <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>openDetail(p)}
                                 style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:"pointer"}}
@@ -2578,6 +2622,12 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                 <td style={{padding:"10px 16px",textAlign:"right"}}>
                                   <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                                   {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>จาก {poItems(p).length} รหัส · รวม {fmt(poTotal(p))}</div>}
+                                </td>
+                                <td style={{padding:"10px 16px",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
+                                  {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
+                                </td>
+                                <td style={{padding:"10px 16px",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:paidDate?T.green:T.textMuted,fontWeight:paidDate?600:400}}>
+                                  {paidDate || "—"}
                                 </td>
                                 <td style={{padding:"10px 16px"}}>
                                   <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
@@ -2591,12 +2641,17 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                   </div>
                                 </td>
                                 <td style={{padding:"10px 16px"}}>
-                                  <StatusPicker status={p.status} onChange={s=>changeStatus(p,s)} compact/>
+                                  <div style={{display:"flex",alignItems:"center",gap:4}}>
+                                    <StatusPicker status={p.status} onChange={s=>changeStatus(p,s)} disabled={locked} compact/>
+                                    {locked && <span title="รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin" style={{fontSize:11}}>🔒</span>}
+                                  </div>
                                   {poLastUpdate(p) && <div style={{fontSize:9,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                                  <button onClick={()=>openEdit(p)} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:"2px 6px",borderRadius:6,marginRight:4}}>✏️</button>
-                                  <button onClick={()=>deletePO(p.id)} style={{background:"none",border:"none",color:T.red,cursor:"pointer",padding:"2px 6px",borderRadius:6}}>🗑</button>
+                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข"}
+                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6,marginRight:4}}>✏️</button>
+                                  <button onClick={()=>deletePO(p.id)} disabled={locked} title={locked?"ลบได้เฉพาะ Admin":"ลบ"}
+                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.red,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>🗑</button>
                                 </td>
                               </tr>
                             );})}
@@ -2615,7 +2670,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
           </>
         )}
       </div>
-      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} />
+      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} session={session} />
     </Shell>
   );
 }
@@ -2744,6 +2799,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                     {rows.map(({po:p,item},i) => {
                       const inc = incomingStatus(p), pay = paymentStatus(p);
                       const splitAcrossCodes = poItems(p).length>1;
+                      const locked = !canEditPO(p, session);
                       return (
                         <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>onView?.(p)}
                           style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
@@ -2751,7 +2807,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
                           <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
                           <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
-                            <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} compact/>
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
+                              {locked && <span title="รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin" style={{fontSize:11}}>🔒</span>}
+                            </div>
                             {poLastUpdate(p) && <div style={{fontSize:9,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)}</div>}
                           </td>
                           <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
@@ -2775,7 +2834,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                             </div>
                           </td>
                           <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                            <button onClick={()=>onEdit(p)} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
+                            <button onClick={()=>onEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข"}
+                              style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
                           </td>
                         </tr>
                       );
