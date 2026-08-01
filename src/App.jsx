@@ -1418,8 +1418,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // A row's monthly figure is: the sum of its sub-items (if it has any) —
   // else the sum across that month's named columns (if the month uses them) —
   // else its own plain entered value. Mirrors the Baseline tab's rollup logic.
+  const kidsAsOf = (code, m) => childrenOf(code).filter(k => !k.addedInMonth || k.addedInMonth <= m);
   const rowMonthValue = (code, m, draft) => {
-    const kids = childrenOf(code);
+    const kids = kidsAsOf(code, m);
     if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[m])?.[k.code])||0),0);
     const src  = draft || additions[m];
     if (columns.length) return columns.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0);
@@ -1466,7 +1467,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     if (filter!=="All" && r.group!==filter) return false;
     const q = search.toLowerCase();
     const selfMatch = r.name.toLowerCase().includes(q) || r.code.includes(search);
-    const childMatch = childrenOf(r.code).some(k=>k.name.toLowerCase().includes(q));
+    const childMatch = kidsAsOf(r.code, month).some(k=>k.name.toLowerCase().includes(q));
     return selfMatch || childMatch;
   });
 
@@ -1505,7 +1506,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const handleSave = () => {
     const merged = {...draftAdd};
     allRows.forEach(r => {
-      const kids = childrenOf(r.code);
+      const kids = kidsAsOf(r.code, month);
       if (kids.length) merged[r.code] = kids.reduce((s,k)=>s+(parseFloat(merged[k.code])||0),0);
       else if (columns.length) merged[r.code] = columns.reduce((s,c)=>s+(parseFloat(merged[`${r.code}:${c.id}`])||0),0);
     });
@@ -1790,7 +1791,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           </thead>
           <tbody>
             {displayRows.map((r,i) => {
-              const kids = childrenOf(r.code);
+              const kids = kidsAsOf(r.code, month);
               const hasKids = kids.length > 0;
               const isCollapsed = hasKids && rowCollapsed[r.code];
               const cumBefore = cumBeforeOf(r);
@@ -1870,40 +1871,51 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     </td>
                   </tr>
 
-                  {/* Sub-items — this month's value rolls up into the parent row above */}
+                  {/* Sub-items — this month's value rolls up into the parent row above.
+                      Only sub-items added on/before the currently-viewed month appear here
+                      (kidsAsOf already filtered them), so a sub-item created in ก.ย. simply
+                      doesn't exist in ส.ค. or earlier — no ghost "0.00" row. */}
                   {!isCollapsed && kids.map((k,ki) => {
                     const kBaseVal = parseFloat(tenderCosts[k.code]) || 0;
                     const kCumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[k.code])||0),0) + kBaseVal;
                     const kThisVal = parseFloat(draftAdd[k.code]) || 0;
                     const kCum = kCumBefore + kThisVal;
+                    const isNewThisMonth = k.addedInMonth === month;
                     return (
-                      <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none"}}>
-                        <td style={{padding:"6px 16px 6px 30px",color:T.green,fontSize:12}}>↳</td>
+                      <tr key={k.code} style={{background:isNewThisMonth?T.greenBg:i%2===0?T.card:"#fafbfd",borderLeft:`3px solid ${isNewThisMonth?T.green:"#e2e8f0"}`,borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none",transition:"background 0.2s"}}>
+                        <td style={{padding:"7px 16px 7px 27px",color:T.textMuted,fontSize:13}}>↳</td>
                         <td/>
-                        <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>
+                        <td style={{padding:"7px 16px",color:T.textPrimary,fontSize:12.5}}>
                           {k.name}
                           {k.addedInMonth && (
-                            <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น" style={{marginLeft:7,fontSize:9.5,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
-                              เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
-                            </span>
+                            isNewThisMonth ? (
+                              <span title="รายการนี้เพิ่งเพิ่มเข้ามาในเดือนนี้" style={{marginLeft:8,fontSize:10,background:T.green,color:"#fff",padding:"2px 8px",borderRadius:6,fontWeight:700,letterSpacing:0.2}}>
+                                ✨ ใหม่เดือนนี้
+                              </span>
+                            ) : (
+                              <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น — เดือนก่อนหน้านั้นจะไม่แสดงรายการนี้" style={{marginLeft:8,fontSize:10,background:T.amberBg,color:T.amber,padding:"2px 8px",borderRadius:6,fontWeight:600}}>
+                                เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
+                              </span>
+                            )
                           )}
                         </td>
-                        <td style={{padding:"6px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{fmt(kCumBefore)}</td>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12.5}}>{fmt(kCumBefore)}</td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
-                        <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <td style={{padding:"7px 16px",textAlign:"right"}}>
                           {editingUnlocked ? (
                             <input type="number" value={draftAdd[k.code]??""} onChange={e=>setDraftAdd(d=>({...d,[k.code]:e.target.value}))}
-                              placeholder="0.00" className="input-base" style={{width:130,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:kThisVal!==0?T.greenBg:T.bg}}/>
+                              placeholder="0.00" className="input-base" style={{width:130,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12.5,background:kThisVal!==0?T.greenBg:T.bg}}/>
                           ) : (
-                            <div style={{width:130,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:kThisVal!==0?T.textPrimary:T.textMuted}}>{fmt(kThisVal)}</div>
+                            <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12.5,color:kThisVal!==0?T.textPrimary:T.textMuted}}>{fmt(kThisVal)}</div>
                           )}
                         </td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
-                        <td style={{padding:"6px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:12}}>{fmt(kCum)}</td>
-                        <td style={{padding:"6px 16px",textAlign:"center"}}>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:12.5}}>{fmt(kCum)}</td>
+                        <td style={{padding:"7px 16px",textAlign:"center"}}>
                           {editingUnlocked && (
                             <button onClick={()=>handleDeleteExtra(k.code)} title="ลบรายการย่อยนี้"
-                              style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                              style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14,opacity:0.7}}
+                              onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=0.7}>✕</button>
                           )}
                         </td>
                       </tr>
