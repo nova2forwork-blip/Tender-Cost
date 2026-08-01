@@ -179,6 +179,9 @@ const PAYMENT_CLR    = { paid:"#10b981", late:"#ef4444", pending:"#f59e0b", unse
 const PAYMENT_BG     = { paid:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
+// "2026-08" -> "ส.ค. 69" — used wherever a month key needs a short Thai label
+// (QS Monthly tab's chips/headers, and sub-item "เพิ่มเมื่อ ..." badges).
+const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
 const uid  = () => Math.random().toString(36).slice(2,10);
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
@@ -966,10 +969,15 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
   // Two kinds of extra item:
   //  - standalone (has `group`): a brand-new scope item with its own Acc-like code
   //  - sub-item   (has `parentCode`): a breakdown line that rolls up INTO an existing Acc. Code
-  const handleAddExtraItem = ({ name, group, parentCode, code, scope }) => {
+  // Sub-items are shared across the Baseline and Monthly tabs — one added in
+  // either place shows up in both, and in every month going forward.
+  // `addedInMonth` (set only when created from the Monthly tab) records which
+  // month it first appeared in, so the UI can show "เพิ่มเมื่อ ..." vs.
+  // "ตั้งแต่เริ่มต้น" for ones that were already in the Baseline.
+  const handleAddExtraItem = ({ name, group, parentCode, code, addedInMonth }) => {
     if (!name.trim()) return;
     const item = parentCode
-      ? { code:`EX-${uid()}`, name:name.trim(), parentCode, scope }
+      ? { code:`EX-${uid()}`, name:name.trim(), parentCode, ...(addedInMonth ? { addedInMonth } : {}) }
       : { code: code || `EX-${uid()}`, name:name.trim(), group };
     saveExtraItems([...extraItems, item]);
     return item.code;
@@ -1044,11 +1052,10 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
   // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
   // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
-  // Only show sub-items created here on the Baseline tab — Monthly-tab sub-items
-  // are a separate breakdown and are intentionally kept off this tab.
+  // Shared with the Monthly tab — a sub-item added on either tab shows up on both.
   const subItemsByParent = {};
   extraItems.forEach(e => {
-    if (e.parentCode && e.scope !== "monthly") (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
+    if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
   });
   const standaloneExtras = extraItems.filter(e => !e.parentCode);
   const childrenOf = (code) => subItemsByParent[code] || [];
@@ -1125,7 +1132,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode, scope:"baseline" });
+    onAddExtra({ name:subName, parentCode });
     setCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
@@ -1296,7 +1303,14 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                     <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(ki===kids.length-1 && subFor!==a.code)?"1px solid #f1f5f9":"none"}}>
                       <td style={{padding:"6px 16px 6px 30px",color:T.green,fontSize:12}}>↳</td>
                       <td/>
-                      <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>{k.name}</td>
+                      <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>
+                        {k.name}
+                        {k.addedInMonth && (
+                          <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น" style={{marginLeft:7,fontSize:9.5,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
+                            เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
+                          </span>
+                        )}
+                      </td>
                       <td style={{padding:"6px 16px",textAlign:"right"}}>
                         {editingUnlocked ? (
                           <input type="number" value={draft[k.code]??""} onChange={e=>setDraft(d=>({...d,[k.code]:e.target.value}))}
@@ -1398,7 +1412,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const allRows = [...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)), ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const subItemsByParent = {};
-  extraItems.forEach(e => { if (e.parentCode && e.scope === "monthly") (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e); });
+  extraItems.forEach(e => { if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e); });
   const childrenOf = (code) => subItemsByParent[code] || [];
 
   // A row's monthly figure is: the sum of its sub-items (if it has any) —
@@ -1429,7 +1443,6 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const sortedMonths = months.length ? months : [thisMonth];
   const cumulativeLive = (uptoMonth) => baseTotal + sortedMonths.filter(m=>m<=uptoMonth).reduce((s,m)=>s+monthTotalLive(m),0);
   const grandTotal = cumulativeLive(sortedMonths[sortedMonths.length-1]);
-  const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
   // Each bar = one stacked column: "previous" (running total up to the
   // month before) + "added" (that month's increment) in a different color,
   // so growth is visible within a single bar instead of a smooth area line.
@@ -1520,7 +1533,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode, scope:"monthly" });
+    onAddExtra({ name:subName, parentCode, addedInMonth: month });
     setRowCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
@@ -1867,7 +1880,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none"}}>
                         <td style={{padding:"6px 16px 6px 30px",color:T.green,fontSize:12}}>↳</td>
                         <td/>
-                        <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>{k.name}</td>
+                        <td style={{padding:"6px 16px",color:T.green,fontSize:12,fontStyle:"italic"}}>
+                          {k.name}
+                          {k.addedInMonth && (
+                            <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น" style={{marginLeft:7,fontSize:9.5,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
+                              เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
+                            </span>
+                          )}
+                        </td>
                         <td style={{padding:"6px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{fmt(kCumBefore)}</td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                         <td style={{padding:"6px 16px",textAlign:"right"}}>
