@@ -1,16 +1,126 @@
-<!DOCTYPE html>
-<html lang="th">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tender Cost System</title>
-    <style>
-      * { box-sizing: border-box; margin: 0; padding: 0; }
-      body { background: #0d1520; }
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
+// ════════════════════════════════════════════════════════════════════════════
+//  Supabase Edge Function: admin-users
+//  งานจัดการผู้ใช้ (สร้าง/รีเซ็ตรหัส/ระงับ/ลบ) ที่ต้องใช้ service_role
+//  service_role อยู่แค่ในฝั่งเซิร์ฟเวอร์ (function env) — ไม่มีวันหลุดไป browser
+//
+//  Deploy:  supabase functions deploy admin-users
+//  Secrets ที่ต้องมี (ปกติ Supabase ใส่ SUPABASE_* ให้อัตโนมัติ):
+//    SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+// ════════════════════════════════════════════════════════════════════════════
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+const AUTH_DOMAIN = "tender.local";
+const emailOf = (u: string) => `${String(u).trim().toLowerCase()}@${AUTH_DOMAIN}`;
+
+function json(obj: unknown, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+
+  try {
+    const url     = Deno.env.get("SUPABASE_URL")!;
+    const anon    = Deno.env.get("SUPABASE_ANON_KEY")!;
+    const service = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+    // 1) ยืนยันตัวผู้เรียกจาก JWT ที่แนบมา
+    const authHeader = req.headers.get("Authorization") ?? "";
+    const caller = createClient(url, anon, { global: { headers: { Authorization: authHeader } } });
+    const { data: { user }, error: uErr } = await caller.auth.getUser();
+    if (uErr || !user) return json({ error: "unauthorized" }, 401);
+
+    // 2) ต้องเป็น admin (และไม่ถูกระงับ) เท่านั้น
+    const admin = createClient(url, service);
+    const { data: prof } = await admin
+      .from("profiles").select("role, active").eq("id", user.id).maybeSingle();
+    if (!prof || prof.role !== "admin" || prof.active === false) {
+      return json({ error: "forbidden" }, 403);
+    }
+
+    const body = await req.json();
+    const action = body?.action;
+
+    const listUsers = async () => {
+      const { data, error } = await admin
+        .from("profiles")
+        .select("id, username, name, role, active, created_at")
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      return data;
+    };
+
+    // ── list ──────────────────────────────────────────────────────────────
+    if (action === "list") {
+      return json({ users: await listUsers() });
+    }
+
+    // ── create ────────────────────────────────────────────────────────────
+    if (action === "create") {
+      const { username, name, role, password } = body;
+      if (!username || !password) return json({ error: "ต้องกรอก Username และ Password" });
+      if (!["admin", "qs", "procurement", "accounting"].includes(role)) {
+        return json({ error: "role ไม่ถูกต้อง" });
+      }
+      const { error } = await admin.auth.admin.createUser({
+        email: emailOf(username),
+        password,
+        email_confirm: true, // ยืนยันอีเมลให้เลย (อีเมลสังเคราะห์รับเมลไม่ได้)
+        user_metadata: {
+          username: String(username).trim(),
+          name: (name || username).trim(),
+          role,
+        },
+      });
+      if (error) {
+        const msg = /already been registered|already exists/i.test(error.message)
+          ? "มี username นี้อยู่แล้ว" : error.message;
+        return json({ error: msg });
+      }
+      return json({ users: await listUsers() });
+    }
+
+    // ── reset password ──────────────────────────────────────────────────────
+    if (action === "reset") {
+      const { id, password } = body;
+      if (!id || !password) return json({ error: "ข้อมูลไม่ครบ" });
+      const { error } = await admin.auth.admin.updateUserById(id, { password });
+      if (error) return json({ error: error.message });
+      return json({ ok: true });
+    }
+
+    // ── toggle active ────────────────────────────────────────────────────────
+    if (action === "toggle") {
+      const { id } = body;
+      if (id === user.id) return json({ error: "ระงับบัญชีตัวเองไม่ได้" });
+      const { data: cur } = await admin
+        .from("profiles").select("active").eq("id", id).maybeSingle();
+      const { error } = await admin
+        .from("profiles").update({ active: !(cur?.active) }).eq("id", id);
+      if (error) throw error;
+      return json({ users: await listUsers() });
+    }
+
+    // ── delete ────────────────────────────────────────────────────────────
+    if (action === "delete") {
+      const { id } = body;
+      if (id === user.id) return json({ error: "ลบบัญชีตัวเองไม่ได้" });
+      const { error } = await admin.auth.admin.deleteUser(id); // cascade ลบ profile ด้วย
+      if (error) return json({ error: error.message });
+      return json({ users: await listUsers() });
+    }
+
+    return json({ error: "unknown action" }, 400);
+  } catch (e) {
+    return json({ error: String((e as Error)?.message || e) }, 500);
+  }
+});
