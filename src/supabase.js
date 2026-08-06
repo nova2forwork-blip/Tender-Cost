@@ -106,3 +106,32 @@ export const sd = async (key) => {
     console.warn("sd error", key, e);
   }
 };
+
+// ── กู้คืนข้อมูล (ใช้ตาราง kv_history จาก kv-history.sql) ──────────────────────
+// อ่านประวัติได้เฉพาะ admin (บังคับด้วย RLS ฝั่ง DB) และการเขียนคืนก็ต้องเป็น
+// admin เท่านั้น (can_write_key อนุญาตทุกคีย์เฉพาะ role=admin)
+export const loadKvHistory = async (key) => {
+  try {
+    let q = supabase
+      .from("kv_history")
+      .select("id,key,op,changed_by,changed_at,old_value")
+      .order("changed_at", { ascending: false })
+      .limit(400);
+    if (key) q = q.eq("key", key);
+    const { data, error } = await q;
+    if (error) throw error;
+    return data || [];
+  } catch (e) {
+    console.warn("loadKvHistory error", e);
+    return [];
+  }
+};
+
+// กู้ค่าจากประวัติแถวหนึ่ง กลับเข้า kv_store (เขียนค่าดิบกลับตรง ๆ ไม่ stringify ซ้ำ)
+export const restoreKvVersion = async (row) => {
+  if (!row || row.old_value == null) throw new Error("ไม่มีค่าเดิมให้กู้คืน");
+  const { error } = await supabase
+    .from("kv_store")
+    .upsert({ key: row.key, value: row.old_value, updated_at: new Date().toISOString() });
+  if (error) throw error;
+};
