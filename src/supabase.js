@@ -1,23 +1,77 @@
 import { createClient } from "@supabase/supabase-js";
 
-// ── ใส่ค่าจาก Supabase Project Settings → API ────────────────────────────────
-const SUPABASE_URL  = "https://rfvirqdqzzdjcbexewzl.supabase.co";
-const SUPABASE_ANON = "sb_publishable_Il_2lYsiHsDqeNho5CNkcg_zpQMVtuz";
+// ── ค่าเชื่อมต่อดึงจาก Environment Variables เท่านั้น ─────────────────────────
+//    Local:  ตั้งใน .env.local
+//    Vercel: Project Settings → Environment Variables (แล้ว Redeploy ใหม่!)
+//    ห้าม hardcode คีย์ลงในไฟล์นี้เด็ดขาด (มันจะถูก push ขึ้น Git)
+const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_ANON) {
-  console.error(
-    "❌  ยังไม่ได้ตั้งค่า Supabase!\n" +
-    "    สร้างไฟล์ .env.local แล้วใส่:\n" +
-    "    VITE_SUPABASE_URL=...\n" +
-    "    VITE_SUPABASE_ANON_KEY=..."
-  );
+// แสดงข้อความเต็มจอแทน "จอขาว" เวลาตั้งค่าไม่ครบ — ผู้ใช้จะรู้ทันทีว่าพลาดตรงไหน
+function showFatal(message) {
+  if (typeof document === "undefined") return;
+  const el = document.createElement("div");
+  el.style.cssText =
+    "position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;" +
+    "background:#0f172a;color:#e2e8f0;font-family:system-ui,'Segoe UI',sans-serif;padding:24px;";
+  el.innerHTML =
+    '<div style="max-width:520px;background:#1e293b;border:1px solid #334155;border-radius:16px;padding:28px;line-height:1.6">' +
+    '<div style="font-size:20px;font-weight:700;margin-bottom:10px">⚙️ ยังตั้งค่าไม่ครบ</div>' +
+    '<div style="font-size:14px;color:#cbd5e1;margin-bottom:16px">' + message + "</div>" +
+    '<div style="font-size:12px;color:#94a3b8">Vercel → Settings → Environment Variables → เพิ่มค่า → ' +
+    "แล้วไป Deployments กด <b>Redeploy</b> (ต้อง redeploy ค่าถึงจะมีผล)</div>" +
+    "</div>";
+  const mount = () => document.body && document.body.appendChild(el);
+  if (document.body) mount();
+  else document.addEventListener("DOMContentLoaded", mount);
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+// no-op client กันแอป crash ตอน import เมื่อยังไม่มีคีย์ — ทุก call จะคืนค่า
+// ว่าง/error อย่างนุ่มนวล (sg/ss/sd/auth ห่อ try–catch อยู่แล้ว จึงไม่ล้ม)
+function makeStub(reason) {
+  const err = { message: reason };
+  const asyncErr = async () => ({ data: null, error: err });
+  const query = () =>
+    new Proxy(
+      {},
+      {
+        get(_t, prop) {
+          if (prop === "maybeSingle" || prop === "single") return async () => ({ data: null, error: err });
+          if (prop === "then") return undefined; // ไม่ทำตัวเป็น thenable เอง
+          return () => query(); // select/eq/upsert/insert/update/delete/order/limit → ต่อ chain ได้
+        },
+      }
+    );
+  return {
+    auth: new Proxy({}, { get: () => async () => ({ data: { session: null, user: null }, error: err }) }),
+    functions: { invoke: asyncErr },
+    from: () => query(),
+    channel: () => ({ on() { return this; }, subscribe() { return { unsubscribe() {} }; } }),
+    removeChannel: () => {},
+    removeAllChannels: () => {},
+  };
+}
 
-// ── Storage helpers (แทน window.storage) ──────────────────────────────────────
-// ใช้ตาราง kv_store (key TEXT primary key, value TEXT, updated_at TIMESTAMPTZ)
+let supabase;
+if (!SUPABASE_URL || !SUPABASE_ANON) {
+  const missing = [!SUPABASE_URL && "VITE_SUPABASE_URL", !SUPABASE_ANON && "VITE_SUPABASE_ANON_KEY"]
+    .filter(Boolean)
+    .join(" และ ");
+  console.error("❌ ยังไม่ได้ตั้งค่า Supabase env: " + missing);
+  showFatal("ยังไม่ได้ตั้งค่า <b>" + missing + "</b> — ระบบเชื่อมต่อฐานข้อมูลไม่ได้");
+  supabase = makeStub("Supabase env ยังไม่ได้ตั้งค่า");
+} else {
+  supabase = createClient(SUPABASE_URL, SUPABASE_ANON, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+  });
+}
 
+export { supabase };
+
+// ── Storage helpers (ตาราง kv_store) ─────────────────────────────────────────
 export const sg = async (key) => {
   try {
     const { data, error } = await supabase
@@ -40,7 +94,7 @@ export const ss = async (key, value) => {
       .upsert({ key, value: JSON.stringify(value), updated_at: new Date().toISOString() });
     if (error) throw error;
   } catch (e) {
-    console.warn("ss error", key, e);
+    console.warn("ss error (อาจเป็นเพราะสิทธิ์ไม่พอ)", key, e);
   }
 };
 
