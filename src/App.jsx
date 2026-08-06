@@ -846,6 +846,20 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
 }
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
+// สร้างข้อความแบบตาราง (TSV) จากเซลล์ที่เลือก — จัดกลุ่มเป็นแถวตามตำแหน่งแนวตั้ง
+// แล้วเรียงในแถวตามแนวนอน เพื่อวางลง Excel/Sheets แล้วลงช่องตรงกัน
+function buildTSV(cells) {
+  if (!cells || !cells.length) return "";
+  const arr = cells.slice().sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  const rows = []; let cur = []; let top0 = null;
+  for (const c of arr) {
+    if (top0 === null || Math.abs(c.top - top0) <= 6) { cur.push(c); if (top0 === null) top0 = c.top; }
+    else { rows.push(cur); cur = [c]; top0 = c.top; }
+  }
+  if (cur.length) rows.push(cur);
+  return rows.map(r => r.slice().sort((a, b) => a.left - b.left).map(c => c.text).join("\t")).join("\n");
+}
+
 export default function App() {
   const [session,  setSessionState] = useState(null);   // โหลดแบบ async ด้านล่าง
   const [authReady, setAuthReady]   = useState(false);  // true เมื่อเช็ค session เสร็จ
@@ -940,8 +954,32 @@ export default function App() {
   const editModeRef = useRef(false); editModeRef.current = editMode;
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
+  const [copied, setCopied]     = useState(false); // สถานะ "คัดลอกแล้ว"
+  const copySel = useCallback(async () => {
+    const vals = selStats?.vals;
+    if (!vals || !vals.length) return;
+    const text = vals.join("\n"); // ค่าเป็นตัวเลขล้วน คั่นบรรทัด → วางลง Excel ได้เป็นคอลัมน์
+    try { await navigator.clipboard.writeText(text); }
+    catch {
+      const ta = document.createElement("textarea"); ta.value = text; ta.style.position="fixed"; ta.style.opacity="0";
+      document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch {} document.body.removeChild(ta);
+    }
+    setCopied(true); setTimeout(() => setCopied(false), 1200);
+  }, [selStats]);
+  useEffect(() => {
+    const onCopyKey = (e) => {
+      if (!selStats) return;
+      const t = e.target;
+      if (t && (t.tagName==="INPUT"||t.tagName==="TEXTAREA"||t.tagName==="SELECT"||t.isContentEditable)) return;
+      if ((e.ctrlKey||e.metaKey) && (e.key==="c"||e.key==="C")) { e.preventDefault(); copySel(); }
+    };
+    window.addEventListener("keydown", onCopyKey);
+    return () => window.removeEventListener("keydown", onCopyKey);
+  }, [selStats, copySel]);
   const dragRef = useRef({ pending:false, active:false, ax:0, ay:0, lastX:0, lastY:0, raf:0, scrollRAF:0, scrollEl:null, suppressClick:false });
   const hiliteRef = useRef([]); // ช่องที่กำลังไฮไลต์ (ไว้คืนค่าเดิมตอนล้าง)
+  const selCellsRef = useRef([]); // เซลล์ที่เลือก {top,left,text} ไว้คัดลอก
+  const [copied, setCopied] = useState(false);
   currentRef.current = {
     "tcs-projects": projects,
     [`tcs-tenders-${activeId}`]: tenderCosts,
@@ -1019,7 +1057,7 @@ export default function App() {
       const box = { left:cb.left - s.x + s.ox, top:cb.top - s.y + s.oy, right:cb.right - s.x + s.ox, bottom:cb.bottom - s.y + s.oy };
       setMarquee({ left:box.left, top:box.top, width:box.right-box.left, height:box.bottom-box.top });
       clearHilite();
-      const nums = []; const cells = new Set();
+      const nums = []; const cells = new Set(); const cellData = [];
       document.querySelectorAll("table").forEach((tbl) => {
         const walker = document.createTreeWalker(tbl, NodeFilter.SHOW_TEXT, {
           acceptNode(n){ return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; },
@@ -1030,15 +1068,21 @@ export default function App() {
           const r = rng.getBoundingClientRect();
           if (r.width === 0 && r.height === 0) continue;
           if (r.right >= box.left && r.left <= box.right && r.bottom >= box.top && r.top <= box.bottom) {
-            const v = parseFloat(node.nodeValue.trim().replace(/,/g, ""));
-            if (!isNaN(v)) { nums.push(v); const td = node.parentElement && node.parentElement.closest("td"); if (td) cells.add(td); }
+            const txt = node.nodeValue.trim();
+            const v = parseFloat(txt.replace(/,/g, ""));
+            if (!isNaN(v)) {
+              nums.push(v);
+              cellData.push({ top: r.top, left: r.left, text: txt });
+              const td = node.parentElement && node.parentElement.closest("td"); if (td) cells.add(td);
+            }
           }
         }
       });
+      selCellsRef.current = cellData;
       cells.forEach((td) => { hiliteRef.current.push({ el:td, prev:td.style.backgroundColor }); td.style.backgroundColor = HL; });
       if (nums.length >= 2) {
         const sum = nums.reduce((a,b)=>a+b,0);
-        setSelStats({ count:nums.length, sum, avg:sum/nums.length, min:Math.min(...nums), max:Math.max(...nums) });
+        setSelStats({ count:nums.length, sum, avg:sum/nums.length, min:Math.min(...nums), max:Math.max(...nums), vals:nums });
       } else { setSelStats(null); }
     };
     // เลื่อนตารางอัตโนมัติเมื่อลากชนขอบ (จะได้ลากทั้งแถวที่คอลัมน์เยอะได้)
@@ -1065,7 +1109,7 @@ export default function App() {
       return d.lastY > window.innerHeight-EDGE || d.lastY < EDGE;
     };
     const onDown = (e) => {
-      clearHilite(); setSelStats(null); setMarquee(null); // คลิกที่ไหนก็ล้างไฮไลต์เดิม
+      clearHilite(); setSelStats(null); setMarquee(null); selCellsRef.current = []; // คลิกที่ไหนก็ล้างไฮไลต์เดิม
       if (e.button !== 0) return;
       const t = e.target;
       if (!(t instanceof Element) || t.closest(INTERACT) || !t.closest("table")) return;
@@ -1073,6 +1117,16 @@ export default function App() {
       const s = getScroll();
       d.ax = e.clientX - s.ox + s.x; d.ay = e.clientY - s.oy + s.y; // anchor ในพิกัดเนื้อหา
       d.pending = true; d.active = false; d.lastX = e.clientX; d.lastY = e.clientY;
+    };
+    // Ctrl/Cmd+C = คัดลอกค่าที่เลือก (แบบตาราง) — ไม่ดักถ้ากำลังพิมพ์ในช่องกรอก
+    const onCopy = (e) => {
+      if (!(e.ctrlKey || e.metaKey) || (e.key||"").toLowerCase() !== "c") return;
+      const t = e.target;
+      if (t && (t.tagName==="INPUT" || t.tagName==="TEXTAREA" || t.tagName==="SELECT" || t.isContentEditable)) return;
+      const tsv = buildTSV(selCellsRef.current);
+      if (!tsv) return;
+      e.preventDefault();
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(tsv).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 1300); }).catch(()=>{});
     };
     const onMove = (e) => {
       if (!d.pending) return;
@@ -1099,11 +1153,13 @@ export default function App() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     document.addEventListener("click", onClickCap, true);
+    document.addEventListener("keydown", onCopy);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.removeEventListener("click", onClickCap, true);
+      document.removeEventListener("keydown", onCopy);
       clearHilite();
     };
   }, []);
@@ -1165,7 +1221,7 @@ export default function App() {
       <style>{GLOBAL_CSS}</style>
       {marquee && marquee.width > 2 && marquee.height > 2 && (
         <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
-          background:"rgba(37,99,235,0.12)",border:"1.5px solid #2563eb",borderRadius:2,zIndex:97,pointerEvents:"none"}}/>
+          background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
       )}
       {selStats && (
         <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
@@ -1183,6 +1239,17 @@ export default function App() {
               <b style={{color:clr}}>{val}</b>
             </span>
           ))}
+          <button onClick={()=>{ const tsv=buildTSV(selCellsRef.current); if(tsv&&navigator.clipboard?.writeText){ navigator.clipboard.writeText(tsv).then(()=>{setCopied(true); setTimeout(()=>setCopied(false),1300);}); } }}
+            title="คัดลอกค่าที่เลือก (Ctrl+C)"
+            style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",borderRadius:8,padding:"6px 12px",
+              fontFamily:"system-ui,sans-serif",fontSize:12,fontWeight:600,background:copied?"#065f46":"#334155",color:"#fff"}}>
+            {copied ? "✓ คัดลอกแล้ว" : "⧉ คัดลอก"}
+          </button>
+          <button onClick={copySel} title="คัดลอกค่าที่เลือก (Ctrl+C)"
+            style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",
+              background:copied?"#065f46":"#334155",color:"#e2e8f0",borderRadius:8,padding:"6px 12px",fontSize:12,fontWeight:600,fontFamily:"system-ui,sans-serif"}}>
+            {copied ? "✓ คัดลอกแล้ว" : "⧉ คัดลอก"}
+          </button>
         </div>
       )}
       {editMode && (undoInfo.u > 0 || undoInfo.r > 0) && (
@@ -2434,7 +2501,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     ...sortedMonths.map(m => {
       const added = monthTotalLive(m);
       const cumulative = cumulativeLive(m);
-      return { label: monthShortLabel(m), cumulative, previous: cumulative - added, added };
+      return { label: monthShortLabel(m), monthKey: m, cumulative, previous: cumulative - added, added };
     }),
   ];
 
@@ -2605,13 +2672,17 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(grandTotal)}</b> THB</span>
         </div>
         <ResponsiveContainer width="100%" height={170}>
-          <BarChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}>
+          <BarChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}
+            onClick={(st)=>{ const mk = st && st.activePayload && st.activePayload[0] && st.activePayload[0].payload && st.activePayload[0].payload.monthKey; if (mk) setMonth(mk); }}
+            style={{cursor:"pointer"}}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2f7"/>
             <XAxis dataKey="label" tick={{fontSize:11,fill:T.textMuted}} axisLine={false} tickLine={false}/>
             <YAxis tick={{fontSize:10,fill:T.textMuted}} axisLine={false} tickLine={false} tickFormatter={fmtK}/>
-            <Tooltip formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
+            <Tooltip cursor={{fill:"rgba(37,99,235,0.06)"}} formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
               contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
-            <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" fill={T.blue} radius={[0,0,0,0]}/>
+            <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" radius={[0,0,0,0]}>
+              {chartData.map((e,i)=><Cell key={i} fill={e.monthKey===month ? T.dark : T.blue} cursor="pointer"/>)}
+            </Bar>
             <Bar dataKey="added" stackId="cum" name="เพิ่มงวดนี้" fill={T.amber} radius={[4,4,0,0]}/>
           </BarChart>
         </ResponsiveContainer>
