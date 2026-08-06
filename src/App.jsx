@@ -350,6 +350,13 @@ const GLOBAL_CSS = `
   .input-base { background: ${T.bg}; border: 1.5px solid ${T.cardBorder}; border-radius: 10px; padding: 10px 13px; color: ${T.textPrimary}; font-size: 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; width: 100%; }
   .input-base:focus { border-color: ${T.blue}; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
   .tag { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  /* กล่องเลื่อนแนวนอน (ใช้กับตารางที่คอลัมน์เยอะ) — สกรอลบาร์เห็นชัดเสมอ */
+  .hscroll { overflow-x: auto; overflow-y: hidden; }
+  .hscroll::-webkit-scrollbar { height: 12px; }
+  .hscroll::-webkit-scrollbar-track { background: #eef2f7; border-radius: 8px; }
+  .hscroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; border: 3px solid #eef2f7; }
+  .hscroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  .hscroll { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: thin; }
 `;
 
 // ─── Excel Export ─────────────────────────────────────────────────────────────
@@ -822,6 +829,7 @@ export default function App() {
   const [undoInfo, setUndoInfo] = useState({ u: 0, r: 0, label: "" });
   const [editMode, setEditMode] = useState(false); // true เมื่ออยู่ในโหมดแก้ไข — undo/Ctrl+Z ใช้ได้เฉพาะตอนนี้
   const editModeRef = useRef(false); editModeRef.current = editMode;
+  const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   currentRef.current = {
     "tcs-projects": projects,
     [`tcs-tenders-${activeId}`]: tenderCosts,
@@ -875,6 +883,25 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
+
+  // แถบสรุปแบบ Excel — ลากเลือกตัวเลข (ที่มีทศนิยม เช่นยอดเงิน) หลายช่องในตาราง
+  // แล้วคำนวณ ผลรวม/เฉลี่ย/นับ/ต่ำสุด/สูงสุด ให้อัตโนมัติ (นับเฉพาะเลขที่มีจุดทศนิยม
+  // จึงไม่รวมรหัสบัญชี/ปี ที่เป็นจำนวนเต็ม)
+  useEffect(() => {
+    const onSel = () => {
+      const text = typeof window !== "undefined" && window.getSelection ? String(window.getSelection()) : "";
+      const matches = text.match(/-?\d[\d,]*\.\d+/g) || [];
+      const nums = matches.map(m => parseFloat(m.replace(/,/g, ""))).filter(n => !isNaN(n));
+      if (nums.length >= 2) {
+        const sum = nums.reduce((a, b) => a + b, 0);
+        setSelStats({ count: nums.length, sum, avg: sum / nums.length, min: Math.min(...nums), max: Math.max(...nums) });
+      } else {
+        setSelStats(null);
+      }
+    };
+    document.addEventListener("selectionchange", onSel);
+    return () => document.removeEventListener("selectionchange", onSel);
+  }, []);
 
   const saveProjects = useCallback((list) => commit("tcs-projects", list, projects, setProjects, "รายชื่อโครงการ"), [commit, projects]);
   const saveTenders  = useCallback((t)    => commit(`tcs-tenders-${activeId}`, t, tenderCosts, setTCosts, "ราคาเดิม (Baseline)"), [commit, activeId, tenderCosts]);
@@ -931,6 +958,24 @@ export default function App() {
   return (
     <>
       <style>{GLOBAL_CSS}</style>
+      {selStats && (
+        <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
+          background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
+          fontSize:12.5,fontFamily:"'JetBrains Mono',monospace",overflow:"hidden"}}>
+          {[
+            ["ผลรวม", fmt(selStats.sum), "#34d399"],
+            ["เฉลี่ย", fmt(selStats.avg), "#93c5fd"],
+            ["นับ", String(selStats.count), "#fcd34d"],
+            ["ต่ำสุด", fmt(selStats.min), "#cbd5e1"],
+            ["สูงสุด", fmt(selStats.max), "#cbd5e1"],
+          ].map(([label,val,clr],i)=>(
+            <span key={label} style={{display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderLeft:i?"1px solid #334155":"none"}}>
+              <span style={{color:"#94a3b8",fontFamily:"system-ui,sans-serif",fontSize:11}}>{label}</span>
+              <b style={{color:clr}}>{val}</b>
+            </span>
+          ))}
+        </div>
+      )}
       {editMode && (undoInfo.u > 0 || undoInfo.r > 0) && (
         <div style={{position:"fixed",left:20,bottom:20,zIndex:95,display:"flex",gap:6,alignItems:"center",
           background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"7px 9px",boxShadow:"0 8px 28px rgba(15,23,42,0.16)"}}>
@@ -2463,7 +2508,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Main table: เดิม + เพิ่มเดือนนี้ = รวมสะสม */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+        <div className="hscroll">
+        <table style={{minWidth: isMultiCol ? "max-content" : "100%", width: isMultiCol ? "max-content" : "100%", borderCollapse:"collapse", fontSize:13}}>
           <thead>
             {isMultiCol ? (
               <>
@@ -2725,6 +2771,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             </tr>
           </tfoot>
         </table>
+        </div>
       </div>
     </div>
   );
