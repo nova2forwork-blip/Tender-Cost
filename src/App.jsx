@@ -955,31 +955,9 @@ export default function App() {
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
   const [copied, setCopied]     = useState(false); // สถานะ "คัดลอกแล้ว"
-  const copySel = useCallback(async () => {
-    const vals = selStats?.vals;
-    if (!vals || !vals.length) return;
-    const text = vals.join("\n"); // ค่าเป็นตัวเลขล้วน คั่นบรรทัด → วางลง Excel ได้เป็นคอลัมน์
-    try { await navigator.clipboard.writeText(text); }
-    catch {
-      const ta = document.createElement("textarea"); ta.value = text; ta.style.position="fixed"; ta.style.opacity="0";
-      document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch {} document.body.removeChild(ta);
-    }
-    setCopied(true); setTimeout(() => setCopied(false), 1200);
-  }, [selStats]);
-  useEffect(() => {
-    const onCopyKey = (e) => {
-      if (!selStats) return;
-      const t = e.target;
-      if (t && (t.tagName==="INPUT"||t.tagName==="TEXTAREA"||t.tagName==="SELECT"||t.isContentEditable)) return;
-      if ((e.ctrlKey||e.metaKey) && (e.key==="c"||e.key==="C")) { e.preventDefault(); copySel(); }
-    };
-    window.addEventListener("keydown", onCopyKey);
-    return () => window.removeEventListener("keydown", onCopyKey);
-  }, [selStats, copySel]);
   const dragRef = useRef({ pending:false, active:false, ax:0, ay:0, lastX:0, lastY:0, raf:0, scrollRAF:0, scrollEl:null, suppressClick:false });
   const hiliteRef = useRef([]); // ช่องที่กำลังไฮไลต์ (ไว้คืนค่าเดิมตอนล้าง)
   const selCellsRef = useRef([]); // เซลล์ที่เลือก {top,left,text} ไว้คัดลอก
-  const [copied, setCopied] = useState(false);
   currentRef.current = {
     "tcs-projects": projects,
     [`tcs-tenders-${activeId}`]: tenderCosts,
@@ -1243,11 +1221,6 @@ export default function App() {
             title="คัดลอกค่าที่เลือก (Ctrl+C)"
             style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",borderRadius:8,padding:"6px 12px",
               fontFamily:"system-ui,sans-serif",fontSize:12,fontWeight:600,background:copied?"#065f46":"#334155",color:"#fff"}}>
-            {copied ? "✓ คัดลอกแล้ว" : "⧉ คัดลอก"}
-          </button>
-          <button onClick={copySel} title="คัดลอกค่าที่เลือก (Ctrl+C)"
-            style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",
-              background:copied?"#065f46":"#334155",color:"#e2e8f0",borderRadius:8,padding:"6px 12px",fontSize:12,fontWeight:600,fontFamily:"system-ui,sans-serif"}}>
             {copied ? "✓ คัดลอกแล้ว" : "⧉ คัดลอก"}
           </button>
         </div>
