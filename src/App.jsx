@@ -101,50 +101,98 @@ const addDays = (dateStr, days) => {
 // existed still carry a single `code`/`amount` and a single
 // `incomingPlan`/`actualReceived` — these getters transparently upgrade them
 // so both old and new records work everywhere without a one-off migration.
-const poItems = (p) => (p.items && p.items.length ? p.items : [{ id:"legacy", code:p.code||"", amount:p.amount||"" }]);
+// ─── PO data model + migration ─────────────────────────────────────────────
+// New shape: ONE supplier per PO. Each account-code line item carries its own
+// `store` (qty already on hand, netted out of the % base) and its own list of
+// delivery/payment `rounds`, so one material can arrive in several shipments.
+// Payment is automatic — a round counts as paid once its due date (received
+// date + credit term) has arrived. migratePO() upgrades every older record
+// (multi-supplier, supplier-level rounds, item.supplierId, PO-level
+// deliveries, paymentType "credit30") on read, so old + new records work
+// everywhere with no destructive one-off migration.
+const DEFAULT_CREDIT_DAYS = 30;
+
+const isNewPO = (p) => !!(p && p.supplier && typeof p.supplier === "object" &&
+  Array.isArray(p.items) && p.items.length > 0 && Array.isArray(p.items[0].rounds));
+
+const migratePO = (p) => {
+  if (!p) return p;
+  if (isNewPO(p)) return { creditDays: DEFAULT_CREDIT_DAYS, ...p };
+  // --- upgrade a legacy record ---
+  const legacySuppliers = (p.suppliers && p.suppliers.length)
+    ? p.suppliers
+    : [{ name: (typeof p.supplier === "string" ? p.supplier : "") || "", poNumber: p.poNumber || "",
+         rounds: (p.deliveries && p.deliveries.length
+                   ? p.deliveries
+                   : (p.incomingPlan || p.actualReceived ? [{ plan:p.incomingPlan||"", actual:p.actualReceived||"" }] : []))
+                 .map(d => ({ amount:"", plan:d.plan||"", actual:d.actual||"" })) }];
+  const first = legacySuppliers[0] || { name:"", poNumber:"", rounds:[] };
+  const supplier = { name: first.name || (typeof p.supplier === "string" ? p.supplier : "") || "", poNumber: first.poNumber || p.poNumber || "" };
+  const paymentType = p.paymentType === "credit30" ? "credit" : (p.paymentType || "");
+  const creditDays  = p.creditDays || (p.paymentType === "credit30" ? 30 : DEFAULT_CREDIT_DAYS);
+  const legacyRounds = legacySuppliers.flatMap(s => s.rounds || []);
+  // Treat old data as fully received if it was ever marked delivered/paid or
+  // carried an actual date, so received totals don't suddenly read as zero.
+  const wasReceived = p.status === "Delivered" || p.status === "Paid" || legacyRounds.some(r => r.actual);
+  const recvDate = legacyRounds.map(r=>r.actual).filter(Boolean).sort()[0] || p.date || "";
+  const planDate = legacyRounds.map(r=>r.plan).filter(Boolean).sort()[0] || p.incomingPlan || "";
+  const legacyItems = (p.items && p.items.length) ? p.items : [{ id:"legacy", code:p.code||"", amount:p.amount||"" }];
+  const items = legacyItems.map(it => ({
+    id: it.id && it.id !== "legacy" ? it.id : uid(),
+    code: it.code || "", store: it.store || "", amount: it.amount || "",
+    rounds: [{
+      id: uid(), planDate, planAmount: it.amount || "",
+      actualAmount: wasReceived ? (it.amount || "") : "",
+      actualDate:  wasReceived ? recvDate : "",
+    }],
+  }));
+  return { ...p, supplier, paymentType, creditDays, items };
+};
+
+const poItems = (p) => migratePO(p).items;
 const poTotal = (p) => poItems(p).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
 const poAmountForCode = (p, code) => poItems(p).filter(it => it.code===code).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
 
-// Pre-multi-supplier records stored one `deliveries` array (or a single
-// `incomingPlan`/`actualReceived` pair) directly on the PO. Kept only to
-// upgrade those older records — new records live under `suppliers[].rounds`.
-const legacyDeliveries = (p) => (p.deliveries && p.deliveries.length
-  ? p.deliveries
-  : (p.incomingPlan || p.actualReceived ? [{ id:"legacy", plan:p.incomingPlan||"", actual:p.actualReceived||"" }] : []));
+// ─── Supplier helpers (now exactly one supplier per PO) ─────────────────────
+const poSupplier      = (p) => migratePO(p).supplier || { name:"", poNumber:"" };
+const poSupplierName   = (p) => poSupplier(p).name || "—";
+const poSupplierText   = (p) => poSupplier(p).name || "";
+const poSupplierLabel  = (p) => poSupplier(p).name || "—";
+const poNumbersLabel   = (p) => poSupplier(p).poNumber || "—";
+const itemSupplier     = (p) => poSupplier(p);
+const itemSupplierName = (p) => poSupplierName(p);
+// Back-compat: some views still map over a suppliers[] array. There's now
+// always exactly one supplier, so return it as a single-element list.
+const poSuppliers = (p) => { const s = poSupplier(p); return [{ id:"main", name:s.name, poNumber:s.poNumber, rounds:[] }]; };
 
-// ─── Multi-supplier / multi-round payment helpers ──────────────────────────
-// A single PO can involve several suppliers (e.g. different vendors for the
-// same order), and each supplier can be paid/delivered in several rounds
-// (installments) instead of one lump sum. Records saved before this existed
-// carried one `supplier` + `poNumber` string and one `deliveries` array —
-// this getter transparently upgrades them into one supplier with N rounds so
-// old and new records work everywhere without a one-off migration.
-const poSuppliers = (p) => (p.suppliers && p.suppliers.length
-  ? p.suppliers
-  : [{
-      id: "legacy",
-      name: p.supplier || "",
-      poNumber: p.poNumber || "",
-      rounds: legacyDeliveries(p).length
-        ? legacyDeliveries(p).map(d => ({ id: d.id || "legacy-round", amount: "", plan: d.plan || "", actual: d.actual || "" }))
-        : [{ id: "legacy-round", amount: "", plan: "", actual: "" }],
-    }]);
+// Every round across every item, tagged with its item code. `plan`/`actual`/
+// `amount` aliases are kept so older readers (tracking tab, exports) still work.
+const poRounds = (p) => migratePO(p).items.flatMap(it =>
+  (it.rounds && it.rounds.length ? it.rounds : []).map(r => ({
+    ...r,
+    plan: r.planDate, actual: r.actualDate, amount: r.planAmount,
+    itemId: it.id, code: it.code,
+  })));
+const poDeliveries = poRounds;
+const poRoundsAmount = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
 
-// Flattened view of every payment/delivery round across every supplier on a
-// PO — each round is tagged with which supplier it belongs to. Also serves
-// as the drop-in replacement for the old `poDeliveries`, since every round
-// still carries the same `plan`/`actual` fields that `deliveryStatus` reads.
-const poRounds = (p) => poSuppliers(p).flatMap(s =>
-  (s.rounds && s.rounds.length ? s.rounds : [{ id:"legacy-round", amount:"", plan:"", actual:"" }])
-    .map(r => ({ ...r, supplierId: s.id, supplierName: s.name, poNumber: s.poNumber }))
-);
-const poDeliveries = poRounds; // backward-compatible alias used by tracking/export code
-
-const poSupplierNames  = (p) => poSuppliers(p).map(s => s.name).filter(Boolean);
-const poSupplierText   = (p) => poSupplierNames(p).join(" ");
-const poSupplierLabel  = (p) => { const n = poSupplierNames(p); return n.length===0 ? "—" : n.length===1 ? n[0] : `${n[0]} +${n.length-1} เจ้า`; };
-const poNumbersLabel   = (p) => { const nums = poSuppliers(p).map(s=>s.poNumber).filter(Boolean); return nums.length ? nums.join(", ") : "—"; };
-const poRoundsAmount   = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.amount)||0),0);
+// ─── Auto-pay: a round is paid once its due date has arrived ────────────────
+// Cash pays on the received date; credit adds the PO's credit term (in days).
+const roundPayDate  = (p, r) => {
+  const P = migratePO(p);
+  if (!r.actualDate) return "";
+  if (P.paymentType === "cash") return r.actualDate;
+  const d = parseInt(P.creditDays,10);
+  return addDays(r.actualDate, isNaN(d) ? DEFAULT_CREDIT_DAYS : d);
+};
+// Received once the actual date has really arrived (a future date typed ahead
+// of time doesn't count yet) and a quantity was recorded.
+const roundReceived = (r) => !!r.actualDate && r.actualDate <= todayStr() && (parseFloat(r.actualAmount)||0) > 0;
+const roundPaid     = (p, r) => { const d = roundPayDate(p,r); return !!d && d <= todayStr(); };
+const itemOrdered   = (it) => parseFloat(it.amount)||0;
+const itemReceived  = (it) => (it.rounds||[]).filter(roundReceived).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+const itemEntered   = (it) => (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+const itemRemaining = (it) => Math.max(itemOrdered(it) - itemEntered(it), 0);
 
 // ─── Edit history / audit log ──────────────────────────────────────────────
 // Every PO keeps a short log of who changed what and when, so procurement
@@ -179,15 +227,16 @@ const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:
 // ─── Actual received / paid dates ──────────────────────────────────────────
 // Every round already carries its own "received" date; a PO's overall
 // received date(s) are just the distinct actual dates across every round.
-const poReceivedDates = (p) => [...new Set(poRounds(p).map(r=>r.actual).filter(Boolean))].sort();
-// There's no separate "actual paid" field — a PO is considered paid the
-// moment its status is set to "Paid", so the paid date is read straight out
-// of the audit log entry that made that status change (the most recent one,
-// in case it was ever toggled back and forth).
+const poReceivedDates = (p) => [...new Set(poRounds(p).filter(roundReceived).map(r=>r.actualDate).filter(Boolean))].sort();
+// Paid date = the latest due date among rounds that have auto-paid.
 const poPaidDate = (p) => {
-  if (p.status !== "Paid") return null;
-  const entry = poHistory(p).find(h => h.action==="status" && /→\s*Paid\s*$/.test(h.message||""));
-  return entry ? entry.at.slice(0,10) : null;
+  const paid = poRounds(p).filter(r=>roundPaid(p,r)).map(r=>roundPayDate(p,r)).filter(Boolean).sort();
+  return paid.length ? paid[paid.length-1] : null;
+};
+// Earliest upcoming/known payment due date across all rounds (for list/export).
+const poNextDueDate = (p) => {
+  const due = poRounds(p).map(r=>roundPayDate(p,r)).filter(Boolean).sort();
+  return due.length ? due[0] : "";
 };
 
 // ─── Lock completed POs ─────────────────────────────────────────────────────
@@ -197,42 +246,38 @@ const poPaidDate = (p) => {
 const isPOLocked = (p) => incomingStatus(p)==="received" && paymentStatus(p)==="paid";
 const canEditPO  = (p, session) => !isPOLocked(p) || session?.role==="admin";
 
-// Which supplier a given account-code line item was ordered from. Items
-// carry their own `supplierId` so, on a PO with several suppliers, each
-// item can be traced to exactly one of them; items saved before this link
-// existed (or with a stale/missing id) fall back to the PO's first supplier.
-const itemSupplier     = (p, it) => { const sups = poSuppliers(p); return sups.find(s=>s.id===it.supplierId) || sups[0] || null; };
-const itemSupplierName = (p, it) => itemSupplier(p, it)?.name || "—";
-
-
 const deliveryStatus = (d) => {
-  // A delivery only counts as "received" once its actual date has really
-  // arrived — an actual date typed in for the future (e.g. entered ahead of
-  // time) shouldn't flip the badge to "received" before that day comes.
-  if (d.actual) return d.actual <= todayStr() ? "received" : "pending";
-  if (d.plan && d.plan < todayStr()) return "late";
-  if (d.plan) return "pending";
+  // Works on a round object (planDate/actualDate) or its aliases (plan/actual).
+  const plan = d.planDate ?? d.plan, actual = d.actualDate ?? d.actual;
+  if (actual) return actual <= todayStr() ? "received" : "pending";
+  if (plan && plan < todayStr()) return "late";
+  if (plan) return "pending";
   return "unset";
 };
-// PO-level incoming status aggregates every delivery batch: fully received
-// only once every batch has arrived; "partial" once some (but not all)
-// batches are in, so a PO that comes in 2-3 shipments is tracked accurately.
+// PO-level incoming status by value received across all item rounds: fully
+// received once received ≥ ordered; "partial" once some (but not all) is in.
 const incomingStatus = (p) => {
-  const deliveries = poDeliveries(p);
-  if (!deliveries.length) return "unset";
-  const sts = deliveries.map(deliveryStatus);
-  const receivedCount = sts.filter(s=>s==="received").length;
-  if (receivedCount === deliveries.length) return "received";
-  if (sts.some(s=>s==="late")) return "late";
-  if (receivedCount > 0) return "partial";
-  if (sts.some(s=>s==="pending")) return "pending";
+  const ordered = poTotal(p);
+  const rounds = poRounds(p);
+  if (!rounds.length) return "unset";
+  const received = rounds.filter(roundReceived).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+  const anyLate  = rounds.some(r => !roundReceived(r) && r.planDate && r.planDate < todayStr());
+  if (ordered > 0 && received >= ordered - 0.001) return "received";
+  if (anyLate) return "late";
+  if (received > 0) return "partial";
+  if (rounds.some(r=>r.planDate)) return "pending";
   return "unset";
 };
+// Auto-pay: reaching a round's due date is what marks it paid, so payment is
+// never "late" — it's "pending" until the due date, then "paid".
 const paymentStatus = (p) => {
-  if (p.status === "Paid") return "paid";
-  if (p.paymentPlan && p.paymentPlan < todayStr()) return "late";
-  if (p.paymentPlan) return "pending";
-  return "unset";
+  const rounds = poRounds(p);
+  const recvRounds = rounds.filter(roundReceived);
+  if (!recvRounds.length) return "unset";
+  const ordered = poTotal(p);
+  const paidAmt = recvRounds.filter(r=>roundPaid(p,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+  if (ordered > 0 && paidAmt >= ordered - 0.001) return "paid";
+  return "pending";
 };
 const INCOMING_LABEL = { received:"รับแล้ว", partial:"รับบางส่วน", late:"ของเข้าล่าช้า", pending:"รอของเข้า", unset:"ยังไม่กำหนด" };
 const INCOMING_CLR   = { received:"#10b981", partial:"#3b82f6", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
@@ -242,10 +287,12 @@ const PAYMENT_CLR    = { paid:"#10b981", late:"#ef4444", pending:"#f59e0b", unse
 const PAYMENT_BG     = { paid:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
 // Payment method — cash pays right away, credit gives suppliers a 30-day term,
 // so a credit PO's payment due date is auto-suggested as order date + 30 days.
-const PAYMENT_TYPE_LABEL = { cash:"เงินสด", credit30:"เครดิต 30 วัน" };
-const PAYMENT_TYPE_ICON  = { cash:"💵", credit30:"💳" };
-const PAYMENT_TYPE_CLR   = { cash:"#10b981", credit30:"#2563eb" };
-const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit30:"#eff6ff" };
+const PAYMENT_TYPE_LABEL = { cash:"เงินสด", credit:"เครดิต", credit30:"เครดิต 30 วัน" };
+const PAYMENT_TYPE_ICON  = { cash:"💵", credit:"💳", credit30:"💳" };
+const PAYMENT_TYPE_CLR   = { cash:"#10b981", credit:"#2563eb", credit30:"#2563eb" };
+const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit:"#eff6ff", credit30:"#eff6ff" };
+// Label for a PO's payment method including its credit term, e.g. "เครดิต 45 วัน".
+const paymentTypeLabel = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return "เงินสด"; if (P.paymentType==="credit") return `เครดิต ${P.creditDays||DEFAULT_CREDIT_DAYS} วัน`; return "—"; };
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
 // "2026-08" -> "ส.ค. 69" — used wherever a month key needs a short Thai label
@@ -496,7 +543,7 @@ function exportProcurementExcel(project, poEntries) {
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
       const amount = parseFloat(it.amount) || 0;
-      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p,it), poNumbersLabel(p), amount, p.status, deliveryStr, p.paymentPlan||"-", PAYMENT_LABEL[pay], p.notes||""]);
+      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, p.status, deliveryStr, poNextDueDate(p)||"-", PAYMENT_LABEL[pay], p.notes||""]);
       rowGroups1.push(acc?.group || "-");
       grand1 += amount;
     });
@@ -619,7 +666,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
       const amount = parseFloat(it.amount) || 0;
-      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p,it), poNumbersLabel(p), amount, p.status, deliveryStr, p.paymentPlan||"-", PAYMENT_LABEL[pay]]);
+      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, p.status, deliveryStr, poNextDueDate(p)||"-", PAYMENT_LABEL[pay]]);
       rowGroups2.push(acc?.group || "-");
       grand2 += amount;
     });
@@ -684,7 +731,8 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [session,  setSessionState] = useState(() => getSession());
+  const [session,  setSessionState] = useState(null);   // โหลดแบบ async ด้านล่าง
+  const [authReady, setAuthReady]   = useState(false);  // true เมื่อเช็ค session เสร็จ
   const [screen,   setScreen]   = useState("home");
   const [projects, setProjects] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -704,6 +752,17 @@ export default function App() {
     clearSession(); setSessionState(null);
     setScreen("home"); setRole(null); setActiveId(null);
   };
+
+  // โหลด session จาก Supabase Auth ตอนเปิดแอป + คอยฟังการเปลี่ยนสถานะ
+  // (เช่น token หมดอายุ หรือถูก signOut จากแท็บอื่น → เด้งกลับหน้า login)
+  useEffect(() => {
+    let mounted = true;
+    getSession().then((u) => { if (mounted) { setSessionState(u); setAuthReady(true); } });
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => {
+      if (!s && mounted) setSessionState(null);
+    });
+    return () => { mounted = false; sub?.subscription?.unsubscribe?.(); };
+  }, []);
 
   const fetchProjectData = useCallback(async (id) => {
     const t  = await sg(`tcs-tenders-${id}`);
@@ -760,6 +819,15 @@ export default function App() {
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
+
+  if (!authReady) {
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <Loader />
+      </>
+    );
+  }
 
   if (!session) {
     return (
@@ -2361,17 +2429,35 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 // Read-only detail view opened by clicking any PO row. Lets the user confirm
 // exactly what was entered without hunting through a wide table, and offers
 // Edit / Delete from the same place.
-function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange, session }) {
+function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session }) {
   const [historyOpen, setHistoryOpen] = useState(false);
-  if (!po) return null;
-  const items = poItems(po);
-  const suppliers = poSuppliers(po);
+  if (!rawPo) return null;
+  const po = migratePO(rawPo);
+  const items = po.items;
+  const supplier = po.supplier;
   const inc = incomingStatus(po), pay = paymentStatus(po);
   const history = poHistory(po);
   const lastUpd = poLastUpdate(po);
   const locked = !canEditPO(po, session);
   const receivedDates = poReceivedDates(po);
   const paidDate = poPaidDate(po);
+
+  // Record actual received / split remaining into a new round, then persist.
+  const setItemRounds = (itemId, rounds) =>
+    onChangePO?.({ ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) });
+  const updateRound = (itemId, roundId, key, val) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    setItemRounds(itemId, it.rounds.map(r => r.id===roundId ? {...r,[key]:val} : r));
+  };
+  const splitRound = (itemId) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:itemRemaining(it), actualAmount:"", actualDate:"" }]);
+  };
+  const roundBadge = (r) => {
+    if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
+    return roundPaid(po,r) ? ["จ่ายแล้ว (อัตโนมัติ)", PAYMENT_BG.paid, PAYMENT_CLR.paid]
+                           : ["ของเข้าแล้ว · รอครบกำหนด", INCOMING_BG.partial, INCOMING_CLR.partial];
+  };
 
   const Row = ({ label, value, mono }) => (
     <div style={{display:"flex",justifyContent:"space-between",gap:16,padding:"10px 0",borderBottom:`1px solid #f1f5f9`}}>
@@ -2404,7 +2490,7 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange, session 
           <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{INCOMING_LABEL[inc]}</span>
           <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_LABEL[pay]}</span>
           {po.paymentType && (
-            <span style={{background:PAYMENT_TYPE_BG[po.paymentType],color:PAYMENT_TYPE_CLR[po.paymentType],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_TYPE_ICON[po.paymentType]} {PAYMENT_TYPE_LABEL[po.paymentType]}</span>
+            <span style={{background:PAYMENT_TYPE_BG[po.paymentType],color:PAYMENT_TYPE_CLR[po.paymentType],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_TYPE_ICON[po.paymentType]} {paymentTypeLabel(po)}</span>
           )}
         </div>
         {lastUpd && (
@@ -2413,66 +2499,86 @@ function PODetailModal({ po, onClose, onEdit, onDelete, onStatusChange, session 
           </div>
         )}
 
-        {/* Account-code line items — a PO can split its total across several codes */}
-        <div style={{marginTop:10,background:T.bg,borderRadius:10,padding:"4px 12px"}}>
-          {items.map((it,i)=>{
-            const acc = ACCOUNTS.find(a=>a.code===it.code);
-            return (
-              <div key={it.id||i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<items.length-1?`1px solid ${T.cardBorder}`:"none"}}>
-                <div style={{minWidth:0}}>
-                  <div style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{it.code||"—"}</div>
-                  <div style={{fontSize:12,color:T.textSecondary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{acc?.name||"—"}</div>
-                  {suppliers.length>1 && <div style={{fontSize:10,color:T.textMuted,marginTop:1}}>🏢 {itemSupplierName(po,it)}</div>}
-                </div>
-                <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary,flexShrink:0}}>{fmt(it.amount)}</div>
-              </div>
-            );
-          })}
-          {items.length>1 && (
-            <div style={{display:"flex",justifyContent:"space-between",padding:"9px 0",fontSize:12,fontWeight:700}}>
-              <span style={{color:T.textMuted}}>รวมทั้ง PO</span>
-              <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(poTotal(po))}</span>
-            </div>
-          )}
+        {/* Supplier (one per PO) + top-line dates */}
+        <div style={{marginTop:10,background:T.bg,borderRadius:10,padding:"10px 12px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+            <div><span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>{supplier.name||"—"}</span>
+              {supplier.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{supplier.poNumber}</span>}</div>
+            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}</span>
+          </div>
         </div>
 
         <div style={{marginTop:4}}>
           <Row label="วันเปิด PO" value={po.date} mono />
           <Row label="วันรับของ" value={receivedDates.length ? receivedDates.join(", ") : "ยังไม่ได้รับ"} mono={receivedDates.length>0} />
-          <Row label="วันจ่ายเงิน" value={paidDate || "ยังไม่ได้จ่าย"} mono={!!paidDate} />
-          <Row label="วิธีจ่ายเงิน" value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${PAYMENT_TYPE_LABEL[po.paymentType]}` : "—"} />
-          <Row label="แผนจ่ายเงิน" value={po.paymentPlan} mono />
+          <Row label="วันจ่ายเงิน" value={paidDate || "ยังไม่ถึงกำหนด"} mono={!!paidDate} />
+          <Row label="วิธีจ่ายเงิน" value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${paymentTypeLabel(po)}` : "—"} />
         </div>
 
-        {/* Suppliers — a PO can involve several vendors, each paid/delivered
-            across several rounds (installments) instead of one lump sum. */}
-        <div style={{marginTop:10}}>
-          <div style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>🏢 Supplier {suppliers.length>1?`(${suppliers.length} เจ้า)`:""}</div>
-          {suppliers.map((s,si)=>{
-            const rounds = s.rounds && s.rounds.length ? s.rounds : [];
-            const roundsTotal = rounds.reduce((sum,r)=>sum+(parseFloat(r.amount)||0),0);
+        {/* Per account-code: receiving in installments, with auto-pay + split */}
+        <div style={{marginTop:12}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>📦 ของเข้า / จ่ายเงิน (แบ่งงวดได้)</div>
+          {items.map((it,ii)=>{
+            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            const ordered = itemOrdered(it), recv = itemReceived(it), remain = itemRemaining(it);
+            const paidAmt = (it.rounds||[]).filter(r=>roundPaid(po,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
             return (
-              <div key={s.id||si} style={{background:T.bg,borderRadius:10,padding:"10px 12px",marginBottom:8}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
-                  <div>
-                    <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>{s.name||"—"}</span>
-                    {s.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{s.poNumber}</span>}
+              <div key={it.id||ii} style={{background:T.bg,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+                  <div style={{minWidth:0}}>
+                    <span style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{it.code||"—"}</span>
+                    <span style={{fontSize:12,color:T.textSecondary,marginLeft:8}}>{acc?.name||"—"}</span>
                   </div>
-                  {roundsTotal>0 && <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(roundsTotal)}</span>}
+                  <span style={{fontSize:12,color:T.textMuted}}>สั่ง <b style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b></span>
                 </div>
-                {rounds.length===0 ? (
-                  <div style={{fontSize:12,color:T.textMuted}}>ยังไม่ได้กำหนดแผนของเข้า</div>
-                ) : rounds.map((r,i)=>{
-                  const st = deliveryStatus(r);
+
+                {(it.rounds||[]).map((r,ri)=>{
+                  const [label,bg,clr] = roundBadge(r);
+                  const payDate = roundPayDate(po,r);
+                  const late = r.actualDate && r.planDate && r.actualDate>r.planDate;
                   return (
-                    <div key={r.id||i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,padding:"6px 0",borderBottom:i<rounds.length-1?"1px solid #eef2f7":"none"}}>
-                      <span style={{fontSize:11,color:T.textMuted,fontWeight:600,minWidth:18}}>{rounds.length>1?`#${i+1}`:"—"}</span>
-                      <span style={{flex:1,fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{r.plan||"—"} → {r.actual||"รอ"}</span>
-                      {r.amount && <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.textSecondary}}>{fmt(r.amount)}</span>}
-                      <span style={{background:INCOMING_BG[st],color:INCOMING_CLR[st],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{INCOMING_LABEL[st]}</span>
+                    <div key={r.id||ri} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:10,marginBottom:6,background:T.card}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                        <span style={{fontSize:11,fontWeight:700,color:T.textSecondary}}>งวดที่ {ri+1} · แผน {fmt(r.planAmount)}</span>
+                        <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                        <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                          <span style={{fontSize:10,color:T.textSecondary}}>ของเข้าจริง (จำนวน)</span>
+                          <input type="number" placeholder="ยังไม่เข้า" value={r.actualAmount} disabled={locked}
+                            onChange={e=>updateRound(it.id,r.id,"actualAmount",e.target.value)} className="input-base"/>
+                        </label>
+                        <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                          <span style={{fontSize:10,color:T.textSecondary}}>วันของเข้าจริง</span>
+                          <input type="date" value={r.actualDate} disabled={locked}
+                            onChange={e=>updateRound(it.id,r.id,"actualDate",e.target.value)} className="input-base"/>
+                        </label>
+                      </div>
+                      <div style={{marginTop:6,fontSize:11,color:T.textSecondary}}>
+                        💰 วันครบกำหนดจ่าย: <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{payDate||"—"}</span>
+                        <span style={{color:T.textMuted}}> ({po.paymentType==="cash"?"เงินสด":po.paymentType==="credit"?`เครดิต ${po.creditDays} วัน`:"ยังไม่ระบุวิธีจ่าย"})</span>
+                        {late && <span style={{color:T.red}}> · ของมาช้า</span>}
+                      </div>
                     </div>
                   );
                 })}
+
+                {/* Progress + split */}
+                <div style={{height:8,borderRadius:6,background:T.cardBorder,overflow:"hidden",marginTop:6}}>
+                  <div style={{height:"100%",width:`${ordered>0?Math.min(recv/ordered*100,100):0}%`,background:remain>0?T.amber:T.green}}/>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:5,fontSize:11,color:T.textSecondary}}>
+                  <span>ของเข้าแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{fmt(recv)}</b> / {fmt(ordered)}</span>
+                  <span>จ่ายแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:paidAmt>0?T.green:T.textMuted}}>{fmt(paidAmt)}</b></span>
+                </div>
+                {!locked && remain>0.001 ? (
+                  <button type="button" onClick={()=>splitRound(it.id)} className="btn-ghost"
+                    style={{marginTop:8,padding:"6px 12px",fontSize:12,borderColor:T.amber,color:T.amber}}>
+                    ✂️ แบ่งงวด — เพิ่มงวดยอดคงเหลือ {fmt(remain)}
+                  </button>
+                ) : remain<=0.001 && ordered>0 ? (
+                  <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ ของเข้าครบตามยอดสั่งแล้ว</div>
+                ) : null}
               </div>
             );
           })}
@@ -2539,15 +2645,14 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
-  const emptyForm = () => {
-    const supplierId = uid();
-    return {
-      date:new Date().toISOString().slice(0,10), status:"PO Issued",
-      items:[{id:uid(),code:"",amount:"",supplierId}],
-      suppliers:[{id:supplierId, name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}],
-      paymentPlan:"", paymentType:"", notes:"",
-    };
-  };
+  const blankItem = () => ({ id:uid(), code:"", store:"", amount:"",
+    rounds:[{ id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }] });
+  const emptyForm = () => ({
+    date:new Date().toISOString().slice(0,10), status:"PO Issued",
+    supplier:{ name:"", poNumber:"" },
+    paymentType:"", creditDays:DEFAULT_CREDIT_DAYS, notes:"",
+    items:[ blankItem() ],
+  });
   const [form,   setForm]   = useState(emptyForm);
   const [editId, setEditId] = useState(null);
   const [filter, setFilter] = useState("All");
@@ -2581,54 +2686,60 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   ];
   const tenderTotal = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm   = poEntries.reduce((s,p)=>s+poTotal(p),0);
-  const totalPaid   = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+poTotal(p),0);
+  const totalPaid   = poEntries.reduce((s,p)=>s+poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0),0);
+  const paidCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
 
   // Late-item alert counts, shown as a banner regardless of which tab is
   // active so problems surface immediately instead of only inside "ติดตามของเข้า/จ่ายเงิน".
   const lateIncomingCount = poEntries.filter(p=>incomingStatus(p)==="late").length;
   const latePaymentCount  = poEntries.filter(p=>paymentStatus(p)==="late" && p.status!=="Paid").length;
 
-  // Item (account-code line) row helpers
-  const addItemRow    = () => setForm(f=>({...f, items:[...f.items,{id:uid(),code:"",amount:"",supplierId:f.suppliers[0]?.id||""}]}));
+  // Supplier (single) + item (account-code line) helpers
+  const updateSupplierField = (key, val) => setForm(f=>({...f, supplier:{...f.supplier, [key]:val}}));
+  const addItemRow    = () => setForm(f=>({...f, items:[...f.items, blankItem()]}));
   const removeItemRow = (id) => setForm(f=>({...f, items: f.items.length>1 ? f.items.filter(it=>it.id!==id) : f.items}));
   const updateItemRow = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>it.id===id?{...it,[key]:val}:it)}));
+  // Update the first (order-time) round of an item — used for its แผนของเข้า date.
+  const updateItemPlan = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>{
+    if (it.id!==id) return it;
+    const rounds = it.rounds && it.rounds.length ? it.rounds.slice() : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}];
+    rounds[0] = {...rounds[0], [key]:val};
+    return {...it, rounds};
+  })}));
 
-  // Supplier row helpers — a PO can involve several suppliers
-  const addSupplier    = () => setForm(f=>({...f, suppliers:[...f.suppliers,{id:uid(), name:"", poNumber:"", rounds:[{id:uid(),amount:"",plan:"",actual:""}]}]}));
-  const removeSupplier = (sid) => setForm(f=>{
-    if (f.suppliers.length===1) return f;
-    const suppliers = f.suppliers.filter(s=>s.id!==sid);
-    // Items pointing at the removed supplier fall back to whichever supplier is now first
-    const items = f.items.map(it=>it.supplierId===sid ? {...it, supplierId: suppliers[0]?.id||""} : it);
-    return {...f, suppliers, items};
-  });
-  const updateSupplier = (sid, key, val) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s,[key]:val}:s)}));
-
-  // Payment/delivery round helpers — each supplier can be paid/delivered in
-  // several rounds instead of one lump sum.
-  const addRound    = (sid) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s, rounds:[...s.rounds,{id:uid(),amount:"",plan:"",actual:""}]}:s)}));
-  const removeRound = (sid, rid) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s, rounds: s.rounds.length>1 ? s.rounds.filter(r=>r.id!==rid) : s.rounds}:s)}));
-  const updateRound = (sid, rid, key, val) => setForm(f=>({...f, suppliers: f.suppliers.map(s=>s.id===sid?{...s, rounds: s.rounds.map(r=>r.id===rid?{...r,[key]:val}:r)}:s)}));
+  // Budget / net / % helpers for the % field on each account-code line.
+  const budgetForCode = (code) => parseFloat(combinedBudget[code])||0;
+  const itemNet = (it) => Math.max(budgetForCode(it.code) - (parseFloat(it.store)||0), 0);
+  const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
+  const setItemPct = (id, pct) => setForm(f=>({...f, items: f.items.map(it=>{
+    if (it.id!==id) return it;
+    const net = Math.max(budgetForCode(it.code) - (parseFloat(it.store)||0), 0);
+    const amt = Math.round(net * (parseFloat(pct)||0) / 100);
+    return {...it, amount: amt ? String(amt) : ""};
+  })}));
 
   const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
-  const formRoundsTotal = form.suppliers.reduce((s,sup)=>s+sup.rounds.reduce((ss,r)=>ss+(parseFloat(r.amount)||0),0),0);
 
   const submit = () => {
-    const validSuppliers = form.suppliers
-      .filter(s=>s.name.trim())
-      .map(s=>({...s, rounds: s.rounds.filter(r=>r.amount||r.plan||r.actual)}));
-    if (!validSuppliers.length) { alert("กรุณากรอกชื่อ Supplier อย่างน้อย 1 เจ้า"); return; }
-    const validSupplierIds = new Set(validSuppliers.map(s=>s.id));
-    const validItems = form.items.filter(it=>it.code&&it.amount).map(it =>
-      validSupplierIds.has(it.supplierId) ? it : {...it, supplierId: validSuppliers[0].id}
-    );
-    if (!validItems.length) return;
-    const payload = {...form, items:validItems, suppliers:validSuppliers};
-    delete payload.supplier; delete payload.poNumber; delete payload.deliveries; // superseded by suppliers[]
+    if (!form.supplier.name.trim()) { alert("กรุณากรอกชื่อ Supplier"); return; }
+    const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
+      id: it.id || uid(), code: it.code, store: it.store || "", amount: it.amount,
+      rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
+        id: r.id || uid(),
+        planDate: r.planDate || "",
+        planAmount: idx===0 ? (r.planAmount || it.amount) : (r.planAmount || ""),
+        actualAmount: r.actualAmount || "",
+        actualDate: r.actualDate || "",
+      })),
+    }));
+    if (!validItems.length) { alert("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ"); return; }
+    const payload = {
+      date: form.date, status: form.status, notes: form.notes || "",
+      supplier: { name: form.supplier.name.trim(), poNumber: (form.supplier.poNumber||"").trim() },
+      paymentType: form.paymentType || "", creditDays: parseInt(form.creditDays,10) || DEFAULT_CREDIT_DAYS,
+      items: validItems,
+    };
 
-    // Log who edited this PO and when. If the status changed as part of this
-    // save, call that out specifically so the history reads like a timeline
-    // ("เปลี่ยนสถานะ...") instead of a vague "แก้ไขข้อมูล" every time.
     const prev = editId ? poEntries.find(x=>x.id===editId) : null;
     const entries = [];
     if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `เปลี่ยนสถานะ: ${prev.status} → ${payload.status}`));
@@ -2640,6 +2751,11 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     setForm(emptyForm());
     setView("browse");
   };
+
+  // Persist an in-place update to a PO's items/rounds (used by the detail view
+  // when recording actual goods received or splitting a round). Migrates the
+  // record to the new shape on first touch so it's normalised going forward.
+  const updatePO = (updated) => savePO(poEntries.map(x=>x.id===updated.id?updated:x));
 
   // One-click status change — used by the StatusPicker wherever a PO is
   // listed, so procurement doesn't need to open the full edit form just to
@@ -2654,23 +2770,16 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 
   const openEdit = (p) => {
     if (!canEditPO(p, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin"); return; }
-    const newSuppliers = poSuppliers(p).map(s=>({
-      ...s,
-      id: s.id&&s.id!=="legacy" ? s.id : uid(),
-      rounds: (s.rounds&&s.rounds.length ? s.rounds : [{amount:"",plan:"",actual:""}])
-        .map(r=>({...r, id: r.id&&r.id!=="legacy-round" ? r.id : uid()})),
-    }));
-    // Old supplier id -> new supplier id, so each item stays linked to the
-    // same supplier after ids get freshly minted for this edit session.
-    const idMap = {};
-    poSuppliers(p).forEach((s,i) => { idMap[s.id] = newSuppliers[i].id; });
+    const P = migratePO(p);
     setForm({
-      ...emptyForm(), date:p.date, status:p.status, paymentPlan:p.paymentPlan||"", paymentType:p.paymentType||"", notes:p.notes||"",
-      items: poItems(p).map(it=>({
-        ...it, id: it.id&&it.id!=="legacy" ? it.id : uid(),
-        supplierId: idMap[it.supplierId] || newSuppliers[0]?.id || "",
+      date: P.date, status: P.status, notes: P.notes || "",
+      supplier: { name: P.supplier.name || "", poNumber: P.supplier.poNumber || "" },
+      paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
+      items: P.items.map(it=>({
+        id: it.id || uid(), code: it.code || "", store: it.store || "", amount: it.amount || "",
+        rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
+          .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
       })),
-      suppliers: newSuppliers,
     });
     setEditId(p.id); setView("add"); setDetailId(null);
   };
@@ -2706,7 +2815,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
           <StatCard label="Budget (QS)" value={fmt(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
           <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-          <StatCard label="ชำระแล้ว" value={fmt(totalPaid)} sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
+          <StatCard label="ชำระแล้ว" value={fmt(totalPaid)} sub={`${paidCount} รายการ · จ่ายอัตโนมัติ`} color={T.green} icon="✅" accent={T.greenBg}/>
           <StatCard label="Budget คงเหลือ" value={fmt(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
         </div>
 
@@ -2753,10 +2862,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วันที่สั่ง PO</span>
-                <input type="date" value={form.date} onChange={e=>{
-                    const nd = e.target.value;
-                    setForm(f=>({...f, date:nd, paymentPlan: f.paymentType==="credit30" ? addDays(nd,30) : f.paymentType==="cash" ? nd : f.paymentPlan}));
-                  }} className="input-base"/>
+                <input type="date" value={form.date} onChange={e=>setForm(f=>({...f, date:e.target.value}))} className="input-base"/>
               </label>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>สถานะ</span>
@@ -2765,70 +2871,74 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 </select>
               </label>
 
-              {/* Suppliers — one PO can involve several vendors, and each
-                  vendor can be paid/delivered across several rounds instead
-                  of one lump sum. */}
+              {/* Supplier — exactly one vendor per PO. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier * (แบ่งจ่ายได้หลายเจ้า หลายรอบ ระบุก่อน แล้วค่อยผูกกับหมวดต้นทุนด้านล่าง)</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier * (หนึ่งเจ้าต่อ PO)</span>
               </div>
-              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:12}}>
-                {form.suppliers.map((s,si)=>(
-                  <div key={s.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:12,background:T.bg}}>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center",marginBottom:10}}>
-                      <input placeholder="ชื่อ Supplier *" value={s.name} onChange={e=>updateSupplier(s.id,"name",e.target.value)} className="input-base"/>
-                      <input placeholder="เลข PO" value={s.poNumber} onChange={e=>updateSupplier(s.id,"poNumber",e.target.value)} className="input-base"/>
-                      <button type="button" onClick={()=>removeSupplier(s.id)} disabled={form.suppliers.length===1}
-                        style={{background:"none",border:"none",color:form.suppliers.length===1?T.textMuted:T.red,cursor:form.suppliers.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.suppliers.length===1?0.4:1}}>🗑</button>
-                    </div>
-                    <div style={{fontSize:11,fontWeight:600,color:T.textMuted,marginBottom:6}}>รอบจ่ายเงิน / ของเข้า {s.rounds.length>1?`(${s.rounds.length} รอบ)`:""}</div>
-                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                      {s.rounds.map((r,ri)=>(
-                        <div key={r.id} style={{display:"grid",gridTemplateColumns:"18px 110px 1fr 1fr auto",gap:8,alignItems:"center"}}>
-                          <span style={{fontSize:11,color:T.textMuted,fontWeight:600}}>{s.rounds.length>1?`#${ri+1}`:""}</span>
-                          <input type="number" placeholder="มูลค่า" value={r.amount} onChange={e=>updateRound(s.id,r.id,"amount",e.target.value)} className="input-base"/>
-                          <label style={{display:"flex",flexDirection:"column",gap:2}}>
-                            {ri===0 && <span style={{fontSize:10,color:T.textSecondary}}>แผนของเข้า</span>}
-                            <input type="date" value={r.plan} onChange={e=>updateRound(s.id,r.id,"plan",e.target.value)} className="input-base"/>
-                          </label>
-                          <label style={{display:"flex",flexDirection:"column",gap:2}}>
-                            {ri===0 && <span style={{fontSize:10,color:T.textSecondary}}>รับจริง</span>}
-                            <input type="date" value={r.actual} onChange={e=>updateRound(s.id,r.id,"actual",e.target.value)} className="input-base"/>
-                          </label>
-                          <button type="button" onClick={()=>removeRound(s.id,r.id)} disabled={s.rounds.length===1}
-                            style={{background:"none",border:"none",color:s.rounds.length===1?T.textMuted:T.red,cursor:s.rounds.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:s.rounds.length===1?0.4:1,alignSelf:ri===0?"end":"center",marginBottom:ri===0?1:0}}>🗑</button>
-                        </div>
-                      ))}
-                    </div>
-                    <button type="button" onClick={()=>addRound(s.id)} className="btn-ghost" style={{padding:"5px 10px",fontSize:11,marginTop:8}}>+ เพิ่มรอบจ่ายเงิน</button>
-                  </div>
-                ))}
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <button type="button" onClick={addSupplier} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Supplier</button>
-                  {formRoundsTotal>0 && <span style={{fontSize:12,color:T.textSecondary}}>รวมทุกรอบ: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formRoundsTotal)}</b></span>}
-                </div>
+              <div style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <input placeholder="ชื่อ Supplier *" value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
+                <input placeholder="เลข PO" value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"/>
               </div>
 
-              {/* Account-code line items — one PO can be split across several
-                  codes, each with its own amount and its own linked supplier;
-                  the amounts sum to the PO total. */}
+              {/* Account-code line items — each carries its own store amount and
+                  its % of the net-to-purchase (budget − store). */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 หมวดต้นทุน * (แยกได้หลายรหัส ผูกกับ Supplier ด้านบน)</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 หมวดต้นทุน * (กรอกของใน store และ % ของยอดสั่ง)</span>
               </div>
-              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:8}}>
-                {form.items.map((it,i)=>(
-                  <div key={it.id} style={{display:"grid",gridTemplateColumns:"1fr 1fr 140px auto",gap:8,alignItems:"center"}}>
-                    <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
-                      <option value="">— เลือก Account Code —</option>
-                      {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
-                    </select>
-                    <select value={it.supplierId} onChange={e=>updateItemRow(it.id,"supplierId",e.target.value)} className="input-base">
-                      {form.suppliers.map(s=><option key={s.id} value={s.id}>{s.name.trim() ? `🏢 ${s.name}` : "🏢 (ยังไม่ตั้งชื่อ)"}</option>)}
-                    </select>
-                    <input type="number" placeholder="มูลค่า (THB)" value={it.amount} onChange={e=>updateItemRow(it.id,"amount",e.target.value)} className="input-base"/>
-                    <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
-                      style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
+              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:12}}>
+                {form.items.map((it)=>{
+                  const budget = budgetForCode(it.code);
+                  const net = itemNet(it);
+                  const amt = parseFloat(it.amount)||0;
+                  const pct = net>0 ? Math.round(amt/net*100) : 0;
+                  const prevOrdered = poEntries.reduce((s,p)=> p.id===editId ? s : s + poAmountForCode(p, it.code), 0);
+                  const cumPct = net>0 ? Math.round((prevOrdered+amt)/net*100) : 0;
+                  return (
+                  <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:10}}>
+                      <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
+                        <option value="">— เลือก Account Code —</option>
+                        {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
+                      </select>
+                      <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
+                        style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:8}}>
+                      <div style={{background:T.card,borderRadius:8,padding:"6px 10px"}}>
+                        <div style={{fontSize:10,color:T.textMuted}}>งบโครงการ</div>
+                        <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(budget)}</div>
+                      </div>
+                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                        <span style={{fontSize:10,color:T.textSecondary}}>มีใน store</span>
+                        <input type="number" placeholder="0" value={it.store} onChange={e=>updateItemRow(it.id,"store",e.target.value)} className="input-base"/>
+                      </label>
+                      <div style={{background:T.amberBg,borderRadius:8,padding:"6px 10px"}}>
+                        <div style={{fontSize:10,color:T.amber}}>ต้องสั่งสุทธิ</div>
+                        <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.amber}}>{fmt(net)}</div>
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1.5fr 1fr 1fr",gap:8,alignItems:"end"}}>
+                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                        <span style={{fontSize:10,color:T.textSecondary}}>มูลค่า PO นี้ (THB)</span>
+                        <input type="number" placeholder="0" value={it.amount} onChange={e=>setItemAmount(it.id,e.target.value)} className="input-base"/>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                        <span style={{fontSize:10,color:T.textSecondary}}>% ของยอดสั่ง</span>
+                        <input type="number" placeholder="0" value={net>0 && amt ? pct : ""} onChange={e=>setItemPct(it.id,e.target.value)} className="input-base"/>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                        <span style={{fontSize:10,color:T.textSecondary}}>แผนของเข้า (งวดแรก)</span>
+                        <input type="date" value={it.rounds?.[0]?.planDate||""} onChange={e=>updateItemPlan(it.id,"planDate",e.target.value)} className="input-base"/>
+                      </label>
+                    </div>
+                    {it.code && net>0 && amt>0 && (
+                      <div style={{marginTop:8,fontSize:11,color:T.textSecondary}}>
+                        สั่งสะสมกับ PO นี้รวม <b style={{color:cumPct>100?T.red:T.textPrimary}}>{cumPct}%</b> ของยอดสั่งสุทธิ · <span style={{color:T.textMuted}}>= {budget>0?Math.round(amt/budget*100):0}% ของงบรวม</span>
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Account Code</button>
                   {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>รวม: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
@@ -2837,24 +2947,25 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 
               <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วิธีจ่ายเงิน</span>
-                <div style={{display:"flex",gap:8}}>
-                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"cash",paymentPlan:f.date}))}
-                    style={{flex:1,padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="cash"?T.green:T.cardBorder}`,background:form.paymentType==="cash"?T.greenBg:T.card,color:form.paymentType==="cash"?T.green:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
-                    💵 เงินสด <span style={{fontWeight:400,fontSize:11,opacity:0.8}}>(จ่ายทันที)</span>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"cash"}))}
+                    style={{flex:"1 1 160px",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="cash"?T.green:T.cardBorder}`,background:form.paymentType==="cash"?T.greenBg:T.card,color:form.paymentType==="cash"?T.green:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
+                    💵 เงินสด <span style={{fontWeight:400,fontSize:11,opacity:0.8}}>(จ่ายวันของเข้า)</span>
                   </button>
-                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"credit30",paymentPlan:addDays(f.date,30)}))}
-                    style={{flex:1,padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="credit30"?T.blue:T.cardBorder}`,background:form.paymentType==="credit30"?T.blueLight:T.card,color:form.paymentType==="credit30"?T.blue:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
-                    💳 เครดิต <span style={{fontWeight:400,fontSize:11,opacity:0.8}}>(ครบกำหนด 30 วัน)</span>
+                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"credit",creditDays:f.creditDays||DEFAULT_CREDIT_DAYS}))}
+                    style={{flex:"1 1 160px",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="credit"?T.blue:T.cardBorder}`,background:form.paymentType==="credit"?T.blueLight:T.card,color:form.paymentType==="credit"?T.blue:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
+                    💳 เครดิต
                   </button>
+                  {form.paymentType==="credit" && (
+                    <span style={{display:"flex",alignItems:"center",gap:6}}>
+                      <input type="number" value={form.creditDays} onChange={e=>setForm(f=>({...f,creditDays:e.target.value}))} className="input-base" style={{width:76}}/>
+                      <span style={{fontSize:12,color:T.textSecondary}}>วัน</span>
+                    </span>
+                  )}
                 </div>
-                {form.paymentType==="credit30" && (
-                  <span style={{fontSize:11,color:T.blue}}>ระบบคำนวณวันครบกำหนดจ่ายให้อัตโนมัติ (สั่ง PO + 30 วัน) แก้ไขวันที่ด้านล่างได้ตามจริง</span>
+                {form.paymentType && (
+                  <span style={{fontSize:11,color:T.blue}}>วันครบกำหนดจ่ายคำนวณอัตโนมัติจาก "วันของเข้าจริง" ของแต่ละงวด{form.paymentType==="credit"?` + ${form.creditDays||DEFAULT_CREDIT_DAYS} วัน`:""} — จ่ายอัตโนมัติเมื่อถึงกำหนด</span>
                 )}
-              </label>
-
-              <label style={{display:"flex",flexDirection:"column",gap:6}}>
-                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>แผนจ่ายเงิน (Payment Plan)</span>
-                <input type="date" value={form.paymentPlan} onChange={e=>setForm(f=>({...f,paymentPlan:e.target.value}))} className="input-base"/>
               </label>
 
               <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
@@ -2958,7 +3069,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                       <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_LABEL[pay]}</span>
                                     )}
                                     {p.paymentType && (
-                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_TYPE_ICON[p.paymentType]} {PAYMENT_TYPE_LABEL[p.paymentType]}</span>
+                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_TYPE_ICON[p.paymentType]} {paymentTypeLabel(p)}</span>
                                     )}
                                   </div>
                                 </td>
@@ -2992,7 +3103,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
           </>
         )}
       </div>
-      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} session={session} />
+      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} />
     </Shell>
   );
 }
@@ -3016,9 +3127,9 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
     if (inc==="pending") acc.incPending++;
     if (inc==="late")    acc.incLate++;
     if (pay==="pending") acc.payPending++;
-    if (pay==="late")    acc.payLate++;
+    if (pay==="paid")    acc.payPaid++;
     return acc;
-  }, { incPending:0, incLate:0, payPending:0, payLate:0 });
+  }, { incPending:0, incLate:0, payPending:0, payPaid:0 });
 
   const q = search.toLowerCase();
   const passesFilter = (p) => {
@@ -3081,8 +3192,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
         <StatCard label="รอของเข้า" value={counts.incPending} sub="ยังไม่ถึงวันที่นัด" color={T.amber} icon="⏳" accent={T.amberBg}/>
         <StatCard label="ของเข้าล่าช้า" value={counts.incLate} sub="เลยวันแผนของเข้าแล้ว" color={T.red} icon="⚠️" accent={T.redBg}/>
-        <StatCard label="รอจ่ายเงิน" value={counts.payPending} sub="ยังไม่ถึงวันครบกำหนด" color={T.amber} icon="⏳" accent={T.amberBg}/>
-        <StatCard label="จ่ายเงินเกินกำหนด" value={counts.payLate} sub="เลยวันแผนจ่ายเงินแล้ว" color={T.red} icon="🔴" accent={T.redBg}/>
+        <StatCard label="รอจ่ายเงิน" value={counts.payPending} sub="ของเข้าแล้ว รอถึงกำหนด" color={T.amber} icon="⏳" accent={T.amberBg}/>
+        <StatCard label="จ่ายแล้ว (อัตโนมัติ)" value={counts.payPaid} sub="ถึงวันครบกำหนดแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -3163,10 +3274,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                           </td>
                           <td style={{padding:"9px 16px"}}><DeliveryList po={p}/></td>
                           <td style={{padding:"9px 16px"}}>
-                            <DateCell value={p.paymentPlan} lateTint={pay==="late"}/>
+                            <DateCell value={poNextDueDate(p)} lateTint={false}/>
                             {p.paymentType && (
                               <div style={{marginTop:3}}>
-                                <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${PAYMENT_TYPE_LABEL[p.paymentType]}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+                                <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${paymentTypeLabel(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
                               </div>
                             )}
                           </td>
@@ -3555,7 +3666,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                                   <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
                                   <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}</td>
                                   <td style={{padding:"9px 16px"}}><DeliveryDates po={p}/></td>
-                                  <td style={{padding:"9px 16px"}}><DateCell value={p.paymentPlan} lateTint={pay==="late"}/></td>
+                                  <td style={{padding:"9px 16px"}}><DateCell value={poNextDueDate(p)} lateTint={false}/></td>
                                   <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
                                 </tr>
                               );
