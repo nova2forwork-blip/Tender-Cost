@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, ss, sd } from "./supabase.js";
+import { supabase, sg, ss, sd, loadKvHistory, restoreKvVersion } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -974,6 +974,131 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
   );
 }
 
+// ─── Admin: กู้คืนข้อมูล ─────────────────────────────────────────────────────
+// แสดงประวัติทุกการแก้/ลบจากตาราง kv_history (ต้องรัน kv-history.sql ก่อน)
+// ให้ admin เลือกคีย์ → เลือกเวอร์ชันก่อนหน้า → กดกู้คืนกลับเข้า kv_store
+// การอ่านประวัติและการเขียนคืนถูกจำกัดเฉพาะ admin ด้วย RLS ฝั่ง DB อยู่แล้ว
+function AdminRestoreTab() {
+  const [history, setHistory] = useState([]);
+  const [projMap, setProjMap] = useState({});
+  const [selKey, setSelKey]   = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy]       = useState(false);
+  const [msg, setMsg]         = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [h, projs] = await Promise.all([loadKvHistory(), sg("tcs-projects")]);
+    const map = {}; (projs || []).forEach(p => { map[p.id] = p.name; });
+    setProjMap(map); setHistory(h); setLoading(false);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const keyLabel = (key) => {
+    if (key === "tcs-projects") return "📁 รายชื่อโครงการ";
+    const m = key.match(/^tcs-(tenders|po|additions|extra|hidden)-(.+)$/);
+    if (m) {
+      const t = { tenders:"Tender Cost", po:"PO / จัดซื้อ", additions:"ยอดเพิ่มรายเดือน", extra:"รายการเพิ่ม", hidden:"หมวดที่ซ่อน" }[m[1]] || m[1];
+      return `${t} — ${projMap[m[2]] || m[2]}`;
+    }
+    if (key === "tcs-users") return "ผู้ใช้ (คีย์เก่า)";
+    if (key === "tcs-logs")  return "Log (คีย์เก่า)";
+    return key;
+  };
+  const preview = (v) => {
+    if (v == null) return "(ว่าง)";
+    const s = String(v);
+    return s.length > 90 ? s.slice(0, 90) + "…" : s;
+  };
+
+  const groups = {};
+  history.forEach(h => { (groups[h.key] = groups[h.key] || []).push(h); });
+  const keys = Object.keys(groups).sort((a,b) => (groups[b][0]?.changed_at||"").localeCompare(groups[a][0]?.changed_at||""));
+  const versions = selKey ? groups[selKey] || [] : [];
+
+  const doRestore = async (row) => {
+    if (!window.confirm(`กู้คืน "${keyLabel(row.key)}"\nกลับเป็นเวอร์ชันวันที่ ${new Date(row.changed_at).toLocaleString("th-TH")}?\n\nค่าปัจจุบันจะถูกแทนที่ (แต่ก็ถูกเก็บเข้าประวัติด้วย กู้กลับได้อีก)`)) return;
+    setBusy(true); setMsg("");
+    try {
+      await restoreKvVersion(row);
+      setMsg("✅ กู้คืนสำเร็จ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน");
+      await load();
+    } catch (e) {
+      setMsg("❌ กู้คืนไม่สำเร็จ: " + (e?.message || e));
+    }
+    setBusy(false);
+  };
+
+  if (loading) return <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลดประวัติ...</div>;
+
+  if (!keys.length) return (
+    <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textSecondary,lineHeight:1.7}}>
+      ยังไม่มีประวัติการเปลี่ยนแปลง<br/>
+      <span style={{color:T.textMuted}}>ประวัติจะเริ่มถูกเก็บอัตโนมัติหลังจากรันไฟล์ <b>kv-history.sql</b> ใน Supabase แล้วมีการแก้/ลบข้อมูลเกิดขึ้น</span>
+    </div>
+  );
+
+  return (
+    <div>
+      {msg && (
+        <div style={{marginBottom:14,padding:"10px 14px",borderRadius:10,fontSize:13,fontWeight:600,
+          background:msg.startsWith("✅")?T.greenBg:T.redBg,color:msg.startsWith("✅")?T.green:T.red}}>{msg}</div>
+      )}
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>
+        เก็บประวัติค่าเดิมทุกครั้งที่มีการแก้หรือลบ · เลือกรายการทางซ้าย แล้วกดกู้คืนเวอร์ชันที่ต้องการ
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(220px,320px) 1fr",gap:16,alignItems:"start"}}>
+        {/* ซ้าย: รายการคีย์ที่มีประวัติ */}
+        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+          <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>รายการข้อมูล ({keys.length})</div>
+          <div style={{maxHeight:520,overflowY:"auto"}}>
+            {keys.map(k => {
+              const active = k === selKey;
+              return (
+                <button key={k} onClick={()=>setSelKey(k)}
+                  style={{display:"block",width:"100%",textAlign:"left",padding:"11px 16px",border:"none",borderBottom:`1px solid ${T.cardBorder}`,
+                    background:active?T.blueLight:"transparent",cursor:"pointer"}}>
+                  <div style={{fontSize:13,fontWeight:600,color:active?T.blue:T.textPrimary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(k)}</div>
+                  <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{groups[k].length} เวอร์ชัน · ล่าสุด {new Date(groups[k][0].changed_at).toLocaleString("th-TH",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ขวา: เวอร์ชันของคีย์ที่เลือก */}
+        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",minHeight:200}}>
+          {!selKey ? (
+            <div style={{padding:"40px 20px",textAlign:"center",color:T.textMuted,fontSize:13}}>← เลือกรายการทางซ้ายเพื่อดูประวัติเวอร์ชัน</div>
+          ) : (
+            <>
+              <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:700,color:T.textPrimary}}>{keyLabel(selKey)}</div>
+              <div style={{maxHeight:520,overflowY:"auto"}}>
+                {versions.map((r,i)=>(
+                  <div key={r.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",borderBottom:i<versions.length-1?`1px solid ${T.cardBorder}`:"none"}}>
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{fontSize:12,fontWeight:600,color:T.textPrimary}}>
+                        {new Date(r.changed_at).toLocaleString("th-TH")}
+                        <span style={{marginLeft:8,fontSize:10,padding:"1px 7px",borderRadius:6,background:r.op==="delete"?T.redBg:T.amberBg,color:r.op==="delete"?T.red:T.amber,fontWeight:700}}>{r.op==="delete"?"ถูกลบ":"ถูกแก้ทับ"}</span>
+                        {i===0 && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>(ล่าสุด)</span>}
+                      </div>
+                      <div style={{fontSize:11,color:T.textMuted,marginTop:3,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{preview(r.old_value)}</div>
+                    </div>
+                    <button onClick={()=>doRestore(r)} disabled={busy}
+                      className="btn-ghost" style={{flexShrink:0,padding:"7px 14px",fontSize:12,borderColor:T.blue,color:T.blue,cursor:busy?"default":"pointer",opacity:busy?0.5:1}}>
+                      ↩︎ กู้คืนเวอร์ชันนี้
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Admin Panel ────────────────────────────────────────────────────────────
 function AdminPanel({ onBack, onLogout, session }) {
   const [tab,   setTab]   = useState("users");
@@ -1025,7 +1150,7 @@ function AdminPanel({ onBack, onLogout, session }) {
 
       <div style={{padding:"28px 32px"}}>
         <div style={{display:"flex",gap:8,marginBottom:22}}>
-          {[["users","👥 จัดการผู้ใช้"],["logs","📜 Log การเข้าใช้งาน"]].map(([id,label])=>(
+          {[["users","👥 จัดการผู้ใช้"],["logs","📜 Log การเข้าใช้งาน"],["restore","🕘 กู้คืนข้อมูล"]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
@@ -1035,6 +1160,8 @@ function AdminPanel({ onBack, onLogout, session }) {
 
         {!loaded ? (
           <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลด...</div>
+        ) : tab === "restore" ? (
+          <AdminRestoreTab />
         ) : tab === "users" ? (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`}}>
