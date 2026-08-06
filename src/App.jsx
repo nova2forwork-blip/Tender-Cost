@@ -357,6 +357,17 @@ const GLOBAL_CSS = `
   .hscroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; border: 3px solid #eef2f7; }
   .hscroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
   .hscroll { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: thin; }
+  /* ตารางรายเดือน: เลื่อนในกล่องเอง (สูงไม่เกิน 70vh) + ตรึงหัวตาราง + สกรอลบาร์เห็นชัด */
+  .mscroll { overflow: auto; max-height: 70vh; }
+  .mscroll::-webkit-scrollbar { height: 13px; width: 13px; }
+  .mscroll::-webkit-scrollbar-track { background: #eef2f7; }
+  .mscroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; border: 3px solid #eef2f7; }
+  .mscroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  .mscroll::-webkit-scrollbar-corner { background: #eef2f7; }
+  .mscroll { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: thin; }
+  .mscroll thead th { position: sticky; background: #f8fafc; z-index: 2; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
+  .mscroll thead tr:first-child th { top: 0; }
+  .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 2; }
 `;
 
 // ─── Excel Export ─────────────────────────────────────────────────────────────
@@ -830,6 +841,8 @@ export default function App() {
   const [editMode, setEditMode] = useState(false); // true เมื่ออยู่ในโหมดแก้ไข — undo/Ctrl+Z ใช้ได้เฉพาะตอนนี้
   const editModeRef = useRef(false); editModeRef.current = editMode;
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
+  const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
+  const dragRef = useRef({ pending:false, active:false, x0:0, y0:0, raf:0, suppressClick:false });
   currentRef.current = {
     "tcs-projects": projects,
     [`tcs-tenders-${activeId}`]: tenderCosts,
@@ -884,23 +897,72 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
 
-  // แถบสรุปแบบ Excel — ลากเลือกตัวเลข (ที่มีทศนิยม เช่นยอดเงิน) หลายช่องในตาราง
-  // แล้วคำนวณ ผลรวม/เฉลี่ย/นับ/ต่ำสุด/สูงสุด ให้อัตโนมัติ (นับเฉพาะเลขที่มีจุดทศนิยม
-  // จึงไม่รวมรหัสบัญชี/ปี ที่เป็นจำนวนเต็ม)
+  // แถบสรุปแบบ Excel — ลากเป็น "กรอบสี่เหลี่ยม" คลุมตัวเลขในตาราง (marquee)
+  // รวมเฉพาะตัวเลขที่อยู่ในกรอบ จึงลากลงคอลัมน์เดียวได้ตรง ๆ ไม่ติดเซลล์ข้าง ๆ
+  // นับเฉพาะเลขที่มีจุดทศนิยม (ยอดเงิน) จึงไม่รวมรหัสบัญชี/ปี ที่เป็นจำนวนเต็ม
   useEffect(() => {
-    const onSel = () => {
-      const text = typeof window !== "undefined" && window.getSelection ? String(window.getSelection()) : "";
-      const matches = text.match(/-?\d[\d,]*\.\d+/g) || [];
-      const nums = matches.map(m => parseFloat(m.replace(/,/g, ""))).filter(n => !isNaN(n));
+    const d = dragRef.current;
+    const INTERACT = 'input,textarea,select,button,a,[contenteditable="true"]';
+    const NUM_RE = /^-?\d[\d,]*\.\d+$/;
+    const compute = (x0, y0, x1, y1) => {
+      const box = { left:Math.min(x0,x1), top:Math.min(y0,y1), right:Math.max(x0,x1), bottom:Math.max(y0,y1) };
+      setMarquee({ left:box.left, top:box.top, width:box.right-box.left, height:box.bottom-box.top });
+      const nums = [];
+      document.querySelectorAll("table").forEach((tbl) => {
+        const walker = document.createTreeWalker(tbl, NodeFilter.SHOW_TEXT, {
+          acceptNode(n){ return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; },
+        });
+        let node;
+        while ((node = walker.nextNode())) {
+          const rng = document.createRange(); rng.selectNodeContents(node);
+          const r = rng.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) continue;
+          if (r.right >= box.left && r.left <= box.right && r.bottom >= box.top && r.top <= box.bottom) {
+            const v = parseFloat(node.nodeValue.trim().replace(/,/g, ""));
+            if (!isNaN(v)) nums.push(v);
+          }
+        }
+      });
       if (nums.length >= 2) {
-        const sum = nums.reduce((a, b) => a + b, 0);
-        setSelStats({ count: nums.length, sum, avg: sum / nums.length, min: Math.min(...nums), max: Math.max(...nums) });
-      } else {
-        setSelStats(null);
-      }
+        const sum = nums.reduce((a,b)=>a+b,0);
+        setSelStats({ count:nums.length, sum, avg:sum/nums.length, min:Math.min(...nums), max:Math.max(...nums) });
+      } else setSelStats(null);
     };
-    document.addEventListener("selectionchange", onSel);
-    return () => document.removeEventListener("selectionchange", onSel);
+    const onDown = (e) => {
+      if (e.button !== 0) return;
+      const t = e.target;
+      if (!(t instanceof Element) || t.closest(INTERACT) || !t.closest("table")) return;
+      d.pending = true; d.active = false; d.x0 = e.clientX; d.y0 = e.clientY;
+      setSelStats(null); setMarquee(null);
+    };
+    const onMove = (e) => {
+      if (!d.pending) return;
+      if (!d.active) {
+        if (Math.abs(e.clientX-d.x0) + Math.abs(e.clientY-d.y0) < 5) return;
+        d.active = true; document.body.style.userSelect = "none";
+      }
+      const x1 = e.clientX, y1 = e.clientY;
+      e.preventDefault();
+      if (d.raf) return;
+      d.raf = requestAnimationFrame(() => { d.raf = 0; compute(d.x0, d.y0, x1, y1); });
+    };
+    const onUp = () => {
+      if (d.active) d.suppressClick = true; // กันไม่ให้ปล่อยเมาส์แล้วไปกดโดนแถว/เซลล์
+      d.pending = false; d.active = false;
+      document.body.style.userSelect = "";
+      setMarquee(null);
+    };
+    const onClickCap = (e) => { if (d.suppressClick) { e.stopPropagation(); e.preventDefault(); d.suppressClick = false; } };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("click", onClickCap, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("click", onClickCap, true);
+    };
   }, []);
 
   const saveProjects = useCallback((list) => commit("tcs-projects", list, projects, setProjects, "รายชื่อโครงการ"), [commit, projects]);
@@ -958,6 +1020,10 @@ export default function App() {
   return (
     <>
       <style>{GLOBAL_CSS}</style>
+      {marquee && marquee.width > 2 && marquee.height > 2 && (
+        <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
+          background:"rgba(37,99,235,0.12)",border:"1.5px solid #2563eb",borderRadius:2,zIndex:97,pointerEvents:"none"}}/>
+      )}
       {selStats && (
         <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
           background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
@@ -2508,7 +2574,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Main table: เดิม + เพิ่มเดือนนี้ = รวมสะสม */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-        <div className="hscroll">
+        <div className="mscroll">
         <table style={{minWidth: isMultiCol ? "max-content" : "100%", width: isMultiCol ? "max-content" : "100%", borderCollapse:"collapse", fontSize:13}}>
           <thead>
             {isMultiCol ? (
@@ -2760,9 +2826,18 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
               </td>
               <td/>
-              <td colSpan={isMultiCol?columns.length:undefined} style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
-                {fmt(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0))}
-              </td>
+              {isMultiCol
+                ? columns.map(c => (
+                    <td key={c.id} style={{padding:"12px 12px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:12.5,whiteSpace:"nowrap"}}>
+                      {fmt(filtered.reduce((s,r)=> s + (parseFloat(draftAdd[`${r.code}:${c.id}`])||0), 0))}
+                    </td>
+                  ))
+                : (
+                    <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
+                      {fmt(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0))}
+                    </td>
+                  )
+              }
               <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0))}
