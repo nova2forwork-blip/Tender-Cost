@@ -1873,7 +1873,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // it isn't something you have to re-create month by month. Projects
   // created before this feature has no $columns and behave exactly as
   // before: one plain entry field per row.
-  const columns = additions.$columns || [];
+  // คอลัมน์ (รายการย่อย) เก็บ "ต่อเดือน" แล้ว → additions[month].$columns
+  // ของเก่าเคยเก็บระดับโปรเจกต์ (additions.$columns) ยัง fallback ให้เดือนที่ยัง
+  // ไม่มีของตัวเอง เพื่อไม่ให้ข้อมูลเดิมหาย พอเดือนไหนถูกบันทึกก็จะได้ชุดคอลัมน์
+  // เป็นของตัวเอง (self-contained)
+  const columnsOf = (m) => additions[m]?.$columns ?? additions.$columns ?? [];
+  const columns = draftAdd.$columns ?? columnsOf(month);
   const isMultiCol = columns.length > 0;
 
   // A month counts as "saved" (and therefore locked, requiring "แก้ไข" to
@@ -1901,7 +1906,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const kids = kidsAsOf(code, m);
     if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[m])?.[k.code])||0),0);
     const src  = draft || additions[m];
-    if (columns.length) return columns.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0);
+    const cols = draft ? columns : columnsOf(m);
+    if (cols.length) return cols.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0);
     return parseFloat(src?.[code]) || 0;
   };
 
@@ -1983,7 +1989,18 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       setMonth(newMonth); setNewMonth("");
       return;
     }
-    saveAdditions({ ...additions, [newMonth]: additions[newMonth] || {} });
+    // ถ้าเดือนล่าสุดมีคอลัมน์อยู่ ให้ถามก่อนว่าจะคัดลอกมาที่เดือนใหม่ไหม
+    const prevMonth = months.length ? months[months.length - 1] : null;
+    const prevCols = prevMonth ? columnsOf(prevMonth) : [];
+    const monthObj = {};
+    if (prevCols.length) {
+      if (window.confirm(`คัดลอกคอลัมน์จากเดือน ${monthShortLabel(prevMonth)} มาที่เดือนใหม่ไหม?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = คัดลอกคอลัมน์ (ยอดเริ่มที่ว่าง) · Cancel = เริ่มเดือนใหม่แบบไม่มีคอลัมน์`)) {
+        monthObj.$columns = prevCols.map(c => ({ ...c }));
+      } else {
+        monthObj.$columns = []; // เริ่มใหม่แบบไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
+      }
+    }
+    saveAdditions({ ...additions, [newMonth]: monthObj });
     setMonth(newMonth); setNewMonth("");
   };
 
@@ -2013,6 +2030,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       if(v!==""&&!isNaN(v)&&parseFloat(v)!==0) clean[k]=parseFloat(v);
     });
     clean.$saved = true;
+    const ownCols = draftAdd.$columns;
+    if (columns.length) clean.$columns = columns;
+    else if (Array.isArray(ownCols)) clean.$columns = []; // เดือนนี้ตั้งใจไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
     saveAdditions({ ...additions, [month]: clean });
     setForceEdit(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false);
     setSaved(true); setTimeout(()=>setSaved(false),2000);
@@ -2041,59 +2061,41 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     setDraftAdd(d => { const n = {...d}; delete n[code]; return n; });
   };
 
-  // Add a new named "เพิ่มรายการ" (sub-column) to the project. Because the
-  // column list lives at the project level, this one column now shows up in
-  // every month automatically — past ones and any created later — instead of
-  // having to be re-added month by month. On the very first column ever
-  // created, every month's existing plain-mode value is folded into an
-  // implicit "รายการหลัก" column first, so nothing already entered is lost.
+  // เพิ่ม "รายการ" (คอลัมน์ย่อย) เฉพาะเดือนที่กำลังดูอยู่ (ต่อเดือน ไม่ลามไปเดือนอื่น)
+  // ครั้งแรกที่สร้างคอลัมน์ในเดือนนี้ จะพับค่าที่กรอกแบบช่องเดียวเดิมของเดือนนี้เข้า
+  // เป็นคอลัมน์ "รายการหลัก" ก่อน เพื่อไม่ให้ค่าที่กรอกไว้หาย
   const handleAddColumn = () => {
     const name = newColName.trim();
     if (!name) return;
     const newCol = { id: uid(), name };
-    const nextAdditions = { ...additions };
-
+    const nextDraft = { ...draftAdd };
     if (columns.length === 0) {
-      const seedCol = { id:"legacy", name:"รายการหลัก" };
-      Object.keys(nextAdditions).forEach(mKey => {
-        if (mKey.startsWith("$")) return;
-        const src = mKey === month ? draftAdd : (nextAdditions[mKey] || {});
-        const monthObj = { ...(nextAdditions[mKey] || {}) };
-        allRows.forEach(r => {
-          const v = src[r.code];
-          if (v !== undefined && v !== "" && parseFloat(v)) monthObj[`${r.code}:legacy`] = v;
-        });
-        nextAdditions[mKey] = monthObj;
+      const seedCol = { id: "legacy", name: "รายการหลัก" };
+      allRows.forEach(r => {
+        const v = nextDraft[r.code];
+        if (v !== undefined && v !== "" && parseFloat(v)) nextDraft[`${r.code}:legacy`] = v;
       });
-      nextAdditions.$columns = [seedCol, newCol];
-      setDraftAdd(d => {
-        const n = { ...d };
-        allRows.forEach(r => { if (n[r.code]!==undefined && n[r.code]!=="") n[`${r.code}:legacy`] = n[r.code]; });
-        return n;
-      });
+      nextDraft.$columns = [seedCol, newCol];
     } else {
-      nextAdditions.$columns = [...columns, newCol];
+      nextDraft.$columns = [...columns, newCol];
     }
-    saveAdditions(nextAdditions);
+    setDraftAdd(nextDraft);
+    saveAdditions({ ...additions, [month]: { ...(additions[month] || {}), ...nextDraft } });
     setNewColName(""); setAddColOpen(false);
   };
 
-  // Removing a column removes it — and every month's entries under it —
-  // project-wide, since the column is shared across all months.
+  // ลบคอลัมน์ — เฉพาะเดือนนี้ (เดือนอื่นไม่กระทบ) ถ้าลบจนหมดจะกลับเป็นช่องเดียว
   const handleRemoveColumn = (colId) => {
-    if (!confirm("ลบรายการนี้? ค่าที่กรอกไว้ในรายการนี้จะถูกลบไปทุกเดือน")) return;
-    const nextCols = columns.filter(c=>c.id!==colId);
-    const nextAdditions = { ...additions };
-    if (nextCols.length) nextAdditions.$columns = nextCols; else delete nextAdditions.$columns;
-    Object.keys(nextAdditions).forEach(mKey => {
-      if (mKey.startsWith("$")) return;
-      const monthObj = { ...(nextAdditions[mKey] || {}) };
-      let changed = false;
-      Object.keys(monthObj).forEach(k => { if (k.endsWith(`:${colId}`)) { delete monthObj[k]; changed = true; } });
-      if (changed) nextAdditions[mKey] = monthObj;
-    });
-    saveAdditions(nextAdditions);
-    setDraftAdd(d => { const n = {...d}; Object.keys(n).forEach(k=>{ if(k.endsWith(`:${colId}`)) delete n[k]; }); return n; });
+    if (!confirm("ลบรายการนี้เฉพาะเดือนนี้? ค่าที่กรอกในรายการนี้ของเดือนนี้จะถูกลบ")) return;
+    const nextCols = columns.filter(c => c.id !== colId);
+    const nextDraft = { ...draftAdd };
+    Object.keys(nextDraft).forEach(k => { if (k.endsWith(`:${colId}`)) delete nextDraft[k]; });
+    nextDraft.$columns = nextCols;
+    setDraftAdd(nextDraft);
+    const monthObj = { ...(additions[month] || {}) };
+    Object.keys(monthObj).forEach(k => { if (k.endsWith(`:${colId}`)) delete monthObj[k]; });
+    monthObj.$columns = nextCols;
+    saveAdditions({ ...additions, [month]: monthObj });
   };
 
   return (
@@ -2234,7 +2236,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     <th key={c.id} style={{padding:"6px 12px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:10.5,borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:5}}>
                         <span>{c.name}</span>
-                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title="ลบรายการนี้ (ลบทุกเดือน)" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:11,padding:0}}>✕</button>}
+                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title="ลบรายการนี้ (เฉพาะเดือนนี้)" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:11,padding:0}}>✕</button>}
                       </div>
                     </th>
                   ))}
