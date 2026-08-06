@@ -789,13 +789,18 @@ export default function App() {
     if (list) setProjects(list);
   }, []);
 
+  // โหลดรายการโครงการ "หลังล็อกอินเสร็จ" — สำคัญมากตอนใช้ RLS: ถ้าอ่านก่อน
+  // Supabase แนบ token จะโดน DB ปฏิเสธแล้วขึ้น 0 โครงการ ทั้งที่มีสิทธิ์อ่าน
+  // ผูกกับ session ไว้ พอล็อกอินเสร็จ (session มีค่า) จะดึงข้อมูลใหม่อัตโนมัติ
   useEffect(() => {
+    if (!session) { setLoaded(true); return; }
     (async () => { await fetchProjects(); setLoaded(true); setSyncedAt(new Date()); })();
-  }, [fetchProjects]);
+  }, [fetchProjects, session]);
 
-  useEffect(() => { if (!activeId) return; fetchProjectData(activeId); }, [activeId, fetchProjectData]);
+  useEffect(() => { if (!activeId || !session) return; fetchProjectData(activeId); }, [activeId, fetchProjectData, session]);
 
   useEffect(() => {
+    if (!session) return; // subscribe realtime หลังล็อกอิน เพื่อให้ RLS ยอมส่ง event
     const channel = supabase.channel("kv_changes")
       .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, async (payload) => {
         const key = payload.new?.key || payload.old?.key || "";
@@ -805,7 +810,7 @@ export default function App() {
         setSyncedAt(new Date()); setSyncing(false);
       }).subscribe();
     return () => supabase.removeChannel(channel);
-  }, [activeId, fetchProjects, fetchProjectData]);
+  }, [activeId, fetchProjects, fetchProjectData, session]);
 
   const saveProjects = useCallback((list) => { setProjects(list); ss("tcs-projects", list).then(()=>setSyncedAt(new Date())); }, []);
   const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
