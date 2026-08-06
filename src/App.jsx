@@ -1740,6 +1740,16 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const editingUnlocked = !baselineSaved || forceEdit;
   useEffect(() => { setEditMode?.(editingUnlocked); return () => setEditMode?.(false); }, [editingUnlocked, setEditMode]);
 
+  // ยกเลิกการแก้ไข: ทิ้งค่าที่พิมพ์ค้าง คืนกลับเป็นค่าที่บันทึกไว้ล่าสุด แล้วล็อกกลับ
+  const canCancel = baselineSaved; // มีค่าที่บันทึกไว้ให้ย้อนกลับได้
+  const handleCancel = () => { setDraft({ ...tenderCosts }); setForceEdit(false); setAddOpen(false); setSubFor(null); };
+  useEffect(() => {
+    if (!editingUnlocked) return;
+    const onEsc = (e) => { if (e.key === "Escape" && canCancel) { e.preventDefault(); handleCancel(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [editingUnlocked, canCancel, tenderCosts]);
+
   // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
   // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
   // Shared with the Monthly tab — a sub-item added on either tab shows up on both.
@@ -1867,10 +1877,16 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
           </span>
         )}
         {editingUnlocked ? (
-          <button onClick={handleSave} className="btn-primary"
-            style={{background:saved?T.green:T.blue,minWidth:140}}>
-            {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
-          </button>
+          <>
+            <button onClick={handleSave} className="btn-primary"
+              style={{background:saved?T.green:T.blue,minWidth:140}}>
+              {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
+            </button>
+            {canCancel && (
+              <button onClick={handleCancel} className="btn-ghost" title="ยกเลิกการแก้ไข (Esc)"
+                style={{color:T.red,borderColor:T.red}}>✕ ยกเลิก</button>
+            )}
+          </>
         ) : (
           <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:140}}>
             ✏️ แก้ไข Tender Cost
@@ -2105,6 +2121,16 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const [monthEditMode, setMonthEditMode] = useState(false); // โหมดจัดการเดือน (เพิ่ม/ลบเดือน) แยกจากการแก้ค่าในตาราง
   useEffect(() => { setMonthEditMode(false); }, [month]);     // สลับเดือนแล้วปิดโหมดจัดการเดือน
   useEffect(() => { setEditMode?.(editingUnlocked || monthEditMode); return () => setEditMode?.(false); }, [editingUnlocked, monthEditMode, setEditMode]);
+
+  // ยกเลิกการแก้ไข: ทิ้งค่าที่พิมพ์ค้างของเดือนนี้ คืนเป็นค่าที่บันทึกไว้ แล้วล็อก/ออกจากโหมดจัดการเดือน
+  const canCancel = monthSaved;
+  const handleCancel = () => { setDraftAdd({ ...(additions[month] || {}) }); setForceEdit(false); setMonthEditMode(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false); };
+  useEffect(() => {
+    if (!editingUnlocked && !monthEditMode) return;
+    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); handleCancel(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [editingUnlocked, monthEditMode, month, additions]);
 
   // All rows = original 70 account codes + standalone extra items.
   // Sub-items (parentCode set) can be added right here for a monthly
@@ -2399,9 +2425,15 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           </span>
         )}
         {editingUnlocked ? (
-          <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
-            {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
-          </button>
+          <>
+            <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
+              {saved?"✓ บันทึกแล้ว":`บันทึกรายการเดือนนี้`}
+            </button>
+            {canCancel && (
+              <button onClick={handleCancel} className="btn-ghost" title="ยกเลิกการแก้ไข (Esc)"
+                style={{color:T.red,borderColor:T.red}}>✕ ยกเลิก</button>
+            )}
+          </>
         ) : (
           <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:170}}>
             ✏️ แก้ไขเดือนนี้
@@ -2743,6 +2775,13 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
 // Edit / Delete from the same place.
 function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session }) {
   const [historyOpen, setHistoryOpen] = useState(false);
+  // กด Esc = ปิด/ยกเลิกหน้ารายละเอียด
+  useEffect(() => {
+    if (!rawPo) return;
+    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); onClose?.(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [rawPo, onClose]);
   if (!rawPo) return null;
   const po = migratePO(rawPo);
   const items = po.items;
@@ -3103,6 +3142,13 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
   };
   const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
+  // กด Esc ระหว่างเปิดฟอร์มเพิ่ม/แก้ PO = ยกเลิก (ปิดฟอร์มโดยไม่บันทึก)
+  useEffect(() => {
+    if (view !== "add") return;
+    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); closeForm(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [view]);
 
   const filtered = poEntries.filter(p=>{
     const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
