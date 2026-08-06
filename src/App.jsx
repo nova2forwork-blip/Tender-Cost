@@ -539,9 +539,107 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}];
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
     moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length], theme, rowGroups:rowGroups2 });
-  XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน");
+  XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
+
+  // Sheet 3+ — แยกรายเดือน โดย breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น ๆ
+  // คอลัมน์เก็บเป็นรายเดือน แต่ละเดือนอาจมีชุดคอลัมน์ต่างกัน → ทำหนึ่งชีตต่อเดือน
+  const sheetName = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
+  const usedNames = {};
+  months.forEach((m) => {
+    const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
+    const hasCols = cols.length > 0;
+    const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+    const rows = [
+      [`เพิ่มรายเดือน ${monthShortLabel(m)} — ${project.name}`],
+      [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
+               : `Export: ${new Date().toLocaleDateString("th-TH")}`],
+      [],
+      ["Acc. Code", "Account Name", "Group", ...valLabels, "รวมเดือนนี้"],
+    ];
+    const dataStart = rows.length;
+    const colTotals = valLabels.map(() => 0);
+    let grand = 0;
+    const rowGroups = [];
+    accounts.forEach(a => {
+      const vals = hasCols
+        ? cols.map(c => parseFloat((additions[m] || {})[`${a.code}:${c.id}`]) || 0)
+        : [parseFloat((additions[m] || {})[a.code]) || 0];
+      const rowTotal = vals.reduce((s, v) => s + v, 0);
+      if (rowTotal <= 0) return; // เอาเฉพาะรายการที่มียอดในเดือนนี้
+      rows.push([a.code, a.name, a.group, ...vals, rowTotal]);
+      rowGroups.push(a.group);
+      vals.forEach((v, i) => { colTotals[i] += v; });
+      grand += rowTotal;
+    });
+    if (rows.length === dataStart) return; // เดือนนี้ไม่มีข้อมูล ข้ามชีต
+    const dataEnd = rows.length - 1;
+    rows.push(["", "TOTAL", "", ...colTotals, grand]);
+    const totalRow = rows.length - 1;
+    const numCols = 4 + valLabels.length;
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{ wch: 12 }, { wch: 34 }, { wch: 14 }, ...valLabels.map(() => ({ wch: 15 })), { wch: 16 }];
+    styleSheet(ws, {
+      numCols, subRows: [1], headerRow: 3, dataStart, dataEnd, totalRow,
+      moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length],
+      theme, rowGroups, groupDisplayCol: 2,
+    });
+    let nm = sheetName(monthShortLabel(m));
+    if (usedNames[nm]) { usedNames[nm] += 1; nm = sheetName(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
+    XLSX.utils.book_append_sheet(wb, ws, nm);
+  });
 
   XLSX.writeFile(wb, `QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// ─── QS: export เฉพาะเดือนที่เลือก (แยกคอลัมน์ของเดือนนั้น + ยอดสะสมถึงเดือนนี้) ──
+function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[], hiddenAccounts=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"2563EB", dark:"1D4ED8" };
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
+  const allMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const upto = allMonths.filter(m => m <= month);
+  const cols = (additions[month] && additions[month].$columns) || additions.$columns || [];
+  const hasCols = cols.length > 0;
+  const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+
+  const rows = [
+    [`เพิ่มรายเดือน ${monthShortLabel(month)} — ${project.name}`],
+    [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
+             : `Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [],
+    ["Acc. Code", "Account Name", "Group", "ราคาเดิม", ...valLabels, "รวมเดือนนี้", "รวมสะสมถึงเดือนนี้"],
+  ];
+  const dataStart = rows.length;
+  const colTotals = valLabels.map(() => 0);
+  let gBase = 0, gMonth = 0, gCum = 0;
+  const rowGroups = [];
+  accounts.forEach(a => {
+    const baseline = parseFloat(tenderCosts[a.code]) || 0;
+    const vals = hasCols
+      ? cols.map(c => parseFloat((additions[month] || {})[`${a.code}:${c.id}`]) || 0)
+      : [parseFloat((additions[month] || {})[a.code]) || 0];
+    const monthTot = vals.reduce((s, v) => s + v, 0);
+    const cum = baseline + upto.reduce((s, m) => s + (parseFloat((additions[m] || {})[a.code]) || 0), 0);
+    if (monthTot <= 0 && baseline <= 0 && cum <= 0) return;
+    rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum]);
+    rowGroups.push(a.group);
+    vals.forEach((v, i) => { colTotals[i] += v; });
+    gBase += baseline; gMonth += monthTot; gCum += cum;
+  });
+  const dataEnd = rows.length - 1;
+  rows.push(["", "TOTAL", "", gBase, ...colTotals, gMonth, gCum]);
+  const totalRow = rows.length - 1;
+  const numCols = 6 + valLabels.length;
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }];
+  styleSheet(ws, {
+    numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
+    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length],
+    theme, rowGroups, groupDisplayCol: 2,
+  });
+  XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
+  XLSX.writeFile(wb, `QS_${clean(monthShortLabel(month)).replace(/[^\dA-Za-zก-๙]/g,"")}_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // ─── Procurement: PO tracking export ───────────────────────────────────────
@@ -842,7 +940,7 @@ export default function App() {
   const editModeRef = useRef(false); editModeRef.current = editMode;
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
-  const dragRef = useRef({ pending:false, active:false, x0:0, y0:0, raf:0, suppressClick:false });
+  const dragRef = useRef({ pending:false, active:false, ax:0, ay:0, lastX:0, lastY:0, raf:0, scrollRAF:0, scrollEl:null, suppressClick:false });
   const hiliteRef = useRef([]); // ช่องที่กำลังไฮไลต์ (ไว้คืนค่าเดิมตอนล้าง)
   currentRef.current = {
     "tcs-projects": projects,
@@ -906,13 +1004,22 @@ export default function App() {
     const INTERACT = 'input,textarea,select,button,a,[contenteditable="true"]';
     const NUM_RE = /^-?\d[\d,]*\.\d+$/;
     const HL = "rgba(37,99,235,0.20)";
+    const EDGE = 46, SPEED = 24;
     const clearHilite = () => { hiliteRef.current.forEach(({el,prev}) => { el.style.backgroundColor = prev; }); hiliteRef.current = []; };
-    const compute = (x0, y0, x1, y1) => {
-      const box = { left:Math.min(x0,x1), top:Math.min(y0,y1), right:Math.max(x0,x1), bottom:Math.max(y0,y1) };
+    // getScroll: ตำแหน่ง/สเกลของตัวเลื่อน (กล่อง .mscroll ถ้ามี, ไม่งั้นใช้ทั้งหน้าต่าง)
+    const getScroll = () => d.scrollEl
+      ? (() => { const r = d.scrollEl.getBoundingClientRect(); return { x:d.scrollEl.scrollLeft, y:d.scrollEl.scrollTop, ox:r.left, oy:r.top }; })()
+      : { x:window.scrollX, y:window.scrollY, ox:0, oy:0 };
+    const compute = () => {
+      const s = getScroll();
+      // จุดปัจจุบันในพิกัด "เนื้อหา" (คงที่แม้เลื่อน) แล้วทำกรอบเทียบกับ anchor
+      const cx = d.lastX - s.ox + s.x, cy = d.lastY - s.oy + s.y;
+      const cb = { left:Math.min(d.ax,cx), top:Math.min(d.ay,cy), right:Math.max(d.ax,cx), bottom:Math.max(d.ay,cy) };
+      // แปลงกลับเป็นพิกัดจอ (client) ตาม scroll ปัจจุบัน — anchor จึงยึดติดเซลล์เดิม
+      const box = { left:cb.left - s.x + s.ox, top:cb.top - s.y + s.oy, right:cb.right - s.x + s.ox, bottom:cb.bottom - s.y + s.oy };
       setMarquee({ left:box.left, top:box.top, width:box.right-box.left, height:box.bottom-box.top });
       clearHilite();
-      const nums = [];
-      const cells = new Set();
+      const nums = []; const cells = new Set();
       document.querySelectorAll("table").forEach((tbl) => {
         const walker = document.createTreeWalker(tbl, NodeFilter.SHOW_TEXT, {
           acceptNode(n){ return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; },
@@ -928,33 +1035,61 @@ export default function App() {
           }
         }
       });
-      // ไฮไลต์ช่องที่ถูกนับ (td ในตารางไม่ได้ตั้ง background ใน JSX → React ไม่ล้างทับ)
       cells.forEach((td) => { hiliteRef.current.push({ el:td, prev:td.style.backgroundColor }); td.style.backgroundColor = HL; });
       if (nums.length >= 2) {
         const sum = nums.reduce((a,b)=>a+b,0);
         setSelStats({ count:nums.length, sum, avg:sum/nums.length, min:Math.min(...nums), max:Math.max(...nums) });
       } else { setSelStats(null); }
     };
+    // เลื่อนตารางอัตโนมัติเมื่อลากชนขอบ (จะได้ลากทั้งแถวที่คอลัมน์เยอะได้)
+    const autoScroll = () => {
+      if (!d.active) { d.scrollRAF = 0; return; }
+      let moved = false;
+      const el = d.scrollEl;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (d.lastX > r.right - EDGE && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) { el.scrollLeft += SPEED; moved = true; }
+        else if (d.lastX < r.left + EDGE && el.scrollLeft > 0) { el.scrollLeft -= SPEED; moved = true; }
+        if (d.lastY > r.bottom - EDGE && el.scrollTop + el.clientHeight < el.scrollHeight - 1) { el.scrollTop += SPEED; moved = true; }
+        else if (d.lastY < r.top + EDGE && el.scrollTop > 0) { el.scrollTop -= SPEED; moved = true; }
+      } else {
+        if (d.lastY > window.innerHeight - EDGE) { window.scrollBy(0, SPEED); moved = true; }
+        else if (d.lastY < EDGE) { window.scrollBy(0, -SPEED); moved = true; }
+      }
+      if (moved) { compute(); d.scrollRAF = requestAnimationFrame(autoScroll); }
+      else d.scrollRAF = 0;
+    };
+    const nearEdge = () => {
+      const el = d.scrollEl;
+      if (el) { const r = el.getBoundingClientRect(); return d.lastX > r.right-EDGE || d.lastX < r.left+EDGE || d.lastY > r.bottom-EDGE || d.lastY < r.top+EDGE; }
+      return d.lastY > window.innerHeight-EDGE || d.lastY < EDGE;
+    };
     const onDown = (e) => {
-      clearHilite(); setSelStats(null); setMarquee(null); // คลิกที่ไหนก็ล้างไฮไลต์เดิมก่อน
+      clearHilite(); setSelStats(null); setMarquee(null); // คลิกที่ไหนก็ล้างไฮไลต์เดิม
       if (e.button !== 0) return;
       const t = e.target;
       if (!(t instanceof Element) || t.closest(INTERACT) || !t.closest("table")) return;
-      d.pending = true; d.active = false; d.x0 = e.clientX; d.y0 = e.clientY;
+      d.scrollEl = t.closest(".mscroll") || t.closest(".hscroll") || null;
+      const s = getScroll();
+      d.ax = e.clientX - s.ox + s.x; d.ay = e.clientY - s.oy + s.y; // anchor ในพิกัดเนื้อหา
+      d.pending = true; d.active = false; d.lastX = e.clientX; d.lastY = e.clientY;
     };
     const onMove = (e) => {
       if (!d.pending) return;
       if (!d.active) {
-        if (Math.abs(e.clientX-d.x0) + Math.abs(e.clientY-d.y0) < 5) return;
+        // d.lastX/Y ยังเป็นตำแหน่งตอน mousedown — ขยับเกิน 5px ถึงเริ่มลากเลือกจริง
+        if (Math.abs(e.clientX - d.lastX) + Math.abs(e.clientY - d.lastY) < 5) return;
         d.active = true; document.body.style.userSelect = "none";
       }
-      const x1 = e.clientX, y1 = e.clientY;
+      d.lastX = e.clientX; d.lastY = e.clientY;
       e.preventDefault();
-      if (d.raf) return;
-      d.raf = requestAnimationFrame(() => { d.raf = 0; compute(d.x0, d.y0, x1, y1); });
+      if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; compute(); });
+      if (nearEdge() && !d.scrollRAF) d.scrollRAF = requestAnimationFrame(autoScroll);
     };
     const onUp = () => {
-      if (d.active) d.suppressClick = true; // กันไม่ให้ปล่อยเมาส์แล้วไปกดโดนแถว/เซลล์ (คงไฮไลต์ไว้)
+      if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
+      if (d.scrollRAF) { cancelAnimationFrame(d.scrollRAF); d.scrollRAF = 0; }
+      if (d.active) d.suppressClick = true; // คงไฮไลต์ไว้ กันคลิกโดนแถว/เซลล์หลังปล่อยเมาส์
       d.pending = false; d.active = false;
       document.body.style.userSelect = "";
       setMarquee(null);
@@ -1828,7 +1963,7 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
                          hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
                          extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
-                         hiddenAccounts={hiddenAccounts} setEditMode={setEditMode} />}
+                         hiddenAccounts={hiddenAccounts} setEditMode={setEditMode} project={project} />}
     </Shell>
   );
 }
@@ -2191,7 +2326,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
-function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode }) {
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project }) {
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
@@ -2516,6 +2651,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           style={{flexShrink:0,alignSelf:"flex-start",padding:"9px 14px",borderRadius:10,border:`1.5px solid ${monthEditMode?T.blue:T.cardBorder}`,
             background:monthEditMode?T.blue:T.card,color:monthEditMode?"#fff":T.textSecondary,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
           {monthEditMode?"✓ เสร็จ":"✏️ จัดการเดือน"}
+        </button>
+        <button onClick={()=>exportQSMonthExcel(project, tenderCosts, additions, month, extraItems, hiddenAccounts)}
+          title={`Export เฉพาะเดือน ${monthShortLabel(month)}`}
+          style={{flexShrink:0,alignSelf:"flex-start",padding:"9px 14px",borderRadius:10,border:`1.5px solid ${T.green}`,
+            background:T.card,color:T.green,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
+          ⬇️ Export เดือนนี้
         </button>
       </div>
 
