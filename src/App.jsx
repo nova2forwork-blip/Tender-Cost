@@ -2444,6 +2444,44 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   );
 }
 
+// ─── Money input ────────────────────────────────────────────────────────────
+// ช่องกรอกยอดเงินที่ (1) โชว์ , คั่นหลักพันให้อ่านง่าย และ (2) พิมพ์บวก/ลบได้
+// เช่น "20000+10000" แล้วกด Enter → รวมเป็น 30,000 ให้อัตโนมัติ
+// เก็บค่าเป็นตัวเลขล้วน (string ไม่มี ,) ไว้เบื้องหลัง โค้ดส่วนอื่นใช้ parseFloat ได้ตามเดิม
+const evalMoney = (expr) => {
+  const cleaned = String(expr ?? "").replace(/[,\s]/g, "");
+  if (!cleaned) return "";
+  const terms = cleaned.match(/[+-]?\d*\.?\d+/g);
+  if (!terms) return "";
+  const sum = terms.reduce((s, t) => s + (parseFloat(t) || 0), 0);
+  return isNaN(sum) ? "" : String(sum);
+};
+const fmtMoneyInput = (v) => {
+  if (v === "" || v == null || isNaN(Number(v))) return "";
+  return Number(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
+};
+function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style }) {
+  const [focused, setFocused] = useState(false);
+  const [text, setText] = useState("");
+  const commit = () => { onChange(evalMoney(text)); setFocused(false); };
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      className={className}
+      disabled={disabled}
+      placeholder={placeholder}
+      style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", ...(style || {}) }}
+      value={focused ? text : fmtMoneyInput(value)}
+      onFocus={() => { setFocused(true); setText(value != null && value !== "" ? String(value) : ""); }}
+      onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s]/g, ""))}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); e.currentTarget.blur(); } }}
+      onBlur={commit}
+      title="พิมพ์บวก/ลบได้ เช่น 20000+10000 แล้วกด Enter เพื่อรวมยอด"
+    />
+  );
+}
+
 // ─── Procurement: PO Detail Modal ──────────────────────────────────────────────
 // Read-only detail view opened by clicking any PO row. Lets the user confirm
 // exactly what was entered without hunting through a wide table, and offers
@@ -2564,8 +2602,8 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>ของเข้าจริง (จำนวน)</span>
-                          <input type="number" placeholder="ยังไม่เข้า" value={r.actualAmount} disabled={locked}
-                            onChange={e=>updateRound(it.id,r.id,"actualAmount",e.target.value)} className="input-base"/>
+                          <MoneyInput value={r.actualAmount} disabled={locked} placeholder="ยังไม่เข้า"
+                            onChange={v=>updateRound(it.id,r.id,"actualAmount",v)}/>
                         </label>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>วันของเข้าจริง</span>
@@ -2914,7 +2952,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                   const cumPct = net>0 ? Math.round((prevOrdered+amt)/net*100) : 0;
                   return (
                   <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:10}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:12}}>
                       <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
                         <option value="">— เลือก Account Code —</option>
                         {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
@@ -2922,36 +2960,41 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                       <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
                         style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
                     </div>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:8}}>
-                      <div style={{background:T.card,borderRadius:8,padding:"6px 10px"}}>
-                        <div style={{fontSize:10,color:T.textMuted}}>งบโครงการ</div>
-                        <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(budget)}</div>
-                      </div>
-                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                        <span style={{fontSize:10,color:T.textSecondary}}>มีใน store</span>
-                        <input type="number" placeholder="0" value={it.store} onChange={e=>updateItemRow(it.id,"store",e.target.value)} className="input-base"/>
+                    {/* แถวบน: งบ (อ่านอย่างเดียว) · store · ต้องสั่งสุทธิ (อ่านอย่างเดียว) */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>งบโครงการ</span>
+                        <input className="input-base" readOnly tabIndex={-1} value={fmtMoneyInput(budget)}
+                          style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:T.card,color:T.textPrimary}}/>
                       </label>
-                      <div style={{background:T.amberBg,borderRadius:8,padding:"6px 10px"}}>
-                        <div style={{fontSize:10,color:T.amber}}>ต้องสั่งสุทธิ</div>
-                        <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.amber}}>{fmt(net)}</div>
-                      </div>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>มีใน store</span>
+                        <MoneyInput value={it.store} onChange={v=>updateItemRow(it.id,"store",v)}/>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.amber,fontWeight:500}}>ต้องสั่งสุทธิ</span>
+                        <input className="input-base" readOnly tabIndex={-1} value={fmtMoneyInput(net)}
+                          style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:T.amberBg,color:T.amber,borderColor:"transparent"}}/>
+                      </label>
                     </div>
-                    <div style={{display:"grid",gridTemplateColumns:"1.5fr 1fr 1fr",gap:8,alignItems:"end"}}>
-                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                        <span style={{fontSize:10,color:T.textSecondary}}>มูลค่า PO นี้ (THB)</span>
-                        <input type="number" placeholder="0" value={it.amount} onChange={e=>setItemAmount(it.id,e.target.value)} className="input-base"/>
+                    {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>มูลค่า PO นี้ (THB)</span>
+                        <MoneyInput value={it.amount} onChange={v=>setItemAmount(it.id,v)}/>
                       </label>
-                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                        <span style={{fontSize:10,color:T.textSecondary}}>% ของยอดสั่ง</span>
-                        <input type="number" placeholder="0" value={net>0 && amt ? pct : ""} onChange={e=>setItemPct(it.id,e.target.value)} className="input-base"/>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>% ของยอดสั่ง</span>
+                        <input type="number" placeholder="0" value={net>0 && amt ? pct : ""} onChange={e=>setItemPct(it.id,e.target.value)}
+                          className="input-base" style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}/>
                       </label>
-                      <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                        <span style={{fontSize:10,color:T.textSecondary}}>แผนของเข้า (งวดแรก)</span>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>แผนของเข้า (งวดแรก)</span>
                         <input type="date" value={it.rounds?.[0]?.planDate||""} onChange={e=>updateItemPlan(it.id,"planDate",e.target.value)} className="input-base"/>
                       </label>
                     </div>
                     {it.code && net>0 && amt>0 && (
-                      <div style={{marginTop:8,fontSize:11,color:T.textSecondary}}>
+                      <div style={{marginTop:10,fontSize:11,color:T.textSecondary}}>
                         สั่งสะสมกับ PO นี้รวม <b style={{color:cumPct>100?T.red:T.textPrimary}}>{cumPct}%</b> ของยอดสั่งสุทธิ · <span style={{color:T.textMuted}}>= {budget>0?Math.round(amt/budget*100):0}% ของงบรวม</span>
                       </div>
                     )}
