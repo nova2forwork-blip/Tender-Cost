@@ -1761,8 +1761,8 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                           {fmt(rowVal)}
                         </div>
                       ) : editingUnlocked ? (
-                        <input type="number" value={draft[a.code]??""} onChange={e=>setDraft(d=>({...d,[a.code]:e.target.value}))} onClick={e=>e.stopPropagation()}
-                          placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:draft[a.code]>0?T.blueLight:T.bg}}/>
+                        <MoneyInput value={draft[a.code]??""} onChange={v=>setDraft(d=>({...d,[a.code]:v}))}
+                          style={{width:160,background:(parseFloat(draft[a.code])||0)>0?T.blueLight:T.bg}}/>
                       ) : (
                         <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}</div>
                       )}
@@ -1791,8 +1791,8 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
                       </td>
                       <td style={{padding:"6px 16px",textAlign:"right"}}>
                         {editingUnlocked ? (
-                          <input type="number" value={draft[k.code]??""} onChange={e=>setDraft(d=>({...d,[k.code]:e.target.value}))}
-                            placeholder="0.00" className="input-base" style={{width:160,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:draft[k.code]>0?T.greenBg:T.bg}}/>
+                          <MoneyInput value={draft[k.code]??""} onChange={v=>setDraft(d=>({...d,[k.code]:v}))}
+                            style={{width:160,fontSize:12,background:(parseFloat(draft[k.code])||0)>0?T.greenBg:T.bg}}/>
                         ) : (
                           <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}</div>
                         )}
@@ -1843,7 +1843,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts }) {
   const thisMonth = new Date().toISOString().slice(0,7);
-  const months = Object.keys(additions).sort();
+  const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
   const [newMonth, setNewMonth] = useState("");
   const [filter, setFilter] = useState("All");
@@ -1976,9 +1976,28 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   })();
 
   const handleAddMonth = () => {
-    if (!newMonth || months.includes(newMonth)) return;
+    if (!newMonth) return;
+    if (months.includes(newMonth)) {
+      // ห้ามซ้ำ — ถ้ามีเดือนนี้อยู่แล้ว แค่กระโดดไปที่เดือนนั้นแทนการสร้างซ้ำ
+      alert(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`);
+      setMonth(newMonth); setNewMonth("");
+      return;
+    }
     saveAdditions({ ...additions, [newMonth]: additions[newMonth] || {} });
     setMonth(newMonth); setNewMonth("");
+  };
+
+  // ลบเดือน — เอาข้อมูลที่เพิ่มในเดือนนั้นออกทั้งหมด (คีย์ meta อย่าง $columns
+  // ที่เป็นระดับโปรเจกต์ไม่ถูกแตะ) แล้วถ้าลบเดือนที่กำลังดูอยู่ก็ย้ายไปเดือนอื่น
+  const handleDeleteMonth = (m) => {
+    if (!window.confirm(`ลบเดือน ${monthShortLabel(m)} และข้อมูลที่เพิ่มในเดือนนี้ทั้งหมด?\n(ราคาเดิม/Baseline ไม่ได้รับผลกระทบ)`)) return;
+    const next = { ...additions };
+    delete next[m];
+    saveAdditions(next);
+    if (month === m) {
+      const remaining = Object.keys(next).filter(k=>!k.startsWith("$")).sort();
+      setMonth(remaining.length ? remaining[remaining.length-1] : thisMonth);
+    }
   };
 
   const handleSave = () => {
@@ -2103,14 +2122,20 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         {sortedMonths.map(m=>{
           const active = m===month;
           const add = monthTotalLive(m);
+          const exists = months.includes(m); // เดือนที่มีจริง (ไม่ใช่ default เปล่า) ถึงลบได้
           return (
-            <button key={m} onClick={()=>setMonth(m)}
-              style={{flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
+            <div key={m} onClick={()=>setMonth(m)}
+              style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
                 background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
               <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{monthShortLabel(m)}</div>
               <div style={{fontSize:15,fontWeight:700,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
               <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} เดือนนี้</div>
-            </button>
+              {exists && (
+                <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title="ลบเดือนนี้"
+                  style={{position:"absolute",top:5,right:5,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
+                    background:active?"rgba(255,255,255,0.18)":T.bg,color:active?"#fff":T.textMuted,cursor:"pointer",fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+              )}
+            </div>
           );
         })}
         <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.cardBorder}`}}>
@@ -2316,8 +2341,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         return (
                           <td key={c.id} style={{padding:"8px 10px",textAlign:"right"}}>
                             {editingUnlocked ? (
-                              <input type="number" value={draftAdd[ck]??""} onChange={e=>setDraftAdd(d=>({...d,[ck]:e.target.value}))} onClick={e=>e.stopPropagation()}
-                                placeholder="0.00" className="input-base" style={{width:104,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:cv!==0?T.amberBg:T.bg}}/>
+                              <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
+                                style={{width:104,fontSize:12,background:cv!==0?T.amberBg:T.bg}}/>
                             ) : (
                               <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:cv!==0?T.textPrimary:T.textMuted}}>{fmt(cv)}</div>
                             )}
@@ -2331,8 +2356,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             {fmt(thisVal)}
                           </div>
                         ) : editingUnlocked ? (
-                          <input type="number" value={draftAdd[r.code]??""} onChange={e=>setDraftAdd(d=>({...d,[r.code]:e.target.value}))} onClick={e=>e.stopPropagation()}
-                            placeholder="0.00" className="input-base" style={{width:130,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:thisVal!==0?T.amberBg:T.bg}}/>
+                          <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
+                            style={{width:130,background:thisVal!==0?T.amberBg:T.bg}}/>
                         ) : (
                           <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:thisVal!==0?T.textPrimary:T.textMuted}}>{fmt(thisVal)}</div>
                         )}
@@ -2380,8 +2405,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                         <td style={{padding:"7px 16px",textAlign:"right"}}>
                           {editingUnlocked ? (
-                            <input type="number" value={draftAdd[k.code]??""} onChange={e=>setDraftAdd(d=>({...d,[k.code]:e.target.value}))}
-                              placeholder="0.00" className="input-base" style={{width:130,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12.5,background:kThisVal!==0?T.greenBg:T.bg}}/>
+                            <MoneyInput value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
+                              style={{width:130,fontSize:12.5,background:kThisVal!==0?T.greenBg:T.bg}}/>
                           ) : (
                             <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12.5,color:kThisVal!==0?T.textPrimary:T.textMuted}}>{fmt(kThisVal)}</div>
                           )}
@@ -2474,6 +2499,7 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
       style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", ...(style || {}) }}
       value={focused ? text : fmtMoneyInput(value)}
       onFocus={() => { setFocused(true); setText(value != null && value !== "" ? String(value) : ""); }}
+      onClick={(e) => e.stopPropagation()}
       onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s]/g, ""))}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); e.currentTarget.blur(); } }}
       onBlur={commit}
