@@ -843,6 +843,7 @@ export default function App() {
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
   const dragRef = useRef({ pending:false, active:false, x0:0, y0:0, raf:0, suppressClick:false });
+  const hiliteRef = useRef([]); // ช่องที่กำลังไฮไลต์ (ไว้คืนค่าเดิมตอนล้าง)
   currentRef.current = {
     "tcs-projects": projects,
     [`tcs-tenders-${activeId}`]: tenderCosts,
@@ -904,10 +905,14 @@ export default function App() {
     const d = dragRef.current;
     const INTERACT = 'input,textarea,select,button,a,[contenteditable="true"]';
     const NUM_RE = /^-?\d[\d,]*\.\d+$/;
+    const HL = "rgba(37,99,235,0.20)";
+    const clearHilite = () => { hiliteRef.current.forEach(({el,prev}) => { el.style.backgroundColor = prev; }); hiliteRef.current = []; };
     const compute = (x0, y0, x1, y1) => {
       const box = { left:Math.min(x0,x1), top:Math.min(y0,y1), right:Math.max(x0,x1), bottom:Math.max(y0,y1) };
       setMarquee({ left:box.left, top:box.top, width:box.right-box.left, height:box.bottom-box.top });
+      clearHilite();
       const nums = [];
+      const cells = new Set();
       document.querySelectorAll("table").forEach((tbl) => {
         const walker = document.createTreeWalker(tbl, NodeFilter.SHOW_TEXT, {
           acceptNode(n){ return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; },
@@ -919,21 +924,23 @@ export default function App() {
           if (r.width === 0 && r.height === 0) continue;
           if (r.right >= box.left && r.left <= box.right && r.bottom >= box.top && r.top <= box.bottom) {
             const v = parseFloat(node.nodeValue.trim().replace(/,/g, ""));
-            if (!isNaN(v)) nums.push(v);
+            if (!isNaN(v)) { nums.push(v); const td = node.parentElement && node.parentElement.closest("td"); if (td) cells.add(td); }
           }
         }
       });
+      // ไฮไลต์ช่องที่ถูกนับ (td ในตารางไม่ได้ตั้ง background ใน JSX → React ไม่ล้างทับ)
+      cells.forEach((td) => { hiliteRef.current.push({ el:td, prev:td.style.backgroundColor }); td.style.backgroundColor = HL; });
       if (nums.length >= 2) {
         const sum = nums.reduce((a,b)=>a+b,0);
         setSelStats({ count:nums.length, sum, avg:sum/nums.length, min:Math.min(...nums), max:Math.max(...nums) });
-      } else setSelStats(null);
+      } else { setSelStats(null); }
     };
     const onDown = (e) => {
+      clearHilite(); setSelStats(null); setMarquee(null); // คลิกที่ไหนก็ล้างไฮไลต์เดิมก่อน
       if (e.button !== 0) return;
       const t = e.target;
       if (!(t instanceof Element) || t.closest(INTERACT) || !t.closest("table")) return;
       d.pending = true; d.active = false; d.x0 = e.clientX; d.y0 = e.clientY;
-      setSelStats(null); setMarquee(null);
     };
     const onMove = (e) => {
       if (!d.pending) return;
@@ -947,7 +954,7 @@ export default function App() {
       d.raf = requestAnimationFrame(() => { d.raf = 0; compute(d.x0, d.y0, x1, y1); });
     };
     const onUp = () => {
-      if (d.active) d.suppressClick = true; // กันไม่ให้ปล่อยเมาส์แล้วไปกดโดนแถว/เซลล์
+      if (d.active) d.suppressClick = true; // กันไม่ให้ปล่อยเมาส์แล้วไปกดโดนแถว/เซลล์ (คงไฮไลต์ไว้)
       d.pending = false; d.active = false;
       document.body.style.userSelect = "";
       setMarquee(null);
@@ -962,6 +969,7 @@ export default function App() {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.removeEventListener("click", onClickCap, true);
+      clearHilite();
     };
   }, []);
 
