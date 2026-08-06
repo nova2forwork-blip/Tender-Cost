@@ -812,12 +812,76 @@ export default function App() {
     return () => supabase.removeChannel(channel);
   }, [activeId, fetchProjects, fetchProjectData, session]);
 
-  const saveProjects = useCallback((list) => { setProjects(list); ss("tcs-projects", list).then(()=>setSyncedAt(new Date())); }, []);
-  const saveTenders  = useCallback((t)    => { setTCosts(t);      ss(`tcs-tenders-${activeId}`, t).then(()=>setSyncedAt(new Date())); }, [activeId]);
-  const saveAdditions= useCallback((a)    => { setAdditions(a);   ss(`tcs-additions-${activeId}`, a).then(()=>setSyncedAt(new Date())); }, [activeId]);
-  const saveExtraItems=useCallback((ex)   => { setExtraItems(ex); ss(`tcs-extra-${activeId}`, ex).then(()=>setSyncedAt(new Date())); }, [activeId]);
-  const saveHiddenAccounts=useCallback((h)=> { setHiddenAccounts(h); ss(`tcs-hidden-${activeId}`, h).then(()=>setSyncedAt(new Date())); }, [activeId]);
-  const savePO       = useCallback((po)   => { setPO(po);         ss(`tcs-po-${activeId}`, po).then(()=>setSyncedAt(new Date())); }, [activeId]);
+  // ─── Undo / Redo ───────────────────────────────────────────────────────────
+  // ทุกการบันทึกวิ่งผ่าน commit() ซึ่งจดค่าเดิมไว้ก่อนเขียนทับ → กด Ctrl+Z หรือ
+  // ปุ่มย้อนกลับ เพื่อคืนค่าเดิมได้ทุกอย่าง (ลบข้อมูล/ลบคอลัมน์/ลบแถว/แก้ตัวเลข/
+  // เพิ่มรายการ ฯลฯ) เก็บได้หลายขั้น (สูงสุด 60) และทำซ้ำ (redo) ได้
+  const undoRef = useRef([]);
+  const redoRef = useRef([]);
+  const currentRef = useRef({});
+  const [undoInfo, setUndoInfo] = useState({ u: 0, r: 0, label: "" });
+  const [editMode, setEditMode] = useState(false); // true เมื่ออยู่ในโหมดแก้ไข — undo/Ctrl+Z ใช้ได้เฉพาะตอนนี้
+  const editModeRef = useRef(false); editModeRef.current = editMode;
+  currentRef.current = {
+    "tcs-projects": projects,
+    [`tcs-tenders-${activeId}`]: tenderCosts,
+    [`tcs-additions-${activeId}`]: additions,
+    [`tcs-po-${activeId}`]: poEntries,
+    [`tcs-extra-${activeId}`]: extraItems,
+    [`tcs-hidden-${activeId}`]: hiddenAccounts,
+  };
+  const syncUndo = () => setUndoInfo({
+    u: undoRef.current.length, r: redoRef.current.length,
+    label: undoRef.current.length ? undoRef.current[undoRef.current.length - 1].label : "",
+  });
+  const commit = useCallback((key, next, prev, setState, label) => {
+    undoRef.current.push({ key, value: prev, setState, label });
+    if (undoRef.current.length > 60) undoRef.current.shift();
+    redoRef.current = []; // มีการแก้ใหม่ → ล้าง redo
+    setState(next);
+    ss(key, next).then(() => setSyncedAt(new Date()));
+    syncUndo();
+  }, []);
+  const undo = useCallback(() => {
+    const e = undoRef.current.pop();
+    if (!e) return;
+    redoRef.current.push({ key: e.key, value: currentRef.current[e.key], setState: e.setState, label: e.label });
+    e.setState(e.value);
+    ss(e.key, e.value).then(() => setSyncedAt(new Date()));
+    syncUndo();
+  }, []);
+  const redo = useCallback(() => {
+    const e = redoRef.current.pop();
+    if (!e) return;
+    undoRef.current.push({ key: e.key, value: currentRef.current[e.key], setState: e.setState, label: e.label });
+    e.setState(e.value);
+    ss(e.key, e.value).then(() => setSyncedAt(new Date()));
+    syncUndo();
+  }, []);
+  // เปลี่ยนโครงการ → ล้างประวัติ undo (กันย้อนข้ามโครงการ)
+  useEffect(() => { undoRef.current = []; redoRef.current = []; syncUndo(); }, [activeId]);
+  // คีย์ลัด: Ctrl/Cmd+Z = ย้อนกลับ · Ctrl+Shift+Z หรือ Ctrl+Y = ทำซ้ำ
+  // ไม่ดักถ้ากำลังพิมพ์อยู่ในช่องกรอก (ปล่อยให้ undo ของข้อความทำงานตามปกติ)
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (!editModeRef.current) return; // ใช้ได้เฉพาะตอนอยู่ในโหมดแก้ไข
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = (e.key || "").toLowerCase();
+      if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); redo(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
+
+  const saveProjects = useCallback((list) => commit("tcs-projects", list, projects, setProjects, "รายชื่อโครงการ"), [commit, projects]);
+  const saveTenders  = useCallback((t)    => commit(`tcs-tenders-${activeId}`, t, tenderCosts, setTCosts, "ราคาเดิม (Baseline)"), [commit, activeId, tenderCosts]);
+  const saveAdditions= useCallback((a)    => commit(`tcs-additions-${activeId}`, a, additions, setAdditions, "ยอดเพิ่มรายเดือน"), [commit, activeId, additions]);
+  const saveExtraItems=useCallback((ex)   => commit(`tcs-extra-${activeId}`, ex, extraItems, setExtraItems, "รายการ/แถว"), [commit, activeId, extraItems]);
+  const saveHiddenAccounts=useCallback((h)=> commit(`tcs-hidden-${activeId}`, h, hiddenAccounts, setHiddenAccounts, "การซ่อนหมวด"), [commit, activeId, hiddenAccounts]);
+  const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, "PO / จัดซื้อ"), [commit, activeId, poEntries]);
 
   const openProject = (id) => {
     setActiveId(id);
@@ -825,8 +889,11 @@ export default function App() {
     else { setRole(session?.role); setScreen("app"); }
   };
   const deleteProject = async (id) => {
-    if (!confirm("ลบโครงการนี้? ข้อมูลทั้งหมดจะหายถาวร")) return;
-    saveProjects(projects.filter(p => p.id !== id));
+    if (!confirm("ลบโครงการนี้? (กู้คืนได้จากหน้า Admin → กู้คืนข้อมูล)")) return;
+    // ไม่เข้า quick-undo เพราะการลบโครงการลบคีย์ย่อยด้วย — กู้ทั้งโครงการทำผ่านหน้า
+    // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
+    const next = projects.filter(p => p.id !== id);
+    setProjects(next); ss("tcs-projects", next).then(()=>setSyncedAt(new Date()));
     await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`);
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
@@ -859,11 +926,31 @@ export default function App() {
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
     additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
     updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
-    syncedAt, syncing, session, onLogout: handleLogout };
+    syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
 
   return (
     <>
       <style>{GLOBAL_CSS}</style>
+      {editMode && (undoInfo.u > 0 || undoInfo.r > 0) && (
+        <div style={{position:"fixed",left:20,bottom:20,zIndex:95,display:"flex",gap:6,alignItems:"center",
+          background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"7px 9px",boxShadow:"0 8px 28px rgba(15,23,42,0.16)"}}>
+          <button onClick={undo} disabled={!undoInfo.u} title="ย้อนกลับ (Ctrl+Z)"
+            style={{display:"flex",alignItems:"center",gap:6,background:undoInfo.u?T.blue:"#e2e8f0",color:undoInfo.u?"#fff":"#94a3b8",
+              border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:undoInfo.u?"pointer":"default"}}>
+            ↩︎ ย้อนกลับ
+          </button>
+          <button onClick={redo} disabled={!undoInfo.r} title="ทำซ้ำ (Ctrl+Shift+Z)"
+            style={{background:undoInfo.r?T.blueLight:"transparent",color:undoInfo.r?T.blue:"#cbd5e1",
+              border:`1px solid ${undoInfo.r?T.blue:T.cardBorder}`,borderRadius:8,padding:"7px 10px",fontSize:13,fontWeight:600,cursor:undoInfo.r?"pointer":"default"}}>
+            ↪︎
+          </button>
+          {undoInfo.label && (
+            <span style={{fontSize:11,color:T.textMuted,maxWidth:170,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",paddingRight:2}}>
+              ล่าสุด: {undoInfo.label}
+            </span>
+          )}
+        </div>
+      )}
       {screen === "home" && (
         <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
           deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
@@ -1560,7 +1647,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport }) {
+function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
@@ -1619,16 +1706,16 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
       {tab === "baseline"
         ? <QSBaselineTab tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems}
                          onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
-                         hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} />
+                         hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
                          extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
-                         hiddenAccounts={hiddenAccounts} />}
+                         hiddenAccounts={hiddenAccounts} setEditMode={setEditMode} />}
     </Shell>
   );
 }
 
 // ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
-function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount }) {
+function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
@@ -1651,6 +1738,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   const hasData = Object.entries(tenderCosts||{}).some(([k,v]) => !k.startsWith("$") && parseFloat(v));
   const baselineSaved = tenderCosts.$saved === true || hasData;
   const editingUnlocked = !baselineSaved || forceEdit;
+  useEffect(() => { setEditMode?.(editingUnlocked); return () => setEditMode?.(false); }, [editingUnlocked, setEditMode]);
 
   // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
   // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
@@ -1968,7 +2056,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
-function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts }) {
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode }) {
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
@@ -2014,6 +2102,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const monthHasData = Object.entries(additions[month]||{}).some(([k,v]) => !k.startsWith("$") && parseFloat(v));
   const monthSaved = additions[month]?.$saved === true || monthHasData;
   const editingUnlocked = !monthSaved || forceEdit;
+  const [monthEditMode, setMonthEditMode] = useState(false); // โหมดจัดการเดือน (เพิ่ม/ลบเดือน) แยกจากการแก้ค่าในตาราง
+  useEffect(() => { setMonthEditMode(false); }, [month]);     // สลับเดือนแล้วปิดโหมดจัดการเดือน
+  useEffect(() => { setEditMode?.(editingUnlocked || monthEditMode); return () => setEditMode?.(false); }, [editingUnlocked, monthEditMode, setEditMode]);
 
   // All rows = original 70 account codes + standalone extra items.
   // Sub-items (parentCode set) can be added right here for a monthly
@@ -2246,32 +2337,41 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </ResponsiveContainer>
       </div>
 
-      {/* Month picker — horizontal chips, click any to switch, "+" chip to add a new month */}
-      <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,marginBottom:16}}>
-        {sortedMonths.map(m=>{
-          const active = m===month;
-          const add = monthTotalLive(m);
-          const exists = months.includes(m); // เดือนที่มีจริง (ไม่ใช่ default เปล่า) ถึงลบได้
-          return (
-            <div key={m} onClick={()=>setMonth(m)}
-              style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
-                background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
-              <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{monthShortLabel(m)}</div>
-              <div style={{fontSize:15,fontWeight:700,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
-              <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} เดือนนี้</div>
-              {exists && (
-                <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title="ลบเดือนนี้"
-                  style={{position:"absolute",top:5,right:5,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
-                    background:active?"rgba(255,255,255,0.18)":T.bg,color:active?"#fff":T.textMuted,cursor:"pointer",fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
-              )}
+      {/* Month picker — ปกติดูอย่างเดียว (คลิกสลับเดือน) · กด "จัดการเดือน" เพื่อเข้าโหมดเพิ่ม/ลบ */}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,flex:1,minWidth:0}}>
+          {sortedMonths.map(m=>{
+            const active = m===month;
+            const add = monthTotalLive(m);
+            const exists = months.includes(m); // เดือนที่มีจริง (ไม่ใช่ default เปล่า) ถึงลบได้
+            return (
+              <div key={m} onClick={()=>setMonth(m)}
+                style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
+                  background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
+                <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{monthShortLabel(m)}</div>
+                <div style={{fontSize:15,fontWeight:700,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
+                <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} เดือนนี้</div>
+                {monthEditMode && exists && (
+                  <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title="ลบเดือนนี้"
+                    style={{position:"absolute",top:5,right:5,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
+                      background:active?"rgba(255,255,255,0.18)":T.redBg,color:active?"#fff":T.red,cursor:"pointer",fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                )}
+              </div>
+            );
+          })}
+          {monthEditMode && (
+            <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.blue}`,background:T.blueLight}}>
+              <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
+                style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
+              <button className="btn-primary" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap",background:T.blue}} onClick={handleAddMonth}>+ เพิ่มเดือน</button>
             </div>
-          );
-        })}
-        <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.cardBorder}`}}>
-          <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
-            style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
-          <button className="btn-ghost" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap"}} onClick={handleAddMonth}>+ เพิ่มเดือน</button>
+          )}
         </div>
+        <button onClick={()=>setMonthEditMode(v=>!v)}
+          style={{flexShrink:0,alignSelf:"flex-start",padding:"9px 14px",borderRadius:10,border:`1.5px solid ${monthEditMode?T.blue:T.cardBorder}`,
+            background:monthEditMode?T.blue:T.card,color:monthEditMode?"#fff":T.textSecondary,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
+          {monthEditMode?"✓ เสร็จ":"✏️ จัดการเดือน"}
+        </button>
       </div>
 
       {/* Stats for selected month */}
@@ -2853,7 +2953,7 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport }) {
+function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
@@ -2871,6 +2971,8 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState(null);
   const [collapsed, setCollapsed] = useState({});
+  // อยู่ในโหมดแก้ไขเมื่อเปิดฟอร์มเพิ่ม/แก้ PO หรือเปิดหน้ารายละเอียด (บันทึกของเข้า/แบ่งงวด)
+  useEffect(() => { setEditMode?.(view==="add" || detailId!=null); return () => setEditMode?.(false); }, [view, detailId, setEditMode]);
 
   const detailPO = poEntries.find(p => p.id === detailId) || null;
   const openDetail  = (p) => setDetailId(p.id);
