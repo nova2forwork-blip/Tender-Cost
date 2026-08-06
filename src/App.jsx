@@ -753,15 +753,22 @@ export default function App() {
     setScreen("home"); setRole(null); setActiveId(null);
   };
 
-  // โหลด session จาก Supabase Auth ตอนเปิดแอป + คอยฟังการเปลี่ยนสถานะ
-  // (เช่น token หมดอายุ หรือถูก signOut จากแท็บอื่น → เด้งกลับหน้า login)
+  // โหลด session ตอนเปิดแอป — รองรับ auth.js ได้ทั้งสองแบบ:
+  //  • ตัวเดิม: getSession() เป็น synchronous (คืน object/null จาก localStorage)
+  //  • ตัวใหม่: getSession() เป็น async (คืน Promise จาก Supabase Auth)
+  // Promise.resolve() ครอบให้ทำงานได้ทั้งคู่ ส่วน listener จะ logout เฉพาะตอน
+  // เกิดเหตุการณ์ SIGNED_OUT จริง ๆ เท่านั้น (ไม่เผลอล้าง session บน stack เดิม)
   useEffect(() => {
     let mounted = true;
-    getSession().then((u) => { if (mounted) { setSessionState(u); setAuthReady(true); } });
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => {
-      if (!s && mounted) setSessionState(null);
-    });
-    return () => { mounted = false; sub?.subscription?.unsubscribe?.(); };
+    Promise.resolve(getSession()).then((u) => { if (mounted) { setSessionState(u); setAuthReady(true); } });
+    let subscription;
+    try {
+      const res = supabase.auth?.onAuthStateChange?.((evt, s) => {
+        if (evt === "SIGNED_OUT" && mounted) setSessionState(null);
+      });
+      subscription = res?.data?.subscription;
+    } catch { /* auth.js เดิมไม่ได้ใช้ Supabase Auth — ข้ามได้ */ }
+    return () => { mounted = false; subscription?.unsubscribe?.(); };
   }, []);
 
   const fetchProjectData = useCallback(async (id) => {
@@ -973,8 +980,15 @@ function AdminPanel({ onBack, onLogout, session }) {
   const [err, setErr] = useState("");
 
   const refresh = useCallback(async () => {
-    const [u, l] = await Promise.all([loadUsers(), loadLogs()]);
-    setUsers(u); setLogs(l); setLoadedU(true);
+    try {
+      const [u, l] = await Promise.all([loadUsers(), loadLogs()]);
+      setUsers(u); setLogs(l);
+    } catch (e) {
+      // ยังไม่ได้ deploy Edge Function admin-users → แสดงหน้าเปล่าแทนจอขาว
+      console.warn("โหลดผู้ใช้/log ไม่สำเร็จ (ยังไม่ได้ deploy edge function admin-users?)", e);
+    } finally {
+      setLoadedU(true);
+    }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
