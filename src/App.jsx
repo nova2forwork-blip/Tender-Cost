@@ -1808,7 +1808,8 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
 function ProjectCard({ project, onOpen, onDelete }) {
   const age = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
   return (
-    <div className="card-hover" style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
+    <div className="card-hover" onClick={onOpen} title="เปิดโครงการ"
+      style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
       <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:T.headerGrad,borderRadius:"16px 16px 0 0"}}/>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,paddingTop:2}}>
         <span style={{fontSize:10,letterSpacing:2,color:T.blue,fontWeight:700,textTransform:"uppercase"}}>PROJECT</span>
@@ -1824,7 +1825,7 @@ function ProjectCard({ project, onOpen, onDelete }) {
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div style={{fontSize:11,color:T.textMuted}}>{age === 0 ? "สร้างวันนี้" : `${age} วันที่แล้ว`}</div>
-        <button onClick={onOpen} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>เปิดโครงการ →</button>
+        <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>เปิดโครงการ →</button>
       </div>
     </div>
   );
@@ -2654,9 +2655,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             <Tooltip cursor={{fill:"rgba(37,99,235,0.06)"}} formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
               contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
             <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" radius={[0,0,0,0]}>
-              {chartData.map((e,i)=><Cell key={i} fill={e.monthKey===month ? T.dark : T.blue} cursor="pointer"/>)}
+              {chartData.map((e,i)=><Cell key={i} fill={T.blue} stroke={e.monthKey===month?T.blueDark:"none"} strokeWidth={e.monthKey===month?2.5:0} cursor="pointer"/>)}
             </Bar>
-            <Bar dataKey="added" stackId="cum" name="เพิ่มงวดนี้" fill={T.amber} radius={[4,4,0,0]}/>
+            <Bar dataKey="added" stackId="cum" name="เพิ่มงวดนี้" radius={[4,4,0,0]}>
+              {chartData.map((e,i)=><Cell key={i} fill={T.amber} stroke={e.monthKey===month?T.blueDark:"none"} strokeWidth={e.monthKey===month?2.5:0} cursor="pointer"/>)}
+            </Bar>
           </BarChart>
         </ResponsiveContainer>
       </div>
