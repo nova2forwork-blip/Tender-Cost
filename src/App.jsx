@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, ss, sd, loadKvHistory, restoreKvVersion } from "./supabase.js";
+import { supabase, sg, ss, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -1360,7 +1360,7 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
 // ให้ admin เลือกคีย์ → เลือกเวอร์ชันก่อนหน้า → กดกู้คืนกลับเข้า kv_store
 // การอ่านประวัติและการเขียนคืนถูกจำกัดเฉพาะ admin ด้วย RLS ฝั่ง DB อยู่แล้ว
 function AdminRestoreTab() {
-  const [history, setHistory] = useState([]);
+  const [snaps, setSnaps]     = useState([]);
   const [projMap, setProjMap] = useState({});
   const [selKey, setSelKey]   = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1369,9 +1369,9 @@ function AdminRestoreTab() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [h, projs] = await Promise.all([loadKvHistory(), sg("tcs-projects")]);
+    const [s, projs] = await Promise.all([loadKvSnapshots(), sg("tcs-projects")]);
     const map = {}; (projs || []).forEach(p => { map[p.id] = p.name; });
-    setProjMap(map); setHistory(h); setLoading(false);
+    setProjMap(map); setSnaps(s); setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -1391,17 +1391,19 @@ function AdminRestoreTab() {
     const s = String(v);
     return s.length > 90 ? s.slice(0, 90) + "…" : s;
   };
+  const snapLabel = (r) => `${new Date(r.taken_at).toLocaleDateString("th-TH",{day:"numeric",month:"short"})} · ${r.slot}`;
 
+  // จัดกลุ่มตามคีย์ → แต่ละคีย์มีหลายสแนปช็อต (เรียงใหม่→เก่า)
   const groups = {};
-  history.forEach(h => { (groups[h.key] = groups[h.key] || []).push(h); });
-  const keys = Object.keys(groups).sort((a,b) => (groups[b][0]?.changed_at||"").localeCompare(groups[a][0]?.changed_at||""));
+  snaps.forEach(s => { (groups[s.key] = groups[s.key] || []).push(s); });
+  const keys = Object.keys(groups).sort((a,b) => (groups[b][0]?.taken_at||"").localeCompare(groups[a][0]?.taken_at||""));
   const versions = selKey ? groups[selKey] || [] : [];
 
   const doRestore = async (row) => {
-    if (!window.confirm(`กู้คืน "${keyLabel(row.key)}"\nกลับเป็นเวอร์ชันวันที่ ${new Date(row.changed_at).toLocaleString("th-TH")}?\n\nค่าปัจจุบันจะถูกแทนที่ (แต่ก็ถูกเก็บเข้าประวัติด้วย กู้กลับได้อีก)`)) return;
+    if (!window.confirm(`กู้คืน "${keyLabel(row.key)}"\nกลับเป็นสแนปช็อต ${snapLabel(row)}?\n\nค่าปัจจุบันจะถูกแทนที่ด้วยข้อมูลจากสแนปช็อตนี้`)) return;
     setBusy(true); setMsg("");
     try {
-      await restoreKvVersion(row);
+      await restoreKvSnapshot(row);
       setMsg("✅ กู้คืนสำเร็จ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน");
       await load();
     } catch (e) {
@@ -1410,12 +1412,12 @@ function AdminRestoreTab() {
     setBusy(false);
   };
 
-  if (loading) return <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลดประวัติ...</div>;
+  if (loading) return <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลดสแนปช็อต...</div>;
 
   if (!keys.length) return (
     <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textSecondary,lineHeight:1.7}}>
-      ยังไม่มีประวัติการเปลี่ยนแปลง<br/>
-      <span style={{color:T.textMuted}}>ประวัติจะเริ่มถูกเก็บอัตโนมัติหลังจากรันไฟล์ <b>kv-history.sql</b> ใน Supabase แล้วมีการแก้/ลบข้อมูลเกิดขึ้น</span>
+      ยังไม่มีสแนปช็อต<br/>
+      <span style={{color:T.textMuted}}>ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์ <b>kv-snapshots.sql</b> ใน Supabase</span>
     </div>
   );
 
@@ -1426,10 +1428,10 @@ function AdminRestoreTab() {
           background:msg.startsWith("✅")?T.greenBg:T.redBg,color:msg.startsWith("✅")?T.green:T.red}}>{msg}</div>
       )}
       <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>
-        เก็บประวัติค่าเดิมทุกครั้งที่มีการแก้หรือลบ · เลือกรายการทางซ้าย แล้วกดกู้คืนเวอร์ชันที่ต้องการ
+        สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · เก็บย้อนหลัง 7 วัน · เลือกรายการทางซ้าย แล้วกดกู้คืนรอบที่ต้องการ
       </div>
       <div style={{display:"grid",gridTemplateColumns:"minmax(220px,320px) 1fr",gap:16,alignItems:"start"}}>
-        {/* ซ้าย: รายการคีย์ที่มีประวัติ */}
+        {/* ซ้าย: รายการข้อมูลที่มีสแนปช็อต */}
         <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
           <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>รายการข้อมูล ({keys.length})</div>
           <div style={{maxHeight:520,overflowY:"auto"}}>
@@ -1440,17 +1442,17 @@ function AdminRestoreTab() {
                   style={{display:"block",width:"100%",textAlign:"left",padding:"11px 16px",border:"none",borderBottom:`1px solid ${T.cardBorder}`,
                     background:active?T.blueLight:"transparent",cursor:"pointer"}}>
                   <div style={{fontSize:13,fontWeight:600,color:active?T.blue:T.textPrimary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(k)}</div>
-                  <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{groups[k].length} เวอร์ชัน · ล่าสุด {new Date(groups[k][0].changed_at).toLocaleString("th-TH",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}</div>
+                  <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{groups[k].length} สแนปช็อต · ล่าสุด {snapLabel(groups[k][0])}</div>
                 </button>
               );
             })}
           </div>
         </div>
 
-        {/* ขวา: เวอร์ชันของคีย์ที่เลือก */}
+        {/* ขวา: สแนปช็อตของรายการที่เลือก */}
         <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",minHeight:200}}>
           {!selKey ? (
-            <div style={{padding:"40px 20px",textAlign:"center",color:T.textMuted,fontSize:13}}>← เลือกรายการทางซ้ายเพื่อดูประวัติเวอร์ชัน</div>
+            <div style={{padding:"40px 20px",textAlign:"center",color:T.textMuted,fontSize:13}}>← เลือกรายการทางซ้ายเพื่อดูสแนปช็อต</div>
           ) : (
             <>
               <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:700,color:T.textPrimary}}>{keyLabel(selKey)}</div>
@@ -1459,15 +1461,15 @@ function AdminRestoreTab() {
                   <div key={r.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",borderBottom:i<versions.length-1?`1px solid ${T.cardBorder}`:"none"}}>
                     <div style={{minWidth:0,flex:1}}>
                       <div style={{fontSize:12,fontWeight:600,color:T.textPrimary}}>
-                        {new Date(r.changed_at).toLocaleString("th-TH")}
-                        <span style={{marginLeft:8,fontSize:10,padding:"1px 7px",borderRadius:6,background:r.op==="delete"?T.redBg:T.amberBg,color:r.op==="delete"?T.red:T.amber,fontWeight:700}}>{r.op==="delete"?"ถูกลบ":"ถูกแก้ทับ"}</span>
+                        <span style={{fontSize:10,padding:"1px 7px",borderRadius:6,background:T.blueLight,color:T.blue,fontWeight:700,marginRight:8}}>{r.slot}</span>
+                        {new Date(r.taken_at).toLocaleDateString("th-TH",{weekday:"short",day:"numeric",month:"short"})}
                         {i===0 && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>(ล่าสุด)</span>}
                       </div>
-                      <div style={{fontSize:11,color:T.textMuted,marginTop:3,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{preview(r.old_value)}</div>
+                      <div style={{fontSize:11,color:T.textMuted,marginTop:3,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{preview(r.value)}</div>
                     </div>
                     <button onClick={()=>doRestore(r)} disabled={busy}
                       className="btn-ghost" style={{flexShrink:0,padding:"7px 14px",fontSize:12,borderColor:T.blue,color:T.blue,cursor:busy?"default":"pointer",opacity:busy?0.5:1}}>
-                      ↩︎ กู้คืนเวอร์ชันนี้
+                      ↩︎ กู้คืนรอบนี้
                     </button>
                   </div>
                 ))}
