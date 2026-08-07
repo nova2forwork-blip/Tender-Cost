@@ -135,3 +135,28 @@ export const restoreKvVersion = async (row) => {
     .upsert({ key: row.key, value: row.old_value, updated_at: new Date().toISOString() });
   if (error) throw error;
 };
+
+// ── สแนปช็อตตามเวลา (จาก kv-snapshots.sql: 12:00 / 18:00 เก็บ 7 วัน) ──────────
+export const loadKvSnapshots = async () => {
+  try {
+    const { data, error } = await supabase
+      .from("kv_snapshots")
+      .select("id,taken_at,slot,key,value")
+      .order("taken_at", { ascending: false })
+      .limit(3000);
+    if (error) throw error;
+    return data || [];
+  } catch (e) {
+    console.warn("loadKvSnapshots error", e);
+    return [];
+  }
+};
+
+// กู้ค่าจากสแนปช็อตแถวหนึ่งกลับเข้า kv_store
+export const restoreKvSnapshot = async (row) => {
+  if (!row || row.value == null) throw new Error("ไม่มีข้อมูลให้กู้คืน");
+  const { error } = await supabase
+    .from("kv_store")
+    .upsert({ key: row.key, value: row.value, updated_at: new Date().toISOString() });
+  if (error) throw error;
+};
