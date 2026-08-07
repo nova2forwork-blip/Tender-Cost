@@ -412,6 +412,14 @@ function statusPill(val) {
   return { bg:"E5E7EB", fg:"374151" };
 }
 
+// ผสมสีให้อ่อนลง (เข้าหาสีขาว) ratio 0..1 — ใช้ทำโทนพาสเทลนุ่ม ๆ
+function lighten(hex, ratio) {
+  const n = parseInt(hex, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const L = x => Math.round(x + (255 - x) * ratio);
+  return ((L(r) << 16) | (L(g) << 8) | L(b)).toString(16).padStart(6, "0").toUpperCase();
+}
+
 // ─── Excel styling ─────────────────────────────────────────────────────────
 function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart, dataEnd,
                            totalRow=null, moneyCols=[], pctCols=[], centerCols=[], statusCols=[], theme,
@@ -425,13 +433,18 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
                            rowGroups = null, groupDisplayCol = null }) {
   ws["!rows"]   = ws["!rows"] || [];
   ws["!merges"] = ws["!merges"] || [];
+  // โทนพาสเทลนุ่ม ๆ ที่ได้จากสีธีม
+  const HFILL = lighten(theme.main, 0.82); // หัวตาราง พื้นอ่อน
+  const BAND  = lighten(theme.main, 0.95); // แถบสลับสีจาง ๆ
+  const TFILL = lighten(theme.main, 0.75); // แถวรวม
+  const GLINE = lighten(theme.main, 0.55); // เส้นแบ่งกลุ่ม
 
   ws["!merges"].push({ s:{r:titleRow,c:0}, e:{r:titleRow,c:numCols-1} });
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:titleRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Arial"},
-      fill:{fgColor:{rgb:theme.dark}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
+    ws[ref].s = { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Arial"},
+      fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
   }
   ws["!rows"][titleRow] = { hpx:30 };
 
@@ -446,11 +459,11 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:headerRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:"FFFFFF"},name:"Arial"},
-      fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"center",wrapText:true},
-      border:{ top:BORDER_THIN(theme.main), bottom:BORDER_THIN(theme.main), left:BORDER_THIN("FFFFFF"), right:BORDER_THIN("FFFFFF") } };
+    ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Arial"},
+      fill:{fgColor:{rgb:HFILL}}, alignment:{vertical:"center",horizontal:"center",wrapText:true},
+      border:{ top:BORDER_THIN(HFILL), bottom:BORDER_MED(theme.main), left:BORDER_THIN("FFFFFF"), right:BORDER_THIN("FFFFFF") } };
   }
-  ws["!rows"][headerRow] = { hpx:26 };
+  ws["!rows"][headerRow] = { hpx:28 };
   ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s:{r:headerRow,c:0}, e:{r:headerRow,c:numCols-1} }) };
   // ตรึงทุกอย่างเหนือแถวข้อมูล (หัวข้อ+หัวตาราง) ให้ค้างไว้ตอนเลื่อน
   ws["!freeze"] = { xSplit:0, ySplit:headerRow+1, topLeftCell: XLSX.utils.encode_cell({ r:headerRow+1, c:0 }), activePane:"bottomLeft", state:"frozen" };
@@ -477,9 +490,9 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
           ? {sz:10,name:"Arial",bold:true,color:{rgb:theme.dark}}
           : {sz:10,name:"Arial",color:{rgb:"1F2937"}},
         alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true },
-        border:{ top: isGroupStart?BORDER_MED("CBD5E1"):BORDER_THIN("E5E7EB"), bottom:BORDER_THIN("E5E7EB"),
-                 left:BORDER_THIN("E5E7EB"), right:BORDER_THIN("E5E7EB") } };
-      if (zebra)   s.fill   = { fgColor:{rgb:"F8FAFC"} };
+        border:{ top: isGroupStart?BORDER_MED(GLINE):BORDER_THIN("EEF0F2"), bottom:BORDER_THIN("EEF0F2"),
+                 left:BORDER_THIN("EEF0F2"), right:BORDER_THIN("EEF0F2") } };
+      if (zebra)   s.fill   = { fgColor:{rgb:BAND} };
       if (isMoney) s.numFmt = "#,##0";
       if (isPct)   s.numFmt = "0.0%";
       if (statusCols.includes(c)) {
@@ -492,6 +505,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       }
       ws[ref].s = s;
     }
+    ws["!rows"][r] = ws["!rows"][r] || { hpx:19 };
   }
 
   if (totalRow != null) {
@@ -499,12 +513,54 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       const ref = XLSX.utils.encode_cell({r:totalRow,c});
       if (!ws[ref]) ws[ref] = { t:"s", v:"" };
       const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c);
-      ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.dark}},
+      ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:TFILL}},
         alignment:{vertical:"center",horizontal:isMoney||isPct?"right":"left"},
+        border:{ top:BORDER_MED(theme.main) },
         numFmt: isMoney?"#,##0":isPct?"0.0%":undefined };
     }
     ws["!rows"][totalRow] = { hpx:24 };
   }
+}
+
+// กราฟแท่งแนวตั้งที่ "วาดด้วยเซลล์" — ไลบรารีนี้ฝังกราฟจริง/รูปไม่ได้ จึงระบายสี
+// เซลล์ไล่จากล่างขึ้นบนตามค่าให้ออกมาเป็นกราฟแท่งในชีต Excel
+function addBarChartSheet(wb, sheetName, title, theme, items) {
+  items = (items || []).filter(Boolean);
+  if (!items.length) return;
+  const H = 12;
+  const max = Math.max(...items.map(i => i.value || 0), 1);
+  const n = items.length;
+  const LEFT = 1;                     // เว้นคอลัมน์แรกเป็นแกน
+  const totalCols = LEFT + n;
+  const valueRow = 2, chartTop = 3, labelRow = chartTop + H;
+  const aoa = [[title], []];
+  for (let r = 0; r < H + 2; r++) aoa.push(new Array(totalCols).fill(""));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = [{ s:{r:0,c:0}, e:{r:0,c:totalCols-1} }];
+  ws["!cols"] = [{ wch:4 }, ...items.map(()=>({ wch:11 }))];
+  ws["!rows"] = [];
+  ws["!rows"][0] = { hpx:26 };
+  for (let r = chartTop; r < chartTop + H; r++) ws["!rows"][r] = { hpx:15 };
+  ws["!rows"][labelRow] = { hpx:24 };
+  const setS = (r, c, s, v) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    if (v != null) ws[ref] = { t: typeof v === "number" ? "n" : "s", v };
+    else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    ws[ref].s = s;
+  };
+  setS(0, 0, { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  const barOn = theme.main, barOff = "F3F4F6";
+  items.forEach((it, i) => {
+    const c = LEFT + i;
+    const filled = Math.max(0, Math.round(((it.value||0) / max) * H));
+    setS(valueRow, c, { font:{bold:true,sz:9,color:{rgb:theme.dark},name:"Arial"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
+    for (let k = 0; k < H; k++) {
+      const r = chartTop + (H - 1 - k); // k=0 = ล่างสุด
+      setS(r, c, { fill:{fgColor:{rgb: k < filled ? barOn : barOff }} });
+    }
+    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Arial"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
+  });
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
 }
 
 // ─── QS: budget / tender-cost export ───────────────────────────────────────
@@ -565,6 +621,10 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
     moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length], theme, rowGroups:rowGroups2 });
   XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
+
+  // กราฟแท่ง — ยอดเพิ่มรายเดือน
+  addBarChartSheet(wb, "กราฟรายเดือน", `ยอดเพิ่มรายเดือน — ${project.name}`, theme,
+    months.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + (parseFloat((additions[m]||{})[a.code])||0), 0) })));
 
   // Sheet 3+ — แยกรายเดือน โดย breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น ๆ
   // คอลัมน์เก็บเป็นรายเดือน แต่ละเดือนอาจมีชุดคอลัมน์ต่างกัน → ทำหนึ่งชีตต่อเดือน
@@ -746,6 +806,10 @@ function exportProcurementExcel(project, poEntries) {
     styleSheet(ws3, { numCols:numCols3, subRows:[1], headerRow:3, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3,
       moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
     XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน (สรุปกลุ่ม)");
+
+    // กราฟแท่ง — ยอดสั่งซื้อรายเดือน (ตามวันเปิด PO)
+    addBarChartSheet(wb, "กราฟรายเดือน", `ยอดสั่งซื้อรายเดือน — ${project.name}`, theme,
+      poMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) })));
 
     // Sheet 4+ — รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
     const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
