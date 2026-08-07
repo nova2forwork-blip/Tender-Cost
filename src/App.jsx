@@ -398,8 +398,23 @@ const exportAccountList = (extraItems=[], hiddenAccounts=[]) => [
 // real report instead of a raw data dump.
 const BORDER_THIN = (rgb) => ({ style:"thin", color:{rgb} });
 const BORDER_MED  = (rgb) => ({ style:"medium", color:{rgb} });
+// สีพิลล์ตามสถานะ (เขียว=เสร็จ/จ่ายแล้ว, เหลือง=กำลังทำ/รอ, แดง=ค้าง/เกินกำหนด)
+// ใช้คีย์เวิร์ดจับ ครอบคลุมทั้งไทย/อังกฤษ สถานะอื่นเป็นพิลล์เทากลาง ๆ
+const STATUS_PILL = [
+  [/(completed|complete|เสร็จ|จ่ายแล้ว|รับของแล้ว|รับครบ|ปิดงาน|ปิด|อนุมัติ|approved|done|paid)/i, { bg:"D1FAE5", fg:"065F46" }],
+  [/(in\s*progress|progress|กำลัง|ระหว่าง|บางส่วน|partial|สั่งซื้อ|สั่ง|รอรับ|รอจ่าย|pending|รอ)/i,        { bg:"FEF3C7", fg:"92400E" }],
+  [/(to\s*do|todo|ร่าง|ยังไม่|ค้างจ่าย|ค้าง|เกินกำหนด|overdue|ยกเลิก|cancel|reject)/i,               { bg:"FEE2E2", fg:"991B1B" }],
+];
+function statusPill(val) {
+  const s = String(val == null ? "" : val);
+  if (!s.trim() || s === "-") return null;
+  for (const [re, st] of STATUS_PILL) if (re.test(s)) return st;
+  return { bg:"E5E7EB", fg:"374151" };
+}
+
+// ─── Excel styling ─────────────────────────────────────────────────────────
 function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart, dataEnd,
-                           totalRow=null, moneyCols=[], pctCols=[], centerCols=[], theme,
+                           totalRow=null, moneyCols=[], pctCols=[], centerCols=[], statusCols=[], theme,
                            // rowGroups: array aligned to dataStart..dataEnd holding a "group key" per
                            // row. When given, rows are shaded in solid blocks per group (instead of
                            // plain every-other-row zebra) and a heavier divider line marks where one
@@ -437,6 +452,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   }
   ws["!rows"][headerRow] = { hpx:26 };
   ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s:{r:headerRow,c:0}, e:{r:headerRow,c:numCols-1} }) };
+  // ตรึงทุกอย่างเหนือแถวข้อมูล (หัวข้อ+หัวตาราง) ให้ค้างไว้ตอนเลื่อน
+  ws["!freeze"] = { xSplit:0, ySplit:headerRow+1, topLeftCell: XLSX.utils.encode_cell({ r:headerRow+1, c:0 }), activePane:"bottomLeft", state:"frozen" };
 
   let band = 0, prevGroup;
   for (let r=dataStart; r<=dataEnd; r++) {
@@ -465,6 +482,14 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       if (zebra)   s.fill   = { fgColor:{rgb:"F8FAFC"} };
       if (isMoney) s.numFmt = "#,##0";
       if (isPct)   s.numFmt = "0.0%";
+      if (statusCols.includes(c)) {
+        const pill = statusPill(ws[ref].v);
+        if (pill) {
+          s.fill = { fgColor:{rgb:pill.bg} };
+          s.font = { sz:10, name:"Arial", bold:true, color:{rgb:pill.fg} };
+          s.alignment = { ...s.alignment, horizontal:"center" };
+        }
+      }
       ws[ref].s = s;
     }
   }
@@ -670,7 +695,7 @@ function exportProcurementExcel(project, poEntries) {
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
   ws1["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
   styleSheet(ws1, { numCols:11, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:[5], centerCols:[6,9], theme, rowGroups:rowGroups1 });
+    moneyCols:[5], centerCols:[6,9], statusCols:[6,9], theme, rowGroups:rowGroups1 });
   XLSX.utils.book_append_sheet(wb, ws1, "PO Entries");
 
   // Sheet 2 — status pipeline at a glance
@@ -686,7 +711,7 @@ function exportProcurementExcel(project, poEntries) {
   const totalRow2 = rows2.length-1;
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
   ws2["!cols"] = [{wch:16},{wch:14},{wch:18}];
-  styleSheet(ws2, { numCols:3, headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:[2], centerCols:[1], theme });
+  styleSheet(ws2, { numCols:3, headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:[2], centerCols:[1], statusCols:[0], theme });
   XLSX.utils.book_append_sheet(wb, ws2, "สรุปสถานะ");
 
   // Sheet 3 — spend per month, broken down by material group, so trends
@@ -720,7 +745,45 @@ function exportProcurementExcel(project, poEntries) {
     ws3["!cols"] = [{wch:18}, ...poMonths.map(()=>({wch:12})), {wch:16}];
     styleSheet(ws3, { numCols:numCols3, subRows:[1], headerRow:3, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3,
       moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
-    XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน");
+    XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน (สรุปกลุ่ม)");
+
+    // Sheet 4+ — รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
+    const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
+    const usedNames = {};
+    poMonths.forEach(m => {
+      const rows = [
+        [`PO รายเดือน ${monthShortLabel(m)} — ${project.name}`],
+        [`ตามวันเปิด PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+        [],
+        ["Acc. Code", "Account Name", "Group", "Supplier", "PO No.", "วันเปิด PO", "มูลค่า (THB)", "สถานะ PO", "สถานะจ่ายเงิน"],
+      ];
+      const dataStart = rows.length;
+      const rowGroups = [];
+      let grand = 0;
+      poEntries.filter(p => (p.date||"").slice(0,7) === m)
+        .sort((a,b)=>(a.date||"").localeCompare(b.date||""))
+        .forEach(p => {
+          const pay = paymentStatus(p);
+          poItems(p).forEach(it => {
+            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            const amount = parseFloat(it.amount) || 0;
+            rows.push([it.code, acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, p.status, PAYMENT_LABEL[pay]]);
+            rowGroups.push(acc?.group||"-");
+            grand += amount;
+          });
+        });
+      if (rows.length === dataStart) return; // เดือนนี้ไม่มี PO
+      const dataEnd = rows.length-1;
+      rows.push(["", "", "", "", "", "TOTAL", grand, "", ""]);
+      const totalRow = rows.length-1;
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{wch:10},{wch:32},{wch:14},{wch:22},{wch:16},{wch:12},{wch:16},{wch:12},{wch:16}];
+      styleSheet(ws, { numCols:9, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
+        moneyCols:[6], centerCols:[7,8], statusCols:[7,8], theme, rowGroups, groupDisplayCol:2 });
+      let nm = clean(monthShortLabel(m));
+      if (usedNames[nm]) { usedNames[nm] += 1; nm = clean(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
+      XLSX.utils.book_append_sheet(wb, ws, nm);
+    });
   }
 
   XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
