@@ -1363,6 +1363,7 @@ function AdminRestoreTab() {
   const [snaps, setSnaps]     = useState([]);
   const [projMap, setProjMap] = useState({});
   const [selKey, setSelKey]   = useState(null);
+  const [dept, setDept]       = useState("all"); // กรองตามแผนก
   const [loading, setLoading] = useState(true);
   const [busy, setBusy]       = useState(false);
   const [msg, setMsg]         = useState("");
@@ -1393,10 +1394,22 @@ function AdminRestoreTab() {
   };
   const snapLabel = (r) => `${new Date(r.taken_at).toLocaleDateString("th-TH",{day:"numeric",month:"short"})} · ${r.slot}`;
 
+  // จับคู่คีย์ข้อมูล → แผนกเจ้าของ
+  const deptOf = (key) => {
+    if (/^tcs-(tenders|additions|extra|hidden|columns)-/.test(key)) return "qs";
+    if (/^tcs-po-/.test(key)) return "procurement";
+    return "central"; // tcs-projects, tcs-users, tcs-logs, อื่น ๆ
+  };
+  const DEPTS = [["all","ทั้งหมด"],["qs","QS"],["procurement","จัดซื้อ"],["central","ส่วนกลาง"]];
+  const deptTag = { qs:{label:"QS",color:T.blue,bg:T.blueLight}, procurement:{label:"จัดซื้อ",color:T.amber,bg:T.amberBg}, central:{label:"ส่วนกลาง",color:T.purple,bg:T.purpleBg} };
+
   // จัดกลุ่มตามคีย์ → แต่ละคีย์มีหลายสแนปช็อต (เรียงใหม่→เก่า)
   const groups = {};
   snaps.forEach(s => { (groups[s.key] = groups[s.key] || []).push(s); });
-  const keys = Object.keys(groups).sort((a,b) => (groups[b][0]?.taken_at||"").localeCompare(groups[a][0]?.taken_at||""));
+  const allKeys = Object.keys(groups).sort((a,b) => (groups[b][0]?.taken_at||"").localeCompare(groups[a][0]?.taken_at||""));
+  const deptCount = { all: allKeys.length, qs:0, procurement:0, central:0 };
+  allKeys.forEach(k => { deptCount[deptOf(k)] = (deptCount[deptOf(k)]||0) + 1; });
+  const keys = allKeys.filter(k => dept === "all" || deptOf(k) === dept);
   const versions = selKey ? groups[selKey] || [] : [];
 
   const doRestore = async (row) => {
@@ -1427,8 +1440,20 @@ function AdminRestoreTab() {
         <div style={{marginBottom:14,padding:"10px 14px",borderRadius:10,fontSize:13,fontWeight:600,
           background:msg.startsWith("✅")?T.greenBg:T.redBg,color:msg.startsWith("✅")?T.green:T.red}}>{msg}</div>
       )}
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>
-        สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · เก็บย้อนหลัง 7 วัน · เลือกรายการทางซ้าย แล้วกดกู้คืนรอบที่ต้องการ
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>
+        สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · แยกตามแผนก · เลือกแผนก → เลือกรายการ → กดกู้คืนรอบที่ต้องการ
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+        {DEPTS.map(([id,label])=>{
+          const active = dept===id;
+          return (
+            <button key={id} onClick={()=>{ setDept(id); setSelKey(null); }}
+              style={{padding:"7px 16px",borderRadius:999,border:`1.5px solid ${active?T.blue:T.cardBorder}`,cursor:"pointer",fontSize:12.5,fontWeight:600,
+                background:active?T.blue:T.card,color:active?"#fff":T.textSecondary}}>
+              {label} <span style={{opacity:0.7,fontWeight:500}}>({deptCount[id]||0})</span>
+            </button>
+          );
+        })}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"minmax(220px,320px) 1fr",gap:16,alignItems:"start"}}>
         {/* ซ้าย: รายการข้อมูลที่มีสแนปช็อต */}
@@ -1437,12 +1462,16 @@ function AdminRestoreTab() {
           <div style={{maxHeight:520,overflowY:"auto"}}>
             {keys.map(k => {
               const active = k === selKey;
+              const dt = deptTag[deptOf(k)];
               return (
                 <button key={k} onClick={()=>setSelKey(k)}
                   style={{display:"block",width:"100%",textAlign:"left",padding:"11px 16px",border:"none",borderBottom:`1px solid ${T.cardBorder}`,
                     background:active?T.blueLight:"transparent",cursor:"pointer"}}>
-                  <div style={{fontSize:13,fontWeight:600,color:active?T.blue:T.textPrimary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(k)}</div>
-                  <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{groups[k].length} สแนปช็อต · ล่าสุด {snapLabel(groups[k][0])}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{flexShrink:0,fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:5,background:dt.bg,color:dt.color}}>{dt.label}</span>
+                    <div style={{fontSize:13,fontWeight:600,color:active?T.blue:T.textPrimary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(k)}</div>
+                  </div>
+                  <div style={{fontSize:11,color:T.textMuted,marginTop:3}}>{groups[k].length} สแนปช็อต · ล่าสุด {snapLabel(groups[k][0])}</div>
                 </button>
               );
             })}
