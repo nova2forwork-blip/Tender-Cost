@@ -1137,10 +1137,11 @@ async function exportPORich(project, poEntries) {
   poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
     const pay = PAYMENT_LABEL[paymentStatus(p)];
     const delivery = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
+    const received = poRounds(p).map(r => r.actual).filter(Boolean).join(", ") || "-";
     const due = poNextDueDate(p) || "-";
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
-      itemRows.push([ p.date||"", it.code, acc?.name||"", poSupplierName(p), poNumbersLabel(p), parseFloat(it.amount)||0, p.status||"-", delivery, due, pay, p.notes||"" ]);
+      itemRows.push([ p.date||"", it.code, acc?.name||"", poSupplierName(p), poNumbersLabel(p), parseFloat(it.amount)||0, p.status||"-", delivery, received, due, pay, p.notes||"" ]);
     });
   });
 
@@ -1173,17 +1174,17 @@ async function exportPORich(project, poEntries) {
   tv.forEach((cd,ci)=>{ const c=ws.getCell(rT,1+ci); c.value=cd[0]; c.alignment={horizontal:cd[1],vertical:"middle"}; if(cd[2])c.numFmt=cd[2]; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDE7C2"); c.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; });
 
   const wd = wb.addWorksheet("PO ทั้งหมด", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
-  wd.columns = [{width:12},{width:11},{width:30},{width:16},{width:14},{width:14},{width:12},{width:20},{width:14},{width:14},{width:20}];
-  const NC = 11;
+  wd.columns = [{width:12},{width:11},{width:30},{width:16},{width:14},{width:14},{width:12},{width:20},{width:13},{width:14},{width:14},{width:20}];
+  const NC = 12;
   wd.mergeCells(1,1,1,NC); const dt=wd.getCell(1,1); dt.value=`รายการ PO ทั้งหมด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FFFFFFFF"},name:F}; dt.fill=fillS("FFF59E0B"); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
   wd.mergeCells(2,1,2,NC); const dsub=wd.getCell(2,1); dsub.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ทั้งหมด ${poEntries.length} PO`; dsub.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; dsub.alignment={indent:1};
-  const HD = ["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"];
+  const HD = ["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันที่รับของ","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"];
   HD.forEach((h,i)=>{ const c=wd.getCell(4,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===5?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wd.getRow(4).height=26;
   const pillOf = (s) => { const p=statusPill(s); return p ? { fill:fillS("FF"+p.bg), font:{bold:true,size:9.5,color:{argb:"FF"+p.fg},name:F} } : {}; };
   itemRows.forEach((row,ri)=>{ const R=5+ri;
     row.forEach((val,ci)=>{ const c=wd.getCell(R,1+ci); c.value=val;
       if(ci===5){ c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; }
-      else if(ci===6 || ci===9){ const pl=pillOf(val); c.alignment={horizontal:"center",vertical:"middle"}; if(pl.fill){c.fill=pl.fill;c.font=pl.font;} else c.font={name:F,size:9.5}; }
+      else if(ci===6 || ci===10){ const pl=pillOf(val); c.alignment={horizontal:"center",vertical:"middle"}; if(pl.fill){c.fill=pl.fill;c.font=pl.font;} else c.font={name:F,size:9.5}; }
       else { c.alignment={vertical:"middle"}; c.font={name:F,size:9.5}; }
     });
     if(ri%2) for(let c=1;c<=NC;c++){ const cell=wd.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
