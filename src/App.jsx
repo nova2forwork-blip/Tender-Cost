@@ -3818,6 +3818,7 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
 // Edit / Delete from the same place.
 function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session }) {
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
   // กด Esc = ปิด/ยกเลิกหน้ารายละเอียด
   useEffect(() => {
     if (!rawPo) return;
@@ -3839,6 +3840,20 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   // Record actual received / split remaining into a new round, then persist.
   const setItemRounds = (itemId, rounds) =>
     onChangePO?.({ ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) });
+  // ลงยอดของเข้าจริง — ห้ามให้ยอดรวมทุกงวดเกิน "ยอดสั่ง" ของ PO นั้น (บล็อก+เตือน)
+  const setActualAmount = (itemId, roundId, val) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    const ordered = itemOrdered(it);
+    const newVal = parseFloat(val)||0;
+    const otherReceived = (it.rounds||[]).filter(r=>r.id!==roundId).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+    if (ordered>0 && (otherReceived + newVal) > ordered + 0.001) {
+      const maxAllow = Math.max(ordered - otherReceived, 0);
+      setCapWarn(`⚠ ${it.code||"รายการนี้"}: ยอดของเข้ารวมห้ามเกินยอดสั่ง ${fmt(ordered)} — งวดนี้กรอกได้ไม่เกิน ${fmt(maxAllow)} (ระบบไม่บันทึกค่าที่เกิน)`);
+      return; // บล็อก: ไม่บันทึกค่าที่เกินยอดสั่ง
+    }
+    setCapWarn("");
+    updateRound(itemId, roundId, "actualAmount", val);
+  };
   const updateRound = (itemId, roundId, key, val) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
     setItemRounds(itemId, it.rounds.map(r => r.id===roundId ? {...r,[key]:val} : r));
@@ -3850,6 +3865,13 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     const plannedSoFar = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
     const remaining = Math.max((parseFloat(it.amount)||0) - plannedSoFar, 0);
     setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:remaining, actualAmount:"", actualDate:"" }]);
+  };
+  // ลบงวดส่งของ — ต้องเหลืออย่างน้อย 1 งวดเสมอ (ใช้แก้กรณีมีงวดเกิน/ซ้ำ)
+  const removeRound = (itemId, roundId) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    if ((it.rounds||[]).length <= 1) return;
+    if (!confirm("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)")) return;
+    setItemRounds(itemId, it.rounds.filter(r => r.id !== roundId));
   };
   const roundBadge = (r) => {
     if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
@@ -3919,6 +3941,9 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           {items.map((it,ii)=>{
             const acc = ACCOUNTS.find(a=>a.code===it.code);
             const ordered = itemOrdered(it), recv = itemReceived(it), remain = itemRemaining(it);
+            const planned = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0); // ยอดรวมที่วางแผนไว้ทุกงวด
+            const planRemain = Math.max(ordered - planned, 0);   // ยอดที่ยัง "ไม่ถูกวางแผน" (ไว้แบ่งงวดเพิ่ม)
+            const overPlanned = planned - ordered;               // >0 = รวมทุกงวดเกินยอดสั่ง (มีงวดเกิน/ซ้ำ)
             const paidAmt = (it.rounds||[]).filter(r=>roundPaid(po,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
             return (
               <div key={it.id||ii} style={{background:T.bg,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
@@ -3936,15 +3961,21 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                   const late = r.actualDate && r.planDate && r.actualDate>r.planDate;
                   return (
                     <div key={r.id||ri} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:10,marginBottom:6,background:T.card}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:8}}>
                         <span style={{fontSize:11,fontWeight:700,color:T.textSecondary}}>งวดที่ {ri+1} · แผน {fmt(r.planAmount)}</span>
-                        <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
+                          {!locked && it.rounds.length>1 && (
+                            <button type="button" onClick={()=>removeRound(it.id,r.id)} title="ลบงวดนี้"
+                              style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13,padding:"2px 4px",borderRadius:6,lineHeight:1}}>🗑</button>
+                          )}
+                        </div>
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>ยอดของเข้าจริง (บาท)</span>
                           <MoneyInput value={r.actualAmount} disabled={locked} placeholder="บาท"
-                            onChange={v=>updateRound(it.id,r.id,"actualAmount",v)}/>
+                            onChange={v=>setActualAmount(it.id,r.id,v)}/>
                         </label>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>วันของเข้าจริง</span>
@@ -3969,12 +4000,17 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                   <span>ของเข้าแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{fmt(recv)}</b> / {fmt(ordered)}</span>
                   <span>จ่ายแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:paidAmt>0?T.green:T.textMuted}}>{fmt(paidAmt)}</b></span>
                 </div>
-                {!locked && remain>0.001 ? (
+                {overPlanned>0.001 && (
+                  <div style={{marginTop:8,fontSize:11.5,color:T.red,background:T.redBg,borderRadius:8,padding:"7px 10px",lineHeight:1.4}}>
+                    ⚠ ยอดรวมทุกงวด <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
+                  </div>
+                )}
+                {!locked && planRemain>0.001 ? (
                   <button type="button" onClick={()=>splitRound(it.id)} className="btn-ghost"
                     style={{marginTop:8,padding:"6px 12px",fontSize:12,borderColor:T.amber,color:T.amber}}>
-                    ✂️ แบ่งงวด — เพิ่มงวดยอดคงเหลือ {fmt(remain)}
+                    ✂️ แบ่งงวด — เพิ่มงวดยอดคงเหลือ {fmt(planRemain)}
                   </button>
-                ) : remain<=0.001 && ordered>0 ? (
+                ) : recv>0.001 && remain<=0.001 && ordered>0 ? (
                   <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ ของเข้าครบตามยอดสั่งแล้ว</div>
                 ) : null}
               </div>
@@ -4014,8 +4050,20 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           </div>
         )}
 
-        <div style={{display:"flex",gap:10,marginTop:20}}>
-          <button onClick={()=>onEdit(po)} disabled={locked} className="btn-primary" style={{background:locked?"#e2e8f0":T.amber,color:locked?"#94a3b8":"#fff",cursor:locked?"not-allowed":"pointer"}}>{locked?"🔒":"✏️"} แก้ไข</button>
+        {capWarn && (
+          <div style={{marginTop:14,fontSize:12,color:T.red,background:T.redBg,border:`1px solid ${T.red}`,borderRadius:10,padding:"9px 12px",lineHeight:1.5}}>{capWarn}</div>
+        )}
+        <div style={{display:"flex",gap:10,marginTop:16,flexWrap:"wrap",alignItems:"center"}}>
+          <button
+            onClick={()=>{
+              // ตรวจอีกครั้งก่อนปิด: ยอดของเข้าจริงรวมของทุกรายการห้ามเกินยอดสั่ง
+              const bad = po.items.find(it => { const o=itemOrdered(it); const rc=(it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0); return o>0 && rc > o + 0.001; });
+              if (bad) { setCapWarn(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
+              setCapWarn(""); onClose();
+            }}
+            disabled={locked} className="btn-primary"
+            style={{background:locked?"#e2e8f0":T.green,color:locked?"#94a3b8":"#fff",cursor:locked?"not-allowed":"pointer"}}>{locked?"🔒":"💾"} บันทึก</button>
+          {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title="แก้ผู้ขาย / หมวด / ยอดสั่ง">✏️ แก้ไข PO</button>}
           <button onClick={()=>{ if(window.confirm("ลบรายการ PO นี้?")) onDelete(po.id); }} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
           <div style={{flex:1}}/>
           <button onClick={onClose} className="btn-ghost">ปิด</button>
@@ -4787,7 +4835,13 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
       .sort((x, y) => (x.po.date || "").localeCompare(y.po.date || ""));
     const variance = a.budget - a.committed;
     const variancePct = a.budget > 0 ? (variance / a.budget) * 100 : (a.committed > 0 ? null : 0);
-    return { ...a, rows, variance, variancePct };
+    // จ่ายแล้วจริง (งวดที่รับของ + ถึงกำหนดจ่าย) และยอดที่ยังต้องเก็บเงินไว้รอจ่าย
+    // ของ Acc. Code นี้ — สิ่งที่บัญชีต้องรู้ว่าต้องกันเงินไว้เท่าไหร่
+    const paid = poEntries.reduce((s,p)=> s + poItems(p).filter(it=>it.code===a.code)
+      .reduce((ss,it)=> ss + (it.rounds||[]).filter(r=>roundReceived(r)&&roundPaid(p,r))
+        .reduce((s3,r)=> s3 + (parseFloat(r.actualAmount)||0), 0), 0), 0);
+    const toReserve = Math.max(a.committed - paid, 0);
+    return { ...a, rows, variance, variancePct, paid, toReserve };
   }).sort((x, y) => x.code.localeCompare(y.code));
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => -d);
@@ -5040,8 +5094,8 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                 color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
                 icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
                 accent={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.redBg:T.greenBg}/>
-              <StatCard label="รอจ่ายเงิน" value={poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length}
-                sub={`${poEntries.filter(p=>paymentStatus(p)==="late").length} เกินกำหนด`} color={T.red} icon="⏳" accent={T.redBg}/>
+              <StatCard label="ต้องเก็บไว้จ่ายรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))}
+                sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} PO รอจ่าย`} color={T.red} icon="⏳" accent={T.redBg}/>
             </div>
 
             {dateGroups.length===0 ? (
@@ -5053,9 +5107,9 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 {dateGroups.map(a => {
                   const isCollapsed = dateCollapsed.has(a.code);
-                  const pctUsed   = a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0?999:0);
-                  const barPct    = a.budget>0 ? Math.min(pctUsed,100) : (a.committed>0?100:0);
-                  const barClr    = pctUsed>100?T.red:pctUsed>80?T.amber:T.green;
+                  // แถบ = ความคืบหน้าการจ่ายของ PO ที่ผูกพันแล้ว (จ่ายแล้ว vs ต้องเก็บไว้จ่าย)
+                  const paidPct   = a.committed>0 ? (a.paid/a.committed*100) : 0;
+                  const barPct    = a.committed>0 ? Math.min(paidPct,100) : 0;
                   const statusClr = a.over?T.red:a.committed>0?T.green:T.textMuted;
                   const statusBg  = a.over?T.redBg:a.committed>0?T.greenBg:"#eef1f5";
                   const statusTxt = a.over?"⚠ เกินงบ":a.committed>0?"✅ OK":a.budget>0?"ยังไม่ PO":"—";
@@ -5071,31 +5125,34 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                           <span style={{color:T.textPrimary,fontSize:14,fontWeight:600,flex:1,minWidth:0}}>{a.name}</span>
                           <span style={{background:statusBg,color:statusClr,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:700,whiteSpace:"nowrap",flexShrink:0}}>{statusTxt}</span>
                         </div>
-                        {/* บรรทัด 2: แถบใช้งบ */}
+                        {/* บรรทัด 2: แถบความคืบหน้าการจ่าย + ยอดที่ต้องเก็บเงินไว้รอจ่าย */}
                         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}}>
-                            <div style={{width:`${barPct}%`,background:barClr,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
+                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}} title={`จ่ายแล้ว ${a.committed>0?paidPct.toFixed(0):0}% ของ PO`}>
+                            <div style={{width:`${barPct}%`,background:T.green,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
                           </div>
-                          <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:barClr,minWidth:56,textAlign:"right"}}>
-                            {a.budget>0?`${pctUsed.toFixed(0)}%`:"ไม่มีงบ"}
+                          <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:a.toReserve>0?T.amber:a.committed>0?T.green:T.textMuted,textAlign:"right",whiteSpace:"nowrap"}}>
+                            {a.committed>0 ? (a.toReserve>0 ? `เก็บไว้จ่าย ฿${fmt0(a.toReserve)}` : "จ่ายครบแล้ว") : "ยังไม่มี PO"}
                           </span>
                         </div>
-                        {/* บรรทัด 3: ตัวเลขสรุป 3 ช่อง */}
+                        {/* บรรทัด 3: ตัวเลขสรุป 3 ช่อง — มูลค่า PO · จ่ายแล้ว · ต้องเก็บไว้จ่าย */}
                         <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
                           <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>งบประมาณ</div>
-                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.blue}}>{a.budget>0?fmt(a.budget):"—"}</div>
-                          </div>
-                          <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>PO (Committed)</div>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>มูลค่า PO</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
                           </div>
                           <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{a.variance<0?"เกินงบ":"คงเหลือ"}</div>
-                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
-                              {a.variancePct===null ? "ไม่มีงบ" : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}
-                            </div>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>จ่ายแล้ว</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green}}>{a.paid>0?fmt(a.paid):"—"}</div>
                           </div>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>ต้องเก็บไว้จ่าย</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:a.toReserve>0?T.amber:T.green}}>{a.committed>0?fmt(a.toReserve):"—"}</div>
+                          </div>
+                        </div>
+                        {/* งบประมาณ / ส่วนต่าง (ข้อมูลงบ ไว้ท้ายสุด) */}
+                        <div style={{display:"flex",gap:24,flexWrap:"wrap",marginTop:8,paddingTop:8,borderTop:`1px dashed ${T.cardBorder}`}}>
+                          <div style={{fontSize:11,color:T.textMuted}}>งบประมาณ: <b style={{color:T.blue,fontFamily:"'JetBrains Mono',monospace"}}>{a.budget>0?fmt(a.budget):"—"}</b></div>
+                          <div style={{fontSize:11,color:T.textMuted}}>{a.variance<0?"เกินงบ":"งบคงเหลือ"}: <b style={{color:varClr,fontFamily:"'JetBrains Mono',monospace"}}>{a.variancePct===null ? "ไม่มีงบ" : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}</b></div>
                         </div>
                       </div>
                       {!isCollapsed && (
