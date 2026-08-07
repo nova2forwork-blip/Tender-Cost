@@ -1383,6 +1383,94 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     XLSX.utils.book_append_sheet(wb, ws4, "รายเดือน");
   }
 
+  // ─── Sheet 5 + 6 — แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────
+  // สำหรับบัญชี: มองไปข้างหน้าว่าเดือนไหนต้องเตรียมเงินจ่ายเท่าไหร่ จ่ายอะไร และ
+  // จ่ายแบบไหน (เงินสด/เครดิต). วันครบกำหนดจ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้
+  // วันแผน) + เทอมเครดิตของ PO; ยอด = ยอดจริงถ้ามี ไม่มีใช้ยอดแผน.
+  const today = todayStr();
+  const payLines = [];
+  poEntries.forEach(p => {
+    const P = migratePO(p);
+    const isCash = P.paymentType === "cash";
+    const term = isCash ? 0 : (parseInt(P.creditDays,10) || DEFAULT_CREDIT_DAYS);
+    const method = isCash ? "เงินสด" : `เครดิต ${term} วัน`;
+    poItems(p).forEach(it => {
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      (it.rounds||[]).forEach(r => {
+        const amount = (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
+        if (amount <= 0) return;
+        const incoming = r.actualDate || r.planDate || "";       // วันรับของ: จริงถ้ามี ไม่มีใช้แผน
+        const payDate  = incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
+        const paid     = roundPaid(p, r);
+        const status   = paid ? "จ่ายแล้ว" : (payDate && payDate < today ? "เกินกำหนดจ่าย" : "รอจ่าย");
+        payLines.push({
+          payDate, month: payDate ? payDate.slice(0,7) : "",
+          supplier: poSupplierName(p), poNo: poNumbersLabel(p),
+          code: it.code || "", accName: acc?.name || "", method, isCash,
+          incoming: incoming || "-", incomingType: r.actualDate ? "จริง" : (r.planDate ? "แผน" : "-"),
+          amount, paid, status,
+        });
+      });
+    });
+  });
+  if (payLines.length) {
+    const monthKey = (l) => l.month || "9999-99";
+    const payMonths = [...new Set(payLines.map(monthKey))].sort();
+
+    // Sheet 5 — สรุปแผนจ่ายรายเดือน (แยกเงินสด/เครดิต + ยอดคงเหลือต้องจ่าย)
+    const rowsP = [[`แผนจ่ายเงินรายเดือน — ${project.name}`],
+      [`ยอดที่ต้องเตรียมจ่ายแต่ละเดือน (ตามวันครบกำหนดจ่าย) · Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+    rowsP.push(["เดือนที่ต้องจ่าย","จำนวนงวด","เงินสด (THB)","เครดิต (THB)","รวมต้องจ่าย (THB)","จ่ายแล้ว (THB)","คงเหลือต้องจ่าย (THB)"]);
+    const dataStartP = rowsP.length;
+    let tN=0,tCash=0,tCredit=0,tSum=0,tPaid=0,tRemain=0;
+    payMonths.forEach(mk => {
+      const lines  = payLines.filter(l=>monthKey(l)===mk);
+      const cash   = lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0);
+      const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
+      const sum    = cash+credit;
+      const paidA  = lines.filter(l=>l.paid).reduce((s,l)=>s+l.amount,0);
+      const remain = Math.max(0, sum - paidA);
+      const label  = mk==="9999-99" ? "ยังไม่ระบุวันจ่าย" : monthShortLabel(mk);
+      rowsP.push([label, lines.length, cash, credit, sum, paidA, remain]);
+      tN+=lines.length; tCash+=cash; tCredit+=credit; tSum+=sum; tPaid+=paidA; tRemain+=remain;
+    });
+    const dataEndP = rowsP.length-1;
+    rowsP.push(["TOTAL", tN, tCash, tCredit, tSum, tPaid, tRemain]);
+    const totalRowP = rowsP.length-1;
+    const wsP = XLSX.utils.aoa_to_sheet(rowsP);
+    wsP["!cols"] = [{wch:18},{wch:10},{wch:16},{wch:16},{wch:18},{wch:16},{wch:20}];
+    styleSheet(wsP, { numCols:7, subRows:[1], headerRow:3, dataStart:dataStartP, dataEnd:dataEndP, totalRow:totalRowP,
+      moneyCols:[2,3,4,5,6], centerCols:[1], theme });
+    XLSX.utils.book_append_sheet(wb, wsP, "แผนจ่ายรายเดือน");
+
+    // Sheet 6 — แผนจ่ายแบบละเอียด (แต่ละงวด) จัดกลุ่ม/เรียงตามเดือนที่ต้องจ่าย
+    const sorted = payLines.slice().sort((a,b)=>
+      (monthKey(a).localeCompare(monthKey(b))) ||
+      ((a.payDate||"9999").localeCompare(b.payDate||"9999")) ||
+      a.supplier.localeCompare(b.supplier));
+    const rowsD = [[`แผนจ่าย (รายละเอียดแต่ละงวด) — ${project.name}`],
+      [`เรียงตามเดือนที่ต้องจ่าย · ${payLines.length} งวด · Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+    rowsD.push(["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","สถานะจ่าย"]);
+    const dataStartD = rowsD.length;
+    const rowGroupsD = [];
+    let grandD = 0;
+    sorted.forEach(l => {
+      const mk = monthKey(l);
+      const label = mk==="9999-99" ? "ยังไม่ระบุ" : monthShortLabel(mk);
+      rowsD.push([label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, `${l.incoming} (${l.incomingType})`, l.amount, l.status]);
+      rowGroupsD.push(mk);
+      grandD += l.amount;
+    });
+    const dataEndD = rowsD.length-1;
+    rowsD.push(["","","","","","","","TOTAL", grandD, ""]);
+    const totalRowD = rowsD.length-1;
+    const wsD = XLSX.utils.aoa_to_sheet(rowsD);
+    wsD["!cols"] = [{wch:14},{wch:16},{wch:22},{wch:14},{wch:10},{wch:30},{wch:14},{wch:20},{wch:18},{wch:14}];
+    styleSheet(wsD, { numCols:10, subRows:[1], headerRow:3, dataStart:dataStartD, dataEnd:dataEndD, totalRow:totalRowD,
+      moneyCols:[8], statusCols:[9], theme, rowGroups:rowGroupsD, groupDisplayCol:0 });
+    XLSX.utils.book_append_sheet(wb, wsD, "แผนจ่าย (รายละเอียด)");
+  }
+
   XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
