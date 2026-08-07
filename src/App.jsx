@@ -4929,8 +4929,6 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                     {label:"Budget (QS)", key:"budget"},
                     {label:"Committed (PO)", key:"committed"},
                     {label:"ส่วนต่าง", key:"variance"},
-                    {label:"% Used", key:"pct"},
-                    {label:"", key:null},
                   ].map(({label,key})=>(
                     <th key={label||"__actions"}
                       style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","ส่วนต่าง","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
@@ -4941,7 +4939,6 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               </thead>
               <tbody>
                 {displayAccountData.map((a,i)=>{
-                  const p2=a.budget>0?(a.committed/a.budget*100):a.committed>0?999:0;
                   const variance = a.budget - a.committed;
                   return (
                     <tr key={a.code} style={{background:a.over?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
@@ -4954,15 +4951,6 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?700:500}}>
                         {a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—"}
-                      </td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:p2>100?T.red:p2>80?T.amber:T.green,fontSize:12,fontWeight:600}}>
-                        {a.budget>0?`${p2.toFixed(1)}%`:a.committed>0?"No Budget":"—"}
-                      </td>
-                      <td style={{padding:"10px 16px"}}>
-                        {a.over
-                          ? <span style={{background:T.redBg,color:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>⚠ เกินงบ</span>
-                          : a.committed>0 ? <span style={{background:T.greenBg,color:T.green,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>OK</span>
-                          : a.budget>0 ? <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:20}}>ยังไม่ PO</span> : null}
                       </td>
                     </tr>
                   );
@@ -4981,7 +4969,6 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                       </td>
                     );
                   })()}
-                  <td colSpan={2}/>
                 </tr>
               </tfoot>
             </table>
