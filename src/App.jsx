@@ -563,12 +563,87 @@ function addBarChartSheet(wb, sheetName, title, theme, items) {
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
 }
 
+// หน้า "สรุป (Dashboard)" — การ์ดตัวเลข + กราฟแท่งรายเดือน อยู่ในหน้าเดียวกัน
+function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], chartTitle, items = [] }) {
+  items = items.filter(Boolean);
+  const n = items.length;
+  const C = Math.max(1 + n, 8);              // อย่างน้อย 8 คอลัมน์ (การ์ด 4 ใบ × 2)
+  const H = 10;                              // ความสูงกราฟ (แถว)
+  const cardLabelRow = 3, cardValRow = 4, chartTitleRow = 6, valueRow = 7, chartTop = 8, labelRow = chartTop + H;
+  const nRows = labelRow + 2;
+  const aoa = Array.from({ length:nRows }, () => new Array(C).fill(""));
+  aoa[0][0] = title; aoa[1][0] = subtitle || ""; aoa[chartTitleRow][0] = chartTitle || "";
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = [
+    { s:{r:0,c:0}, e:{r:0,c:C-1} },
+    { s:{r:1,c:0}, e:{r:1,c:C-1} },
+    { s:{r:chartTitleRow,c:0}, e:{r:chartTitleRow,c:C-1} },
+  ];
+  ws["!cols"] = [{ wch:4 }, ...Array.from({ length:C-1 }, () => ({ wch:11 }))];
+  ws["!rows"] = [];
+  ws["!rows"][0]={hpx:30}; ws["!rows"][1]={hpx:16};
+  ws["!rows"][cardLabelRow]={hpx:18}; ws["!rows"][cardValRow]={hpx:32};
+  ws["!rows"][chartTitleRow]={hpx:22};
+  for (let r=chartTop; r<chartTop+H; r++) ws["!rows"][r]={hpx:14};
+  ws["!rows"][labelRow]={hpx:22};
+  const setS = (r, c, s, v) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    if (v != null) ws[ref] = { t: typeof v === "number" ? "n" : "s", v };
+    else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    ws[ref].s = s;
+  };
+  setS(0,0,{ font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  setS(1,0,{ font:{italic:true,sz:10,color:{rgb:"64748B"},name:"Arial"} });
+  setS(chartTitleRow,0,{ font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  // การ์ดสรุป 4 ใบ (แต่ละใบกว้าง 2 คอลัมน์)
+  const ACC = [["DBEAFE","1D4ED8"],["D1FAE5","047857"],["FEF3C7","92400E"],["EDE9FE","6D28D9"]];
+  cards.slice(0,4).forEach((cd, i) => {
+    const c0 = i*2, c1 = c0+1, [bg,fg] = ACC[i%4];
+    ws["!merges"].push({ s:{r:cardLabelRow,c:c0}, e:{r:cardLabelRow,c:c1} });
+    ws["!merges"].push({ s:{r:cardValRow,c:c0}, e:{r:cardValRow,c:c1} });
+    setS(cardLabelRow, c0, { font:{bold:true,sz:9.5,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"} }, cd.label);
+    setS(cardLabelRow, c1, { fill:{fgColor:{rgb:bg}} });
+    setS(cardValRow, c0, { font:{bold:true,sz:15,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"}, numFmt: cd.money?"#,##0":undefined }, cd.value);
+    setS(cardValRow, c1, { fill:{fgColor:{rgb:bg}} });
+  });
+  // กราฟแท่ง
+  const max = Math.max(...items.map(i=>i.value||0), 1);
+  const barOn = theme.main, barOff = "F3F4F6";
+  items.forEach((it, i) => {
+    const c = 1+i;
+    const filled = Math.max(0, Math.round(((it.value||0)/max)*H));
+    setS(valueRow, c, { font:{bold:true,sz:8.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
+    for (let k=0; k<H; k++) { const r = chartTop+(H-1-k); setS(r, c, { fill:{fgColor:{rgb: k<filled?barOn:barOff }} }); }
+    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Arial"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
+  });
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+}
+
 // ─── QS: budget / tender-cost export ───────────────────────────────────────
 function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"2563EB", dark:"1D4ED8" };
   const combinedBudget = buildCombinedBudget(tenderCosts, additions);
   const accounts = exportAccountList(extraItems, hiddenAccounts);
+
+  // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดเพิ่มรายเดือน (ในหน้าเดียว)
+  const dashMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + (parseFloat((additions[m]||{})[a.code])||0), 0) }));
+  const dashBase   = accounts.reduce((s,a)=> s + (parseFloat(tenderCosts[a.code])||0), 0);
+  const dashAdded  = dashItems.reduce((s,i)=> s + i.value, 0);
+  addDashboardSheet(wb, "สรุป", {
+    title: `สรุปงบประมาณ — ${project.name}`,
+    subtitle: `พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`,
+    theme,
+    cards: [
+      { label:"ราคาเดิม (Baseline)", value: dashBase, money:true },
+      { label:"เพิ่มรายเดือนรวม",    value: dashAdded, money:true },
+      { label:"งบรวมทั้งหมด",         value: dashBase + dashAdded, money:true },
+      { label:"จำนวนเดือน",           value: dashMonths.length },
+    ],
+    chartTitle: "กราฟ: ยอดเพิ่มรายเดือน (THB)",
+    items: dashItems,
+  });
 
   // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
   const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
@@ -621,10 +696,6 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
     moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length], theme, rowGroups:rowGroups2 });
   XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
-
-  // กราฟแท่ง — ยอดเพิ่มรายเดือน
-  addBarChartSheet(wb, "กราฟรายเดือน", `ยอดเพิ่มรายเดือน — ${project.name}`, theme,
-    months.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + (parseFloat((additions[m]||{})[a.code])||0), 0) })));
 
   // Sheet 3+ — แยกรายเดือน โดย breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น ๆ
   // คอลัมน์เก็บเป็นรายเดือน แต่ละเดือนอาจมีชุดคอลัมน์ต่างกัน → ทำหนึ่งชีตต่อเดือน
@@ -732,6 +803,24 @@ function exportProcurementExcel(project, poEntries) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"F59E0B", dark:"B45309" };
 
+  // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดสั่งซื้อรายเดือน
+  const dPaid = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
+  const dTotal = poEntries.reduce((s,p)=> s + poTotal(p), 0);
+  const dMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
+  addDashboardSheet(wb, "สรุป", {
+    title: `สรุปจัดซื้อ (PO) — ${project.name}`,
+    subtitle: `Export: ${new Date().toLocaleDateString("th-TH")}`,
+    theme,
+    cards: [
+      { label:"จำนวน PO",     value: poEntries.length },
+      { label:"มูลค่ารวม",     value: dTotal, money:true },
+      { label:"จ่ายแล้ว",      value: dPaid, money:true },
+      { label:"คงค้างจ่าย",    value: Math.max(dTotal - dPaid, 0), money:true },
+    ],
+    chartTitle: "กราฟ: ยอดสั่งซื้อรายเดือน (ตามวันเปิด PO)",
+    items: dMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) })),
+  });
+
   // Sheet 1 — every PO line, with open/delivery/payment dates side by side
   const rows1 = [[`รายการ PO — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}  ·  ทั้งหมด ${poEntries.length} PO`], []];
   rows1.push(["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"]);
@@ -806,10 +895,6 @@ function exportProcurementExcel(project, poEntries) {
     styleSheet(ws3, { numCols:numCols3, subRows:[1], headerRow:3, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3,
       moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
     XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน (สรุปกลุ่ม)");
-
-    // กราฟแท่ง — ยอดสั่งซื้อรายเดือน (ตามวันเปิด PO)
-    addBarChartSheet(wb, "กราฟรายเดือน", `ยอดสั่งซื้อรายเดือน — ${project.name}`, theme,
-      poMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) })));
 
     // Sheet 4+ — รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
     const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
