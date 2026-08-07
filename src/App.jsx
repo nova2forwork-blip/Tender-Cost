@@ -239,6 +239,54 @@ const poNextDueDate = (p) => {
   return due.length ? due[0] : "";
 };
 
+// ─── แผนจ่ายเงิน (Payment forecast lines) ───────────────────────────────────
+// คืน "งวดจ่าย" ของ PO หนึ่งใบ สำหรับหน้าแผนจ่าย/Export. ปกติแตกตามงวดส่งของ
+// (แต่ละงวดมียอด planAmount/actualAmount ของตัวเอง ซึ่งควรรวมกัน = ยอด item)
+// แต่ถ้ายอดรวมของงวดไม่ตรงกับยอด item (เช่นมีงวดซ้ำยอดเต็ม) จะยุบเหลือ "หนึ่ง
+// บรรทัดต่อ item" โดยยึดยอด item.amount เป็นหลัก เพื่อกันการนับซ้ำ. วันครบกำหนด
+// จ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้วันแผน) + เทอมเครดิต; เงินสดจ่ายวันรับของ.
+const poPayLines = (p) => {
+  const P = migratePO(p);
+  const isCash = P.paymentType === "cash";
+  const term = isCash ? 0 : (parseInt(P.creditDays,10) || DEFAULT_CREDIT_DAYS);
+  const method = isCash ? "เงินสด" : `เครดิต ${term} วัน`;
+  const dueOf = (incoming) => incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
+  const roundAmt = (r) => (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
+  const out = [];
+  poItems(P).forEach(it => {
+    const itemAmt = parseFloat(it.amount)||0;
+    const rounds  = it.rounds || [];
+    const roundSum = rounds.reduce((s,r)=>s+roundAmt(r), 0);
+    // งวดกระทบยอดตรงกับ item → เชื่อถือได้ ให้แตกเป็นรายงวดจริง
+    const reconciled = rounds.length>0 && itemAmt>0 && Math.abs(roundSum - itemAmt) <= 0.5;
+    if (reconciled) {
+      rounds.forEach(r => {
+        const amount = roundAmt(r);
+        if (amount <= 0) return;
+        const incoming = r.actualDate || r.planDate || "";
+        out.push({ code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
+          payDate: dueOf(incoming), amount, paid: roundPaid(P, r) });
+      });
+    } else if (itemAmt > 0) {
+      // ยอดงวดไม่ตรง (หรือไม่มีงวด) → ยุบเหลือบรรทัดเดียว ใช้ยอด item เป็นหลัก
+      const actualDates = rounds.map(r=>r.actualDate).filter(Boolean).sort();
+      const planDates   = rounds.map(r=>r.planDate).filter(Boolean).sort();
+      const incoming = actualDates[0] || planDates[0] || "";
+      const paidAmt  = rounds.filter(r=>roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+      out.push({ code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
+        payDate: dueOf(incoming), amount: itemAmt, paid: paidAmt >= itemAmt-0.5 });
+    }
+  });
+  const today = todayStr();
+  return out.map(l => ({
+    ...l, isCash, method,
+    supplier: poSupplierName(P), poNo: poNumbersLabel(P),
+    accName: (ACCOUNTS.find(a=>a.code===l.code)?.name)||"",
+    month: l.payDate ? l.payDate.slice(0,7) : "",
+    status: l.paid ? "paid" : (l.payDate && l.payDate < today ? "late" : "pending"),
+  }));
+};
+
 // ─── Lock completed POs ─────────────────────────────────────────────────────
 // Once a PO has been fully received AND fully paid, its numbers are final —
 // only an admin can still edit or delete it, so the paper trail for a closed
@@ -1385,34 +1433,9 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
 
   // ─── Sheet 5 + 6 — แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────
   // สำหรับบัญชี: มองไปข้างหน้าว่าเดือนไหนต้องเตรียมเงินจ่ายเท่าไหร่ จ่ายอะไร และ
-  // จ่ายแบบไหน (เงินสด/เครดิต). วันครบกำหนดจ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้
-  // วันแผน) + เทอมเครดิตของ PO; ยอด = ยอดจริงถ้ามี ไม่มีใช้ยอดแผน.
-  const today = todayStr();
-  const payLines = [];
-  poEntries.forEach(p => {
-    const P = migratePO(p);
-    const isCash = P.paymentType === "cash";
-    const term = isCash ? 0 : (parseInt(P.creditDays,10) || DEFAULT_CREDIT_DAYS);
-    const method = isCash ? "เงินสด" : `เครดิต ${term} วัน`;
-    poItems(p).forEach(it => {
-      const acc = ACCOUNTS.find(a=>a.code===it.code);
-      (it.rounds||[]).forEach(r => {
-        const amount = (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
-        if (amount <= 0) return;
-        const incoming = r.actualDate || r.planDate || "";       // วันรับของ: จริงถ้ามี ไม่มีใช้แผน
-        const payDate  = incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
-        const paid     = roundPaid(p, r);
-        const status   = paid ? "จ่ายแล้ว" : (payDate && payDate < today ? "เกินกำหนดจ่าย" : "รอจ่าย");
-        payLines.push({
-          payDate, month: payDate ? payDate.slice(0,7) : "",
-          supplier: poSupplierName(p), poNo: poNumbersLabel(p),
-          code: it.code || "", accName: acc?.name || "", method, isCash,
-          incoming: incoming || "-", incomingType: r.actualDate ? "จริง" : (r.planDate ? "แผน" : "-"),
-          amount, paid, status,
-        });
-      });
-    });
-  });
+  // จ่ายแบบไหน (เงินสด/เครดิต). ใช้ตัวช่วย poPayLines() ตัวเดียวกับหน้าแอพ เพื่อ
+  // ให้ตัวเลขตรงกันและกันการนับซ้ำเมื่อ PO มีงวดส่งของซ้ำ.
+  const payLines = poEntries.flatMap(poPayLines);
   if (payLines.length) {
     const monthKey = (l) => l.month || "9999-99";
     const payMonths = [...new Set(payLines.map(monthKey))].sort();
@@ -1457,7 +1480,8 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     sorted.forEach(l => {
       const mk = monthKey(l);
       const label = mk==="9999-99" ? "ยังไม่ระบุ" : monthShortLabel(mk);
-      rowsD.push([label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, `${l.incoming} (${l.incomingType})`, l.amount, l.status]);
+      const incomingTxt = l.incoming ? `${l.incoming}${l.incomingType?` (${l.incomingType})`:""}` : "-";
+      rowsD.push([label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status]]);
       rowGroupsD.push(mk);
       grandD += l.amount;
     });
@@ -3783,7 +3807,11 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   };
   const splitRound = (itemId) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
-    setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:itemRemaining(it), actualAmount:"", actualDate:"" }]);
+    // ยอดงวดใหม่ = ส่วนที่ยัง "ไม่ถูกวางแผน" (ยอด item − ยอดแผนของงวดที่มีอยู่)
+    // เพื่อให้ผลรวมยอดทุกงวด = ยอด item เสมอ ไม่เกิดงวดยอดเต็มซ้ำ
+    const plannedSoFar = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
+    const remaining = Math.max((parseFloat(it.amount)||0) - plannedSoFar, 0);
+    setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:remaining, actualAmount:"", actualDate:"" }]);
   };
   const roundBadge = (r) => {
     if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
@@ -4758,31 +4786,10 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
   })();
 
   // ─── แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────────────────
-  // สำหรับบัญชีดูว่าเดือนไหนต้องเตรียมเงินจ่ายเท่าไหร่ จ่ายอะไร และจ่ายแบบไหน.
-  // วันครบกำหนดจ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้วันแผน) + เทอมเครดิตของ PO;
-  // ยอด = ยอดจริงถ้ามี ไม่มีใช้ยอดแผน. งวดที่ยังไม่มีวันรับของ = "ยังไม่ระบุ".
+  // ใช้ตัวช่วย poPayLines() ตัวเดียวกับ Export เพื่อให้ตัวเลขตรงกัน และกันการนับ
+  // ซ้ำเมื่อ PO มีงวดส่งของซ้ำ (ยึดยอด item.amount เป็นหลัก).
   const payToday = todayStr();
-  const payLines = [];
-  poEntries.forEach(p => {
-    const P = migratePO(p);
-    const isCash = P.paymentType === "cash";
-    const term = isCash ? 0 : (parseInt(P.creditDays,10) || DEFAULT_CREDIT_DAYS);
-    const method = isCash ? "เงินสด" : `เครดิต ${term} วัน`;
-    poItems(p).forEach(it => {
-      const acc = ACCOUNTS.find(a=>a.code===it.code);
-      (it.rounds||[]).forEach(r => {
-        const amount = (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
-        if (amount <= 0) return;
-        const incoming = r.actualDate || r.planDate || "";
-        const payDate  = incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
-        const paid     = roundPaid(p, r);
-        const status   = paid ? "paid" : (payDate && payDate < payToday ? "late" : "pending");
-        payLines.push({ payDate, month: payDate ? payDate.slice(0,7) : "", supplier: poSupplierName(p),
-          poNo: poNumbersLabel(p), code: it.code||"", accName: acc?.name||"", method, isCash,
-          incoming, incomingType: r.actualDate ? "จริง" : (r.planDate ? "แผน" : ""), amount, paid, status });
-      });
-    });
-  });
+  const payLines = poEntries.flatMap(poPayLines);
   const payMonthKeys = [...new Set(payLines.map(l=>l.month||"9999-99"))].sort();
   const payByMonth = payMonthKeys.map(mk => {
     const lines  = payLines.filter(l=>(l.month||"9999-99")===mk).sort((a,b)=>(a.payDate||"9999").localeCompare(b.payDate||"9999"));
@@ -5004,38 +5011,50 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 {dateGroups.map(a => {
                   const isCollapsed = dateCollapsed.has(a.code);
-                  const varClr = a.variancePct===null ? T.textMuted : a.variance<0 ? T.red : T.green;
+                  const pctUsed   = a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0?999:0);
+                  const barPct    = a.budget>0 ? Math.min(pctUsed,100) : (a.committed>0?100:0);
+                  const barClr    = pctUsed>100?T.red:pctUsed>80?T.amber:T.green;
+                  const statusClr = a.over?T.red:a.committed>0?T.green:T.textMuted;
+                  const statusBg  = a.over?T.redBg:a.committed>0?T.greenBg:"#eef1f5";
+                  const statusTxt = a.over?"⚠ เกินงบ":a.committed>0?"✅ OK":a.budget>0?"ยังไม่ PO":"—";
+                  const varClr    = a.variancePct===null ? T.textMuted : a.variance<0 ? T.red : T.green;
                   return (
-                    <div key={a.code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                    <div key={a.code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderLeft:`4px solid ${statusClr}`,borderRadius:14,overflow:"hidden"}}>
                       <div onClick={()=>toggleDateGroup(a.code)}
-                        style={{padding:"12px 18px",background:a.over?"#fff5f5":"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:16,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
-                        <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
-                        <div style={{minWidth:180}}>
-                          <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,marginRight:8}}>{a.code}</span>
-                          <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{a.name}</span>
+                        style={{padding:"14px 18px",background:a.over?"#fff8f8":"#fbfcfe",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,cursor:"pointer",userSelect:"none"}}>
+                        {/* บรรทัด 1: ชื่อ + สถานะ */}
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                          <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12,flexShrink:0}}>▼</span>
+                          <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,background:T.blueLight,padding:"2px 8px",borderRadius:6,flexShrink:0}}>{a.code}</span>
+                          <span style={{color:T.textPrimary,fontSize:14,fontWeight:600,flex:1,minWidth:0}}>{a.name}</span>
+                          <span style={{background:statusBg,color:statusClr,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:700,whiteSpace:"nowrap",flexShrink:0}}>{statusTxt}</span>
                         </div>
-                        <div style={{flex:1}}/>
-                        <div style={{textAlign:"right"}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>งบ</div>
-                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{a.budget>0?fmt(a.budget):"—"}</div>
+                        {/* บรรทัด 2: แถบใช้งบ */}
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}}>
+                            <div style={{width:`${barPct}%`,background:barClr,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
+                          </div>
+                          <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:barClr,minWidth:56,textAlign:"right"}}>
+                            {a.budget>0?`${pctUsed.toFixed(0)}%`:"ไม่มีงบ"}
+                          </span>
                         </div>
-                        <div style={{textAlign:"right"}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>PO</div>
-                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
-                        </div>
-                        <div style={{textAlign:"right",minWidth:110}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>ส่วนต่าง</div>
-                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
-                            {a.variancePct===null ? "No Budget" : `${a.variance<0?"-":"+"}${fmt(Math.abs(a.variance))}`}
+                        {/* บรรทัด 3: ตัวเลขสรุป 3 ช่อง */}
+                        <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>งบประมาณ</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.blue}}>{a.budget>0?fmt(a.budget):"—"}</div>
+                          </div>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>PO (Committed)</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
+                          </div>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{a.variance<0?"เกินงบ":"คงเหลือ"}</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
+                              {a.variancePct===null ? "No Budget" : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}
+                            </div>
                           </div>
                         </div>
-                        <div style={{textAlign:"right",minWidth:70}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>% ต่าง</div>
-                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
-                            {a.variancePct===null ? "—" : `${a.variancePct<0?"-":"+"}${Math.abs(a.variancePct).toFixed(1)}%`}
-                          </div>
-                        </div>
-                        {a.over && <Badge text="⚠ เกินงบ" clr={T.red} bg={T.redBg}/>}
                       </div>
                       {!isCollapsed && (
                         a.rows.length===0 ? (
