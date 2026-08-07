@@ -4671,6 +4671,13 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     next.has(code) ? next.delete(code) : next.add(code);
     return next;
   });
+  // Which months are collapsed on the "แผนจ่าย" (payment plan) tab.
+  const [planCollapsed, setPlanCollapsed] = useState(() => new Set());
+  const togglePlanMonth = (mk) => setPlanCollapsed(prev => {
+    const next = new Set(prev);
+    next.has(mk) ? next.delete(mk) : next.add(mk);
+    return next;
+  });
 
   // Budget = baseline Tender Cost + every monthly addition entered so far,
   // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
@@ -4750,6 +4757,47 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     return arr;
   })();
 
+  // ─── แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────────────────
+  // สำหรับบัญชีดูว่าเดือนไหนต้องเตรียมเงินจ่ายเท่าไหร่ จ่ายอะไร และจ่ายแบบไหน.
+  // วันครบกำหนดจ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้วันแผน) + เทอมเครดิตของ PO;
+  // ยอด = ยอดจริงถ้ามี ไม่มีใช้ยอดแผน. งวดที่ยังไม่มีวันรับของ = "ยังไม่ระบุ".
+  const payToday = todayStr();
+  const payLines = [];
+  poEntries.forEach(p => {
+    const P = migratePO(p);
+    const isCash = P.paymentType === "cash";
+    const term = isCash ? 0 : (parseInt(P.creditDays,10) || DEFAULT_CREDIT_DAYS);
+    const method = isCash ? "เงินสด" : `เครดิต ${term} วัน`;
+    poItems(p).forEach(it => {
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      (it.rounds||[]).forEach(r => {
+        const amount = (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
+        if (amount <= 0) return;
+        const incoming = r.actualDate || r.planDate || "";
+        const payDate  = incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
+        const paid     = roundPaid(p, r);
+        const status   = paid ? "paid" : (payDate && payDate < payToday ? "late" : "pending");
+        payLines.push({ payDate, month: payDate ? payDate.slice(0,7) : "", supplier: poSupplierName(p),
+          poNo: poNumbersLabel(p), code: it.code||"", accName: acc?.name||"", method, isCash,
+          incoming, incomingType: r.actualDate ? "จริง" : (r.planDate ? "แผน" : ""), amount, paid, status });
+      });
+    });
+  });
+  const payMonthKeys = [...new Set(payLines.map(l=>l.month||"9999-99"))].sort();
+  const payByMonth = payMonthKeys.map(mk => {
+    const lines  = payLines.filter(l=>(l.month||"9999-99")===mk).sort((a,b)=>(a.payDate||"9999").localeCompare(b.payDate||"9999"));
+    const cash   = lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0);
+    const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
+    const sum    = cash+credit;
+    const paidA  = lines.filter(l=>l.paid).reduce((s,l)=>s+l.amount,0);
+    return { mk, label: mk==="9999-99"?"ยังไม่ระบุวันจ่าย":monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
+  });
+  const planTotal  = payLines.reduce((s,l)=>s+l.amount,0);
+  const planPaid   = payLines.filter(l=>l.paid).reduce((s,l)=>s+l.amount,0);
+  const planRemain = Math.max(0, planTotal - planPaid);
+  const thisMonthKey = payToday.slice(0,7);
+  const dueThisMonth = payByMonth.find(m=>m.mk===thisMonthKey)?.remain || 0;
+
   const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+poTotal(p),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
   const CT = ({active,payload}) => {
@@ -4797,7 +4845,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:24,alignItems:"center"}}>
-          {[["dashboard","📊 Dashboard"],["dates","📅 วันที่ (Cash Flow)"]].map(([v,l])=>(
+          {[["dashboard","📊 Dashboard"],["dates","📅 วันที่ (Cash Flow)"],["plan","💰 แผนจ่าย"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
@@ -4932,7 +4980,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
             </table>
             </div>
           </>
-        ) : (
+        ) : view==="dates" ? (
           <div>
             {/* Grand totals across every Acc. Code that has a budget or a PO */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
@@ -5020,6 +5068,91 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                           </tbody>
                         </table>
                         )
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div>
+            {/* สรุปยอดที่ต้องเตรียมจ่าย */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+              <StatCard label="ต้องจ่ายทั้งหมด" value={fmt(planTotal)} sub={`${payLines.length} งวด`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="จ่ายแล้ว" value={fmt(planPaid)} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label="คงเหลือต้องจ่าย" value={fmt(planRemain)} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
+              <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={fmt(dueThisMonth)} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
+            </div>
+
+            {payByMonth.length===0 ? (
+              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+                <div style={{fontSize:32,marginBottom:12}}>💰</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>ยังไม่มีงวดจ่ายให้แสดง</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>วันครบกำหนดจ่ายมาจากวันรับของ (แผน/จริง) + เทอมเครดิตของ PO</div>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {payByMonth.map(m => {
+                  const isCollapsed = planCollapsed.has(m.mk);
+                  const isThis = m.mk===thisMonthKey;
+                  return (
+                    <div key={m.mk} style={{background:T.card,border:`1px solid ${isThis?T.amber:T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                      <div onClick={()=>togglePlanMonth(m.mk)}
+                        style={{padding:"12px 18px",background:isThis?T.amberBg:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:16,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
+                        <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
+                        <div style={{minWidth:150}}>
+                          <span style={{color:T.textPrimary,fontSize:14,fontWeight:700}}>{m.label}</span>
+                          {isThis && <span style={{marginLeft:8,background:T.amber,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>เดือนนี้</span>}
+                          <span style={{marginLeft:8,color:T.textMuted,fontSize:12}}>{m.lines.length} งวด</span>
+                        </div>
+                        <div style={{flex:1}}/>
+                        <div style={{textAlign:"right",minWidth:88}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เงินสด</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.green}}>{m.cash>0?fmt(m.cash):"—"}</div>
+                        </div>
+                        <div style={{textAlign:"right",minWidth:88}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เครดิต</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{m.credit>0?fmt(m.credit):"—"}</div>
+                        </div>
+                        <div style={{textAlign:"right",minWidth:100}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>รวมต้องจ่าย</div>
+                          <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.textPrimary}}>{fmt(m.sum)}</div>
+                        </div>
+                        <div style={{textAlign:"right",minWidth:100}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>คงเหลือ</div>
+                          <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:m.remain>0?T.amber:T.green}}>{fmt(m.remain)}</div>
+                        </div>
+                      </div>
+                      {!isCollapsed && (
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                          <thead>
+                            <tr>
+                              {["ครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","วิธีจ่าย","วันรับของ","ยอดต้องจ่าย (THB)","สถานะ"].map(h=>(
+                                <th key={h} style={{padding:"9px 16px",textAlign:h==="ยอดต้องจ่าย (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:10,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {m.lines.map((l,i)=>(
+                              <tr key={i} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
+                                <td style={{padding:"9px 16px"}}><DateCell value={l.payDate} lateTint={l.status==="late"}/></td>
+                                <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{l.supplier}</td>
+                                <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{l.poNo}</td>
+                                <td style={{padding:"9px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{l.code||"—"}</td>
+                                <td style={{padding:"9px 16px"}}>
+                                  <span style={{background:l.isCash?T.greenBg:T.blueLight,color:l.isCash?T.green:T.blue,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{l.method}</span>
+                                </td>
+                                <td style={{padding:"9px 16px",whiteSpace:"nowrap"}}>
+                                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{l.incoming||"—"}</span>
+                                  {l.incomingType && <span style={{marginLeft:5,fontSize:10,color:T.textMuted}}>({l.incomingType})</span>}
+                                </td>
+                                <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(l.amount)}</td>
+                                <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[l.status]} clr={PAYMENT_CLR[l.status]} bg={PAYMENT_BG[l.status]}/></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       )}
                     </div>
                   );
