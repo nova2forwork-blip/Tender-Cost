@@ -346,6 +346,8 @@ const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit:"#eff6ff", credit30:"#eff6ff
 // Label for a PO's payment method including its credit term, e.g. "เครดิต 45 วัน".
 const paymentTypeLabel = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return "เงินสด"; if (P.paymentType==="credit") return `เครดิต ${P.creditDays||DEFAULT_CREDIT_DAYS} วัน`; return "—"; };
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
+// บาทเต็ม (ไม่มีทศนิยม) — ใช้กับตัวเลขพาดหัวการ์ด/ยอดรวม ให้กวาดตาอ่านง่าย
+const fmt0 = n => new Intl.NumberFormat("th-TH",{maximumFractionDigits:0}).format(Math.round(n||0));
 const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
 // "2026-08" -> "ส.ค. 69" — used wherever a month key needs a short Thai label
 // (QS Monthly tab's chips/headers, and sub-item "เพิ่มเมื่อ ..." badges).
@@ -2224,7 +2226,7 @@ function AdminPanel({ onBack, onLogout, session }) {
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
-        <button onClick={onBack} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 12px",fontSize:18}}>←</button>
+        <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
         <div>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:16,fontWeight:700,color:"#fff",marginTop:2}}>Admin Panel</div>
@@ -2400,6 +2402,12 @@ function StatCard({ label, value, sub, color, icon, accent }) {
 // ─── Home Screen ──────────────────────────────────────────────────────────────
 function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
   const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB" });
+  const [projSearch, setProjSearch] = useState("");
+  const shownProjects = projects.filter(p => {
+    const q = projSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (p.name||"").toLowerCase().includes(q) || (p.client||"").toLowerCase().includes(q);
+  });
 
   const createProject = () => {
     if (!draft.name.trim()) return;
@@ -2467,10 +2475,20 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
           </div>
         ) : (
           <>
-            <div style={{fontSize:12,color:T.textMuted,marginBottom:18,fontWeight:500}}>{projects.length} โครงการทั้งหมด</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
-              {projects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={()=>deleteProject(p.id)} />)}
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
+              <input value={projSearch} onChange={e=>setProjSearch(e.target.value)} placeholder="🔍 ค้นหาโครงการ / ชื่อลูกค้า…"
+                style={{flex:1,minWidth:220,maxWidth:360,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
+              <span style={{fontSize:12,color:T.textMuted,fontWeight:500}}>
+                {projSearch.trim() ? `พบ ${shownProjects.length} จาก ${projects.length} โครงการ` : `${projects.length} โครงการทั้งหมด`}
+              </span>
             </div>
+            {shownProjects.length === 0 ? (
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ไม่พบโครงการที่ตรงกับ "{projSearch}"</div>
+            ) : (
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
+                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={()=>deleteProject(p.id)} />)}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -2552,7 +2570,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
-        <button onClick={onBack} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 12px",fontSize:18}}>←</button>
+        <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
         <div>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:16,fontWeight:700,color:"#fff",marginTop:2}}>{project.name}</div>
@@ -2588,7 +2606,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
         )}
 
         <div style={{fontSize:13,color:T.textSecondary,marginBottom:20,fontWeight:500}}>เลือก Role การทำงาน</div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20,maxWidth:800}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:20,maxWidth:800}}>
           {ROLES.map(r => (
             <button key={r.id} onClick={()=>onSelect(r.id)} className="card-hover"
               style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:18,padding:"28px 24px",cursor:"pointer",textAlign:"left",display:"flex",flexDirection:"column",gap:12,position:"relative",overflow:"hidden"}}>
@@ -2619,7 +2637,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
   return (
     <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
       <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14}}>
-        <button onClick={onBack} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 12px",fontSize:18}}>←</button>
+        <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
         <div style={{flex:1}}>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
@@ -2850,10 +2868,10 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
   return (
     <div style={{padding:"4px 28px 24px"}}>
       {/* Stats */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:24}}>
-        <StatCard label="Tender Cost รวม" value={fmt(base)} sub="Base cost ทั้งหมด (ราคาเดิม)" color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="Spare & Wastage 3%" value={fmt(adj3)} sub="เผื่อสูญหาย" color={T.amber} icon="⚙️" accent={T.amberBg}/>
-        <StatCard label="Total Adjusted" value={fmt(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
+        <StatCard label="Tender Cost รวม" value={"฿"+fmt0(base)} sub="Base cost ทั้งหมด (ราคาเดิม)" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="Spare & Wastage 3%" value={"฿"+fmt0(adj3)} sub="เผื่อสูญหาย" color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label="Total Adjusted" value={"฿"+fmt0(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       {/* Filters + Add row + Save */}
@@ -3354,7 +3372,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6,flexWrap:"wrap",gap:6}}>
           <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📈 แนวโน้มต้นทุนสะสม</span>
-          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(grandTotal)}</b> THB</span>
+          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b></span>
+        </div>
+        <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.blue,display:"inline-block"}}/>ยอดก่อนหน้า (สะสม)</span>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.amber,display:"inline-block"}}/>เพิ่มเดือนนี้</span>
         </div>
         <ResponsiveContainer width="100%" height={170}>
           <BarChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}
@@ -3368,7 +3390,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" radius={[0,0,0,0]}>
               {chartData.map((e,i)=><Cell key={i} fill={T.blue} stroke={e.monthKey===month?T.blueDark:"none"} strokeWidth={e.monthKey===month?2.5:0} cursor="pointer"/>)}
             </Bar>
-            <Bar dataKey="added" stackId="cum" name="เพิ่มงวดนี้" radius={[4,4,0,0]}>
+            <Bar dataKey="added" stackId="cum" name="เพิ่มเดือนนี้" radius={[4,4,0,0]}>
               {chartData.map((e,i)=><Cell key={i} fill={T.amber} stroke={e.monthKey===month?T.blueDark:"none"} strokeWidth={e.monthKey===month?2.5:0} cursor="pointer"/>)}
             </Bar>
           </BarChart>
@@ -3419,11 +3441,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       </div>
 
       {/* Stats for selected month */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:16,marginBottom:20}}>
-        <StatCard label="ยอดยกมา (ก่อนเดือนนี้)" value={fmt(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="เพิ่มเดือนนี้" value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
-        <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
-        <StatCard label="รวมทั้งหมด" value={fmt(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+        <StatCard label="ยอดยกมา (ก่อนเดือนนี้)" value={"฿"+fmt0(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="เพิ่มเดือนนี้" value={"฿"+fmt0(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
+        <StatCard label="รวมสะสมถึงเดือนนี้" value={"฿"+fmt0(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="รวมทั้งหมด" value={"฿"+fmt0(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
       </div>
 
       {/* Toolbar: search + group filter + actions */}
@@ -3839,7 +3861,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   };
   const roundBadge = (r) => {
     if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
-    return roundPaid(po,r) ? ["จ่ายแล้ว (อัตโนมัติ)", PAYMENT_BG.paid, PAYMENT_CLR.paid]
+    return roundPaid(po,r) ? ["ถึงกำหนดจ่ายแล้ว", PAYMENT_BG.paid, PAYMENT_CLR.paid]
                            : ["ของเข้าแล้ว · รอครบกำหนด", INCOMING_BG.partial, INCOMING_CLR.partial];
   };
 
@@ -3928,8 +3950,8 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                          <span style={{fontSize:10,color:T.textSecondary}}>ของเข้าจริง (จำนวน)</span>
-                          <MoneyInput value={r.actualAmount} disabled={locked} placeholder="ยังไม่เข้า"
+                          <span style={{fontSize:10,color:T.textSecondary}}>ยอดของเข้าจริง (บาท)</span>
+                          <MoneyInput value={r.actualAmount} disabled={locked} placeholder="บาท"
                             onChange={v=>updateRound(it.id,r.id,"actualAmount",v)}/>
                         </label>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
@@ -4198,11 +4220,11 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   return (
     <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
-          <StatCard label="Budget (QS)" value={fmt(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
-          <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-          <StatCard label="ชำระแล้ว" value={fmt(totalPaid)} sub={`${paidCount} รายการ · จ่ายอัตโนมัติ`} color={T.green} icon="✅" accent={T.greenBg}/>
-          <StatCard label="Budget คงเหลือ" value={fmt(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+          <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
+          <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} sub={`${paidCount} รายการ · จ่ายอัตโนมัติ`} color={T.green} icon="✅" accent={T.greenBg}/>
+          <StatCard label="Budget คงเหลือ" value={"฿"+fmt0(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
         </div>
 
         {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
@@ -4580,11 +4602,11 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   return (
     <div>
       {/* Quick-glance counts so problems surface without reading every row */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
         <StatCard label="รอของเข้า" value={counts.incPending} sub="ยังไม่ถึงวันที่นัด" color={T.amber} icon="⏳" accent={T.amberBg}/>
         <StatCard label="ของเข้าล่าช้า" value={counts.incLate} sub="เลยวันแผนของเข้าแล้ว" color={T.red} icon="⚠️" accent={T.redBg}/>
         <StatCard label="รอจ่ายเงิน" value={counts.payPending} sub="ของเข้าแล้ว รอถึงกำหนด" color={T.amber} icon="⏳" accent={T.amberBg}/>
-        <StatCard label="จ่ายแล้ว (อัตโนมัติ)" value={counts.payPaid} sub="ถึงวันครบกำหนดแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="ถึงกำหนดจ่าย" value={counts.payPaid} sub="ถึงวันครบกำหนดแล้ว (ระบบทำเครื่องหมายให้)" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -4863,29 +4885,58 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     <Shell role="accounting" color={T.green} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
-        <div style={{display:"flex",gap:8,marginBottom:24,alignItems:"center"}}>
-          {[["dashboard","📊 Dashboard"],["dates","📅 วันที่ (Cash Flow)"],["plan","💰 แผนจ่าย"]].map(([v,l])=>(
-            <button key={v} onClick={()=>setView(v)}
+        <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
+          {[["dashboard","📊 ภาพรวม","ภาพรวมงบ vs ที่ผูกพันแล้ว (PO)"],["dates","📅 วันที่ (Cash Flow)","PO แต่ละหมวด + วันของเข้า/วันครบกำหนดจ่าย"],["plan","💰 แผนจ่าย","เงินที่ต้องเตรียมจ่าย แยกรายเดือน"]].map(([v,l,tip])=>(
+            <button key={v} onClick={()=>setView(v)} title={tip}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
           <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
             ⬇️ Export Excel
           </button>
         </div>
+        {/* คำอธิบายสี (legend) */}
+        <div style={{display:"flex",flexWrap:"wrap",gap:16,marginBottom:20,fontSize:11,color:T.textMuted,alignItems:"center"}}>
+          <span style={{fontWeight:700,color:T.textSecondary}}>คำอธิบายสี:</span>
+          {[[T.green,"ปกติ · ใช้งบ <80% · จ่ายแล้ว"],[T.amber,"เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย"],[T.red,"เกินงบ · เกินกำหนดจ่าย"]].map(([c,t])=>(
+            <span key={t} style={{display:"inline-flex",alignItems:"center",gap:6}}>
+              <span style={{width:11,height:11,borderRadius:3,background:c,display:"inline-block"}}/>{t}
+            </span>
+          ))}
+        </div>
 
         {view==="dashboard" ? (
           <>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
-              <StatCard label="งบประมาณ (QS)" value={fmt(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label="Invoiced" value={fmt(totalInvoiced)} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
-              <StatCard label="ชำระแล้ว (Paid)" value={fmt(totalPaid)} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
+              <StatCard label="งบประมาณ (QS)" value={"฿"+fmt0(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="ผูกพันแล้ว (PO)" value={"฿"+fmt0(totalComm)} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label="วางบิลแล้ว" value={"฿"+fmt0(totalInvoiced)} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
+              <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
+
+            {/* แถบเตือน "สิ่งที่ต้องสนใจ" */}
+            {(() => {
+              const overCount = accountData.filter(a=>a.over).length;
+              if (!overCount && dueThisMonth<=0) return null;
+              return (
+                <div style={{display:"flex",flexWrap:"wrap",gap:12,marginBottom:20}}>
+                  {overCount>0 && (
+                    <button onClick={()=>handleSort("variance")} title="เรียงตารางตามส่วนต่าง" style={{display:"flex",alignItems:"center",gap:8,background:T.redBg,color:T.red,border:`1px solid ${T.red}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                      ⚠ {overCount} หมวดเกินงบ <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· กดเพื่อเรียงดู</span>
+                    </button>
+                  )}
+                  {dueThisMonth>0 && (
+                    <button onClick={()=>setView("plan")} title="ไปหน้าแผนจ่าย" style={{display:"flex",alignItems:"center",gap:8,background:T.amberBg,color:T.amber,border:`1px solid ${T.amber}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                      💰 ครบกำหนดจ่ายเดือนนี้ ฿{fmt0(dueThisMonth)} <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· ดูแผนจ่าย</span>
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Progress */}
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22,marginBottom:20}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-                <span style={{fontSize:13,color:T.textPrimary,fontWeight:600}}>Budget Utilization</span>
+                <span style={{fontSize:13,color:T.textPrimary,fontWeight:600}}>สัดส่วนการใช้งบ</span>
                 <span style={{fontSize:13,color:tenderTotal-totalComm<0?T.red:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>
                   {tenderTotal-totalComm<0?"เกินงบ ":"คงเหลือ "}{fmt(Math.abs(tenderTotal-totalComm))}
                 </span>
@@ -4962,7 +5013,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.budget<=0&&a.committed>0?T.textMuted:variance<0?T.red:T.textSecondary,fontWeight:a.budget<=0&&a.committed>0?500:variance<0?700:500}}>
-                        {a.budget<=0&&a.committed>0 ? "No Budget" : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
+                        {a.budget<=0&&a.committed>0 ? "ไม่มีงบ" : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
                       </td>
                     </tr>
                   );
@@ -4989,10 +5040,10 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
         ) : view==="dates" ? (
           <div>
             {/* Grand totals across every Acc. Code that has a budget or a PO */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
-              <StatCard label="งบประมาณรวม" value={fmt(dateGroups.reduce((s,a)=>s+a.budget,0))} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="PO รวม" value={fmt(dateGroups.reduce((s,a)=>s+a.committed,0))} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label="ส่วนต่างรวม" value={fmt(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+              <StatCard label="งบประมาณรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="PO รวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label="ส่วนต่างรวม" value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))}
                 sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"เกินงบ":"คงเหลือ"}
                 color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
                 icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
@@ -5050,7 +5101,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                           <div style={{minWidth:96}}>
                             <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{a.variance<0?"เกินงบ":"คงเหลือ"}</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:varClr}}>
-                              {a.variancePct===null ? "No Budget" : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}
+                              {a.variancePct===null ? "ไม่มีงบ" : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}
                             </div>
                           </div>
                         </div>
@@ -5096,11 +5147,11 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
         ) : (
           <div>
             {/* สรุปยอดที่ต้องเตรียมจ่าย */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
-              <StatCard label="ต้องจ่ายทั้งหมด" value={fmt(planTotal)} sub={`${payLines.length} งวด`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="จ่ายแล้ว" value={fmt(planPaid)} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
-              <StatCard label="คงเหลือต้องจ่าย" value={fmt(planRemain)} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
-              <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={fmt(dueThisMonth)} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+              <StatCard label="ต้องจ่ายทั้งหมด" value={"฿"+fmt0(planTotal)} sub={`${payLines.length} งวด`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="จ่ายแล้ว" value={"฿"+fmt0(planPaid)} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label="คงเหลือต้องจ่าย" value={"฿"+fmt0(planRemain)} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
+              <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
             </div>
 
             {payByMonth.length===0 ? (
