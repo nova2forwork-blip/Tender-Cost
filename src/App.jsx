@@ -3133,7 +3133,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[m])?.[k.code])||0),0);
     const src  = draft || additions[m];
     const cols = draft ? columns : columnsOf(m);
-    if (cols.length) return cols.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0);
+    // เดือนที่มีคอลัมน์ย่อย: รวมค่าทุกคอลัมน์ + ค่าธรรมดาที่อาจตกค้างอยู่ (เช่นค่า
+    // ที่กรอกไว้ก่อนจะเพิ่มคอลัมน์) เพื่อไม่ให้ค่าธรรมดาหาย และให้ตรงกับไฟล์ Export
+    if (cols.length) return cols.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0) + (parseFloat(src?.[code])||0);
     return parseFloat(src?.[code]) || 0;
   };
 
@@ -3396,7 +3398,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Stats for selected month */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:16,marginBottom:20}}>
-        <StatCard label="ราคาเดิม (Baseline)" value={fmt(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="ยอดยกมา (ก่อนเดือนนี้)" value={fmt(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label="เพิ่มเดือนนี้" value={fmt(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
         <StatCard label="รวมสะสมถึงเดือนนี้" value={fmt(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
         <StatCard label="รวมทั้งหมด" value={fmt(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
