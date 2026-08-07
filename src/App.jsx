@@ -1213,37 +1213,53 @@ async function exportPORich(project, poEntries) {
   ws.autoFilter = `A${HR}:${colL(NC-1)}${HR}`;
   fitExcelCols(ws, HD, rows);
 
-  // ─── ชีต "รายเดือน" — สรุปตามเดือนที่เปิด PO (วันเปิด PO) ──────────────────
+  // ─── ชีต "รายเดือน" — แจกแจงราย PO ตามเดือนที่เปิด PO (วันเปิด PO) ─────────
   const moKeys = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
   if (moKeys.length) {
-    const MH  = ["เดือน","จำนวน PO","มูลค่า PO (THB)","จ่ายแล้ว (THB)","ค้างจ่าย (THB)","% จ่ายแล้ว"];
+    const MH  = ["เดือน","วันเปิด PO","PO No.","Supplier","มูลค่า PO (THB)","จ่ายแล้ว (THB)","ค้างจ่าย (THB)","% จ่ายแล้ว"];
     const MNC = MH.length;
+    const poPaid = (p) => poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0);
     const wsm = wb.addWorksheet("รายเดือน", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
-    wsm.mergeCells(1,1,1,MNC); const mt=wsm.getCell(1,1); mt.value=`สรุปจัดซื้อรายเดือน (ตามวันเปิด PO) — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF92400E"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
+    wsm.mergeCells(1,1,1,MNC); const mt=wsm.getCell(1,1); mt.value=`จัดซื้อรายเดือน (ตามวันเปิด PO) — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF92400E"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
     wsm.mergeCells(2,1,2,MNC); const mst=wsm.getCell(2,1); mst.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ${moKeys.length} เดือน · ${poEntries.length} PO`; mst.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; mst.alignment={indent:1};
     const MHR = 4;
-    MH.forEach((h,i)=>{ const c=wsm.getCell(MHR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===0?"left":"right",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wsm.getRow(MHR).height=24;
-    const moRows = moKeys.map(m => {
-      const list   = poEntries.filter(p => (p.date||"").slice(0,7) === m);
-      const mTotal = list.reduce((s,p)=> s + poTotal(p), 0);
-      const mPaid  = list.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
-      return { label: monthShortLabel(m), count: list.length, total: mTotal, paid: mPaid, outstanding: Math.max(0, mTotal - mPaid) };
+    MH.forEach((h,i)=>{ const c=wsm.getCell(MHR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i>=4?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wsm.getRow(MHR).height=24;
+    // สร้างแถว: หนึ่งแถวต่อ PO จัดกลุ่มตามเดือน + แถว "รวมเดือน" ท้ายแต่ละกลุ่ม
+    const bodyRows = [];
+    moKeys.forEach(m => {
+      const list = poEntries.filter(p => (p.date||"").slice(0,7) === m).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+      let sT=0, sP=0;
+      list.forEach((p,idx) => {
+        const t=poTotal(p), pd=poPaid(p);
+        sT+=t; sP+=pd;
+        bodyRows.push({ type:"po", month: idx===0?monthShortLabel(m):"", date:p.date||"-", no:poNumbersLabel(p), sup:poSupplierName(p), total:t, paid:pd, out:Math.max(0,t-pd) });
+      });
+      bodyRows.push({ type:"sub", label:`รวม ${monthShortLabel(m)}`, total:sT, paid:sP, out:Math.max(0,sT-sP) });
     });
-    moRows.forEach((r,ri)=>{ const R=MHR+1+ri;
-      [r.label, r.count, r.total, r.paid, r.outstanding, r.total>0 ? r.paid/r.total : 0].forEach((val,ci)=>{
+    let po_i = 0;
+    bodyRows.forEach((r,ri) => { const R = MHR+1+ri;
+      if (r.type === "sub") {
+        for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); cell.fill=fillS("FFFDEED3"); }
+        const lc=wsm.getCell(R,1); lc.value=r.label; lc.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; lc.alignment={vertical:"middle",indent:1};
+        [r.total, r.paid, r.out, r.total>0?r.paid/r.total:0].forEach((v,i)=>{ const c=wsm.getCell(R,5+i); c.value=v; c.numFmt = i===3 ? "0%" : "#,##0"; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
+        return;
+      }
+      [r.month, r.date, r.no, r.sup, r.total, r.paid, r.out, r.total>0?r.paid/r.total:0].forEach((val,ci)=>{
         const c=wsm.getCell(R,1+ci); c.value=val; c.font={name:F,size:9.5};
-        if(ci===0){ c.alignment={vertical:"middle",indent:1}; }
-        else if(ci===5){ c.numFmt="0%"; c.alignment={horizontal:"right",vertical:"middle"}; }
+        if(ci<=3){ c.alignment={vertical:"middle",indent:ci===0?1:0}; if(ci===0) c.font={name:F,size:9.5,bold:true,color:{argb:"FF92400E"}}; }
+        else if(ci===7){ c.numFmt="0%"; c.alignment={horizontal:"right",vertical:"middle"}; }
         else { c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; }
       });
-      if(ri%2) for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
+      if(po_i%2) for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
+      po_i++;
     });
-    const mtR = MHR + 1 + moRows.length;
+    const mtR = MHR + 1 + bodyRows.length;
     for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(mtR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
     const mtl=wsm.getCell(mtR,1); mtl.value="TOTAL"; mtl.font={bold:true,color:{argb:"FF92400E"},name:F}; mtl.alignment={vertical:"middle",indent:1};
-    const sumCount=moRows.reduce((s,r)=>s+r.count,0), sumTotal=moRows.reduce((s,r)=>s+r.total,0), sumPaid=moRows.reduce((s,r)=>s+r.paid,0), sumOut=moRows.reduce((s,r)=>s+r.outstanding,0);
-    [sumCount, sumTotal, sumPaid, sumOut, sumTotal>0?sumPaid/sumTotal:0].forEach((v,i)=>{ const c=wsm.getCell(mtR,2+i); c.value=v; c.numFmt = i===4 ? "0%" : "#,##0"; c.font={bold:true,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
-    wsm.getColumn(1).width = 16; for(let c=2;c<=MNC;c++) wsm.getColumn(c).width = 18;
+    const gT=poEntries.reduce((s,p)=>s+poTotal(p),0), gP=poEntries.reduce((s,p)=>s+poPaid(p),0);
+    [gT, gP, Math.max(0,gT-gP), gT>0?gP/gT:0].forEach((v,i)=>{ const c=wsm.getCell(mtR,5+i); c.value=v; c.numFmt = i===3 ? "0%" : "#,##0"; c.font={bold:true,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
+    wsm.getColumn(1).width=14; wsm.getColumn(2).width=14; wsm.getColumn(3).width=16; wsm.getColumn(4).width=26;
+    for(let c=5;c<=MNC;c++) wsm.getColumn(c).width = c===MNC ? 12 : 16;
     wsm.autoFilter = `A${MHR}:${colL(MNC-1)}${MHR}`;
   }
 
