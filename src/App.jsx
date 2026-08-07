@@ -428,25 +428,19 @@ const GLOBAL_CSS = `
 // Every department gets its own styled workbook — xlsx-js-style (a SheetJS
 // fork) lets us actually write cell colors/fonts/borders, which the plain
 // community "xlsx" package silently drops on write.
-// ยอดเพิ่มของ Acc. Code ในเดือน m = ค่าธรรมดา + ผลรวมทุกคอลัมน์ย่อยของ code นั้น
-// ตรงกับ rowMonthValue ในหน้าแอพ เพื่อให้ตัวเลขในไฟล์ Export ตรงกับที่เห็นบนแอพ
-// แม้เดือนนั้นจะมีการตั้งคอลัมน์ย่อยไว้ (ไม่ทำให้ค่าธรรมดาที่ตกค้างหาย)
-const monthAddValue = (additions, m, code) => {
-  const mo = additions && additions[m];
-  if (!mo) return 0;
-  let v = parseFloat(mo[code]) || 0;
-  const prefix = code + ":";
-  for (const k in mo) if (k.startsWith(prefix)) v += parseFloat(mo[k]) || 0;
-  return v;
-};
+// ยอดเพิ่มของ Acc. Code ในเดือน m = ค่าธรรมดา (code) ซึ่งคือ "ยอดรวมที่ roll-up
+// ไว้แล้ว" ของเดือนนั้น (handleSave ตั้ง code = ผลรวมคอลัมน์ย่อย/รายการย่อยเสมอ)
+// จึงอ่านตัวเดียว — ไม่บวกคีย์คอลัมน์ย่อย ":" ซ้ำ (กันนับซ้ำ) และคอลัมน์ที่ลบไป
+// แล้วก็ไม่ถูกนับ เพราะยอด roll-up ถูกคำนวณใหม่โดยไม่รวมคอลัมน์นั้น
+const monthAddValue = (additions, m, code) => parseFloat(additions?.[m]?.[code]) || 0;
 const buildCombinedBudget = (tenderCosts, additions) => {
   const combined = {...tenderCosts};
   Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
     if (mKey.startsWith("$")) return;
-    Object.entries(monthObj || {}).forEach(([key, val]) => {
-      if (key.startsWith("$")) return;
-      // คีย์คอลัมน์ย่อย "code:colId" ให้รวมยอดเข้ากับ code แม่ (เดิมถูกข้าม)
-      const code = key.includes(":") ? key.slice(0, key.indexOf(":")) : key;
+    Object.entries(monthObj || {}).forEach(([code, val]) => {
+      // ข้ามคีย์ meta ($…) และคีย์คอลัมน์ย่อย (code:colId) — ค่าเหล่านี้ถูก roll-up
+      // เข้าไปในค่าธรรมดา (code) แล้ว การบวกอีกจะนับซ้ำ
+      if (code.startsWith("$") || code.includes(":")) return;
       combined[code] = (parseFloat(combined[code]) || 0) + (parseFloat(val) || 0);
     });
   });
@@ -856,14 +850,11 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
     list.forEach((a,ri)=>{ const R=5+ri;
       const bs = parseFloat(tenderCosts[a.code])||0;
       const cv = hasCols ? cols.map(c=>parseFloat((additions[m]||{})[`${a.code}:${c.id}`])||0) : [parseFloat((additions[m]||{})[a.code])||0];
-      // ค่าธรรมดาที่ตกค้างในเดือนที่มีคอลัมน์ (บวกเข้ายอดรวมเดือนนี้ให้ตรงกับแอพ/สรุป)
-      const residual = hasCols ? (parseFloat((additions[m]||{})[a.code])||0) : 0;
-      const rowTot = cv.reduce((s,v)=>s+v,0) + residual;
-      mrows.push([a.code, a.name, a.group, bs, ...cv, rowTot]);
+      mrows.push([a.code, a.name, a.group, bs, ...cv, cv.reduce((s,v)=>s+v,0)]);
       wsm.getCell(R,1).value=a.code; wsm.getCell(R,2).value=a.name; wsm.getCell(R,3).value=a.group;
       const bc=wsm.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
       cv.forEach((v,vi)=>{ const c=wsm.getCell(R,5+vi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
-      const tc=wsm.getCell(R,nc); tc.value = { formula: residual ? `SUM(E${R}:${lastValL}${R})+${residual}` : `SUM(E${R}:${lastValL}${R})`, result: rowTot }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
+      const tc=wsm.getCell(R,nc); tc.value = { formula:`SUM(E${R}:${lastValL}${R})`, result: cv.reduce((s,v)=>s+v,0) }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
       [1,2,3].forEach(c=>{ wsm.getCell(R,c).font={name:F,size:9.5}; wsm.getCell(R,c).alignment={vertical:"middle"}; });
       if(ri%2) for(let c=1;c<=nc;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
     });
@@ -1067,9 +1058,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     const vals = hasCols
       ? cols.map(c => parseFloat((additions[month] || {})[`${a.code}:${c.id}`]) || 0)
       : [parseFloat((additions[month] || {})[a.code]) || 0];
-    // เดือนที่มีคอลัมน์: บวกค่าธรรมดาที่ตกค้างเข้ายอดรวมเดือนนี้ให้ตรงกับแอพ
-    const residual = hasCols ? (parseFloat((additions[month] || {})[a.code]) || 0) : 0;
-    const monthTot = vals.reduce((s, v) => s + v, 0) + residual;
+    const monthTot = vals.reduce((s, v) => s + v, 0);
     const cum = baseline + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
     if (monthTot <= 0 && baseline <= 0 && cum <= 0) return;
     rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum]);
@@ -3169,14 +3158,18 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // else its own plain entered value. Mirrors the Baseline tab's rollup logic.
   const kidsAsOf = (code, m) => childrenOf(code).filter(k => !k.addedInMonth || k.addedInMonth <= m);
   const rowMonthValue = (code, m, draft) => {
-    const kids = kidsAsOf(code, m);
-    if (kids.length) return kids.reduce((s,k)=>s+(parseFloat((draft||additions[m])?.[k.code])||0),0);
-    const src  = draft || additions[m];
-    const cols = draft ? columns : columnsOf(m);
-    // เดือนที่มีคอลัมน์ย่อย: รวมค่าทุกคอลัมน์ + ค่าธรรมดาที่อาจตกค้างอยู่ (เช่นค่า
-    // ที่กรอกไว้ก่อนจะเพิ่มคอลัมน์) เพื่อไม่ให้ค่าธรรมดาหาย และให้ตรงกับไฟล์ Export
-    if (cols.length) return cols.reduce((s,c)=>s+(parseFloat(src?.[`${code}:${c.id}`])||0),0) + (parseFloat(src?.[code])||0);
-    return parseFloat(src?.[code]) || 0;
+    // ── ระหว่างแก้ไข (มี draft): คิดสด ๆ จากค่าที่พิมพ์ = ผลรวมรายการย่อย/คอลัมน์
+    //    (คอลัมน์ที่ถูกลบออกจากร่างจะไม่ถูกนับ เพราะไม่อยู่ใน columns) ──
+    if (draft) {
+      const kids = kidsAsOf(code, m);
+      if (kids.length) return kids.reduce((s,k)=>s+(parseFloat(draft[k.code])||0),0);
+      if (columns.length) return columns.reduce((s,c)=>s+(parseFloat(draft[`${code}:${c.id}`])||0),0);
+      return parseFloat(draft[code])||0;
+    }
+    // ── ข้อมูลที่บันทึกแล้ว: ค่าธรรมดา (code) คือ "ยอดรวมที่ roll-up ไว้แล้ว"
+    //    (handleSave ตั้งค่านี้ = ผลรวมคอลัมน์/รายการย่อยเสมอ) จึงอ่านตัวเดียวพอ
+    //    — ไม่บวกคอลัมน์ซ้ำ (กันนับซ้ำ) และคอลัมน์ที่ลบไปแล้วก็ถูก roll-up ใหม่ไม่รวมมัน ──
+    return parseFloat(additions[m]?.[code]) || 0;
   };
 
   const monthTotal = (m) => allRows.reduce((s,r) => s + rowMonthValue(r.code, m), 0);
@@ -3352,18 +3345,17 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     setNewColName(""); setAddColOpen(false);
   };
 
-  // ลบคอลัมน์ — เฉพาะเดือนนี้ (เดือนอื่นไม่กระทบ) ถ้าลบจนหมดจะกลับเป็นช่องเดียว
+  // ลบคอลัมน์ — เฉพาะเดือนนี้ และเป็นแค่ "ร่าง" เท่านั้น จะมีผลจริงเมื่อกด "บันทึก"
+  // ถ้ากด "ยกเลิก" คอลัมน์และค่าที่กรอกไว้จะกลับคืนมา (ไม่โดนลบ) และคอลัมน์ที่ลบ
+  // ไปแล้วจะไม่ถูกนำไปคิดยอด (เพราะยอด roll-up ตอนบันทึกจะไม่รวมคอลัมน์นั้น)
   const handleRemoveColumn = (colId) => {
-    if (!confirm("ลบรายการนี้เฉพาะเดือนนี้? ค่าที่กรอกในรายการนี้ของเดือนนี้จะถูกลบ")) return;
+    if (!confirm("ลบคอลัมน์นี้เฉพาะเดือนนี้?\n\n• จะมีผลจริงเมื่อกด \"บันทึก\"\n• กด \"ยกเลิก\" เพื่อคืนคอลัมน์และค่าที่กรอกไว้")) return;
     const nextCols = columns.filter(c => c.id !== colId);
     const nextDraft = { ...draftAdd };
     Object.keys(nextDraft).forEach(k => { if (k.endsWith(`:${colId}`)) delete nextDraft[k]; });
     nextDraft.$columns = nextCols;
     setDraftAdd(nextDraft);
-    const monthObj = { ...(additions[month] || {}) };
-    Object.keys(monthObj).forEach(k => { if (k.endsWith(`:${colId}`)) delete monthObj[k]; });
-    monthObj.$columns = nextCols;
-    saveAdditions({ ...additions, [month]: monthObj });
+    // ไม่ saveAdditions ที่นี่ — รอกด "บันทึก" (handleSave) เท่านั้น เพื่อให้ยกเลิกได้
   };
 
   return (
