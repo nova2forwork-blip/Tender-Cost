@@ -770,6 +770,40 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
   ws.getCell(5,1+span*2).value = { formula:`${colL(NC-1)}${tR}`, result: base+added };
   ws.autoFilter = `A${HR}:${colL(NC-1)}${HR}`;
   fitExcelCols(ws, HD, drows);
+
+  // ชีตแยกแต่ละเดือน — breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น
+  const cleanNm = (s) => String(s).replace(/[\\/?*[\]:]/g,"-").slice(0,28);
+  const usedNm = {};
+  months.forEach(m => {
+    const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
+    const hasCols = cols.length > 0;
+    const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+    const V = valLabels.length, nc = 5 + V, lastValL = colL(3 + V);
+    const HM = ["Acc. Code","Account Name","Group","ราคาเดิม", ...valLabels, "รวมเดือนนี้"];
+    let nm = cleanNm(monthShortLabel(m)); if (usedNm[nm]) { usedNm[nm]++; nm = cleanNm(`${nm} ${usedNm[nm]}`); } else usedNm[nm] = 1;
+    const wsm = wb.addWorksheet(nm, { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
+    wsm.mergeCells(1,1,1,nc); const mt=wsm.getCell(1,1); mt.value=`เพิ่มรายเดือน ${monthShortLabel(m)} — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF1D4ED8"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
+    wsm.mergeCells(2,1,2,nc); const ms=wsm.getCell(2,1); ms.value = hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์ · Export: ${new Date().toLocaleDateString("th-TH")}` : `Export: ${new Date().toLocaleDateString("th-TH")}`; ms.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; ms.alignment={indent:1};
+    HM.forEach((h,i)=>{ const c=wsm.getCell(4,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"},name:F}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); wsm.getRow(4).height=26;
+    const mrows = [];
+    list.forEach((a,ri)=>{ const R=5+ri;
+      const bs = parseFloat(tenderCosts[a.code])||0;
+      const cv = hasCols ? cols.map(c=>parseFloat((additions[m]||{})[`${a.code}:${c.id}`])||0) : [parseFloat((additions[m]||{})[a.code])||0];
+      mrows.push([a.code, a.name, a.group, bs, ...cv, cv.reduce((s,v)=>s+v,0)]);
+      wsm.getCell(R,1).value=a.code; wsm.getCell(R,2).value=a.name; wsm.getCell(R,3).value=a.group;
+      const bc=wsm.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
+      cv.forEach((v,vi)=>{ const c=wsm.getCell(R,5+vi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
+      const tc=wsm.getCell(R,nc); tc.value = { formula:`SUM(E${R}:${lastValL}${R})`, result: cv.reduce((s,v)=>s+v,0) }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
+      [1,2,3].forEach(c=>{ wsm.getCell(R,c).font={name:F,size:9.5}; wsm.getCell(R,c).alignment={vertical:"middle"}; });
+      if(ri%2) for(let c=1;c<=nc;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
+    });
+    const mtR = 5 + list.length;
+    for(let c=1;c<=nc;c++){ const cell=wsm.getCell(mtR,c); cell.fill=fillS("FFC9D8FA"); cell.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; }
+    wsm.getCell(mtR,2).value="TOTAL"; wsm.getCell(mtR,2).font={bold:true,color:{argb:"FF1D4ED8"},name:F};
+    [4, ...valLabels.map((_,i)=>5+i), nc].forEach(col=>{ const c=wsm.getCell(mtR,col), L=colL(col-1); c.value = list.length ? { formula:`SUM(${L}5:${L}${4+list.length})` } : 0; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
+    wsm.autoFilter = `A4:${colL(nc-1)}4`;
+    fitExcelCols(wsm, HM, mrows);
+  });
   const buf=await wb.xlsx.writeBuffer(); const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}); const url=URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url; a2.download=`QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`; document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
 }
 
