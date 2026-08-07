@@ -443,8 +443,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:titleRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Tahoma"},
-      fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
+    ws[ref].s = { font:{bold:true,sz:13,color:{rgb:theme.dark},name:"Tahoma"},
+      fill:{fgColor:{rgb:lighten(theme.main,0.55)}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
   }
   ws["!rows"][titleRow] = { hpx:30 };
 
@@ -520,6 +520,37 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
     }
     ws["!rows"][totalRow] = { hpx:24 };
   }
+
+  // จัดความกว้างคอลัมน์อัตโนมัติให้พอดีข้อความ (ดูจากหัวตาราง + ข้อมูล + แถวรวม)
+  const cols = [];
+  const scan = (r, c) => {
+    if (r == null) return;
+    const cell = ws[XLSX.utils.encode_cell({r,c})];
+    if (!cell) return;
+    let v = cell.v;
+    let s = (typeof v === "number") ? Math.round(v).toLocaleString("en-US") : String(v == null ? "" : v);
+    if (s.length > (cols[c]||0)) cols[c] = s.length;
+  };
+  for (let c=0; c<numCols; c++) {
+    cols[c] = 0;
+    scan(headerRow, c);
+    for (let r=dataStart; r<=dataEnd; r++) scan(r, c);
+    scan(totalRow, c);
+  }
+  ws["!cols"] = cols.map(w => ({ wch: Math.min(55, Math.max(8, w + 2)) }));
+}
+
+// จัดความกว้างคอลัมน์ให้พอดีข้อความ สำหรับตาราง ExcelJS (จากหัว + แถวข้อมูล)
+function fitExcelCols(ws, header, dataRows, { min=8, max=55 } = {}) {
+  header.forEach((h, c) => {
+    let m = String(h == null ? "" : h).length;
+    dataRows.forEach(row => {
+      const v = row[c];
+      const s = (typeof v === "number") ? Math.round(v).toLocaleString("en-US") : String(v == null ? "" : v);
+      if (s.length > m) m = s.length;
+    });
+    ws.getColumn(c+1).width = Math.min(max, Math.max(min, m + 2));
+  });
 }
 
 // กราฟแท่งแนวตั้งที่ "วาดด้วยเซลล์" — ไลบรารีนี้ฝังกราฟจริง/รูปไม่ได้ จึงระบายสี
@@ -718,7 +749,7 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
   // ── ชีต "สรุป" ──
   const ws = wb.addWorksheet("สรุป", { views:[{ showGridLines:false }] });
   ws.columns = Array.from({length:10}, (_,i)=> ({ width: i===0?18:13 }));
-  ws.mergeCells("A1:J1"); const t=ws.getCell("A1"); t.value=`สรุปงบประมาณ — ${project.name}`; t.font={bold:true,size:16,color:{argb:"FFFFFFFF"}}; t.fill=fillS("FF2563EB"); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=32;
+  ws.mergeCells("A1:J1"); const t=ws.getCell("A1"); t.value=`สรุปงบประมาณ — ${project.name}`; t.font={bold:true,size:16,color:{argb:"FF1D4ED8"},name:"Tahoma"}; t.fill=fillS("FF"+lighten("2563EB",0.55)); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=32;
   ws.mergeCells("A2:J2"); const st=ws.getCell("A2"); st.value=`พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`; st.font={italic:true,size:10,color:{argb:"FF64748B"}}; st.alignment={indent:1};
   const cards = [["ราคาเดิม (Baseline)","FFDBEAFE","FF1D4ED8",{formula:`'รายละเอียด'!D${totRowN}`,result:base}],
                  ["เพิ่มรายเดือนรวม","FFD1FAE5","FF047857",{formula:`'รายละเอียด'!${totColL}${totRowN}-'รายละเอียด'!D${totRowN}`,result:added}],
@@ -744,7 +775,7 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
   const wd = wb.addWorksheet("รายละเอียด", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
   wd.columns = [{width:12},{width:38},{width:14},{width:15}, ...months.map(()=>({width:12})), {width:16}];
   const dCols = 5 + months.length;
-  wd.mergeCells(1,1,1,dCols); const dt=wd.getCell(1,1); dt.value=`งบประมาณรายละเอียด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FFFFFFFF"}}; dt.fill=fillS("FF2563EB"); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
+  wd.mergeCells(1,1,1,dCols); const dt=wd.getCell(1,1); dt.value=`งบประมาณรายละเอียด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FF1D4ED8"},name:"Tahoma"}; dt.fill=fillS("FF"+lighten("2563EB",0.55)); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
   ["Acc. Code","Account Name","Group","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"].forEach((h,i)=>{ const c=wd.getCell(4,1+i); c.value=h; c.font={bold:true,size:10,color:{argb:"FF1D4ED8"}}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); wd.getRow(4).height=24;
   list.forEach((a,ri)=>{ const R=5+ri, mv=months.map(m=>parseFloat((additions[m]||{})[a.code])||0), bs=parseFloat(tenderCosts[a.code])||0;
     wd.getCell(R,1).value=a.code; wd.getCell(R,2).value=a.name; wd.getCell(R,3).value=a.group;
@@ -755,6 +786,8 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
   });
   [4, ...months.map((_,i)=>5+i), dCols].forEach(col=>{ const c=wd.getCell(totRowN,col), L=CL(col); c.value={ formula:`SUM(${L}5:${L}${4+list.length})` }; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"}}; c.fill=fillS("FFC9D8FA"); c.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; });
   const tl=wd.getCell(totRowN,2); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF1D4ED8"}}; tl.fill=fillS("FFC9D8FA"); tl.border={top:{style:"medium",color:{argb:"FF2563EB"}}};
+  fitExcelCols(wd, ["Acc. Code","Account Name","Group","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"],
+    list.map(a => [a.code, a.name, a.group, parseFloat(tenderCosts[a.code])||0, ...months.map(m=>parseFloat((additions[m]||{})[a.code])||0), parseFloat(combined[a.code])||0]));
 
   const buf = await wb.xlsx.writeBuffer();
   const blob = new Blob([buf], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -1122,6 +1155,8 @@ async function exportPORich(project, poEntries) {
   const CL = (c1) => XLSX.utils.encode_col(c1-1);
   const F = "Tahoma";
   const total = poEntries.reduce((s,p)=> s + poTotal(p), 0);
+  const paid = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
+  const outstanding = Math.max(0, total - paid);
   const suppliers = new Set(poEntries.map(p=>poSupplierName(p))).size;
   const poMonths = [...new Set(poEntries.map(p=>(p.date||"").slice(0,7)).filter(Boolean))].sort();
   const monthItems = poMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) }));
@@ -1151,16 +1186,16 @@ async function exportPORich(project, poEntries) {
 
   const ws = wb.addWorksheet("สรุป", { views:[{ showGridLines:false }] });
   ws.columns = Array.from({length:10}, (_,i)=> ({ width: i===0?18:13 }));
-  ws.mergeCells("A1:J1"); const t=ws.getCell("A1"); t.value=`สรุปจัดซื้อ (PO) — ${project.name}`; t.font={bold:true,size:16,color:{argb:"FFFFFFFF"},name:F}; t.fill=fillS("FFF59E0B"); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=32;
+  ws.mergeCells("A1:J1"); const t=ws.getCell("A1"); t.value=`สรุปจัดซื้อ (PO) — ${project.name}`; t.font={bold:true,size:16,color:{argb:"FF92400E"},name:F}; t.fill=fillS("FF"+lighten("F59E0B",0.55)); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=32;
   ws.mergeCells("A2:J2"); const st=ws.getCell("A2"); st.value=`Export: ${new Date().toLocaleDateString("th-TH")}`; st.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; st.alignment={indent:1};
   const cards = [["มูลค่า PO รวม","FFFEF3C7","FF92400E",{formula:`'PO ทั้งหมด'!F${totRowN}`,result:total}],
-                 ["จำนวน PO","FFDBEAFE","FF1D4ED8",poEntries.length],
-                 ["จำนวน Supplier","FFD1FAE5","FF047857",suppliers],
-                 ["จำนวนเดือน","FFEDE9FE","FF6D28D9",poMonths.length]];
+                 ["จ่ายแล้ว","FFD1FAE5","FF047857",paid],
+                 ["ค้างจ่าย","FFFEE2E2","FF991B1B",outstanding],
+                 ["จำนวน PO","FFDBEAFE","FF1D4ED8",poEntries.length]];
   cards.forEach((cd,i)=>{ const c0=1+i*2,c1=c0+1;
     ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
     const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:9.5,color:{argb:cd[2]},name:F}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
-    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i===0) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
+    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i<3) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
   }); ws.getRow(4).height=18; ws.getRow(5).height=30;
   ws.mergeCells("A7:E7"); ws.getCell("A7").value="สัดส่วนมูลค่าตามสถานะ"; ws.getCell("A7").font={bold:true,size:11,color:{argb:"FF92400E"},name:F};
   ws.mergeCells("F7:J7"); ws.getCell("F7").value="ยอดสั่งซื้อรายเดือน"; ws.getCell("F7").font={bold:true,size:11,color:{argb:"FF92400E"},name:F};
@@ -1173,10 +1208,23 @@ async function exportPORich(project, poEntries) {
   const rT=gR+1+statuses.length, tv=[["รวมทั้งหมด","left"],[poEntries.length,"right","#,##0"],[statuses.reduce((s,g)=>s+g.value,0),"right","#,##0"],[1,"center","0.0%"]];
   tv.forEach((cd,ci)=>{ const c=ws.getCell(rT,1+ci); c.value=cd[0]; c.alignment={horizontal:cd[1],vertical:"middle"}; if(cd[2])c.numFmt=cd[2]; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDE7C2"); c.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; });
 
+  // รายการ PO (วันที่ · เลขที่) — โชว์แต่ละใบบนหน้าสรุป
+  const pTit = rT + 2, pHead = pTit + 1;
+  ws.mergeCells(pTit,1,pTit,6); const pt=ws.getCell(pTit,1); pt.value="รายการ PO (วันที่ · เลขที่)"; pt.font={bold:true,size:11,color:{argb:"FF92400E"},name:F};
+  ["วันที่","เลข PO","Supplier","มูลค่า","สถานะ PO"].forEach((h,i)=>{ const c=ws.getCell(pHead,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===3?"right":"left",vertical:"middle"}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; });
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach((p,i)=>{ const r=pHead+1+i;
+    const c1=ws.getCell(r,1); c1.value=p.date||""; c1.font={name:F,size:9.5}; c1.alignment={vertical:"middle"};
+    const c2=ws.getCell(r,2); c2.value=poNumbersLabel(p); c2.font={name:F,size:9.5}; c2.alignment={vertical:"middle"};
+    const c3=ws.getCell(r,3); c3.value=poSupplierName(p); c3.font={name:F,size:9.5}; c3.alignment={vertical:"middle"};
+    const c4=ws.getCell(r,4); c4.value=poTotal(p); c4.numFmt="#,##0"; c4.font={name:F,size:9.5}; c4.alignment={horizontal:"right",vertical:"middle"};
+    const pl=statusPill(p.status); const c5=ws.getCell(r,5); c5.value=p.status||"-"; c5.alignment={horizontal:"center",vertical:"middle"}; if(pl){c5.fill=fillS("FF"+pl.bg); c5.font={bold:true,size:9.5,color:{argb:"FF"+pl.fg},name:F};} else c5.font={name:F,size:9.5};
+    if(i%2) for(let c=1;c<=5;c++){ const cell=ws.getCell(r,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
+  });
+
   const wd = wb.addWorksheet("PO ทั้งหมด", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
   wd.columns = [{width:12},{width:11},{width:30},{width:16},{width:14},{width:14},{width:12},{width:20},{width:13},{width:14},{width:14},{width:20}];
   const NC = 12;
-  wd.mergeCells(1,1,1,NC); const dt=wd.getCell(1,1); dt.value=`รายการ PO ทั้งหมด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FFFFFFFF"},name:F}; dt.fill=fillS("FFF59E0B"); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
+  wd.mergeCells(1,1,1,NC); const dt=wd.getCell(1,1); dt.value=`รายการ PO ทั้งหมด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FF92400E"},name:F}; dt.fill=fillS("FF"+lighten("F59E0B",0.55)); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
   wd.mergeCells(2,1,2,NC); const dsub=wd.getCell(2,1); dsub.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ทั้งหมด ${poEntries.length} PO`; dsub.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; dsub.alignment={indent:1};
   const HD = ["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันที่รับของ","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"];
   HD.forEach((h,i)=>{ const c=wd.getCell(4,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===5?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wd.getRow(4).height=26;
@@ -1193,6 +1241,7 @@ async function exportPORich(project, poEntries) {
   for(let c=1;c<=NC;c++){ const cell=wd.getCell(tR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
   const tl=wd.getCell(tR,5); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF92400E"},name:F}; tl.alignment={horizontal:"right",vertical:"middle"};
   const tvc=wd.getCell(tR,6); tvc.value={ formula:`SUM(F5:F${4+itemRows.length})` }; tvc.numFmt="#,##0"; tvc.font={bold:true,color:{argb:"FF92400E"},name:F}; tvc.alignment={horizontal:"right",vertical:"middle"};
+  fitExcelCols(wd, HD, itemRows);
 
   const buf = await wb.xlsx.writeBuffer();
   const blob = new Blob([buf], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
