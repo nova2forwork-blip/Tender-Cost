@@ -443,7 +443,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:titleRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Arial"},
+    ws[ref].s = { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Tahoma"},
       fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
   }
   ws["!rows"][titleRow] = { hpx:30 };
@@ -451,7 +451,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   subRows.forEach(r => {
     for (let c=0; c<numCols; c++) {
       const ref = XLSX.utils.encode_cell({r,c});
-      if (ws[ref]) ws[ref].s = { font:{italic:true,sz:9.5,color:{rgb:"64748B"},name:"Arial"} };
+      if (ws[ref]) ws[ref].s = { font:{italic:true,sz:9.5,color:{rgb:"64748B"},name:"Tahoma"} };
     }
     ws["!rows"][r] = { hpx:16 };
   });
@@ -459,7 +459,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:headerRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Arial"},
+    ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"},
       fill:{fgColor:{rgb:HFILL}}, alignment:{vertical:"center",horizontal:"center",wrapText:true},
       border:{ top:BORDER_THIN(HFILL), bottom:BORDER_MED(theme.main), left:BORDER_THIN("FFFFFF"), right:BORDER_THIN("FFFFFF") } };
   }
@@ -487,8 +487,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
       const isGroupLabel = groupDisplayCol != null && c === groupDisplayCol;
       const s = { font: isGroupLabel
-          ? {sz:10,name:"Arial",bold:true,color:{rgb:theme.dark}}
-          : {sz:10,name:"Arial",color:{rgb:"1F2937"}},
+          ? {sz:10,name:"Tahoma",bold:true,color:{rgb:theme.dark}}
+          : {sz:10,name:"Tahoma",color:{rgb:"1F2937"}},
         alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true },
         border:{ top: isGroupStart?BORDER_MED(GLINE):BORDER_THIN("EEF0F2"), bottom:BORDER_THIN("EEF0F2"),
                  left:BORDER_THIN("EEF0F2"), right:BORDER_THIN("EEF0F2") } };
@@ -499,7 +499,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
         const pill = statusPill(ws[ref].v);
         if (pill) {
           s.fill = { fgColor:{rgb:pill.bg} };
-          s.font = { sz:10, name:"Arial", bold:true, color:{rgb:pill.fg} };
+          s.font = { sz:10, name:"Tahoma", bold:true, color:{rgb:pill.fg} };
           s.alignment = { ...s.alignment, horizontal:"center" };
         }
       }
@@ -513,7 +513,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       const ref = XLSX.utils.encode_cell({r:totalRow,c});
       if (!ws[ref]) ws[ref] = { t:"s", v:"" };
       const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c);
-      ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:TFILL}},
+      ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:TFILL}},
         alignment:{vertical:"center",horizontal:isMoney||isPct?"right":"left"},
         border:{ top:BORDER_MED(theme.main) },
         numFmt: isMoney?"#,##0":isPct?"0.0%":undefined };
@@ -548,17 +548,17 @@ function addBarChartSheet(wb, sheetName, title, theme, items) {
     else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
     ws[ref].s = s;
   };
-  setS(0, 0, { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  setS(0, 0, { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Tahoma"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
   const barOn = theme.main, barOff = "F3F4F6";
   items.forEach((it, i) => {
     const c = LEFT + i;
     const filled = Math.max(0, Math.round(((it.value||0) / max) * H));
-    setS(valueRow, c, { font:{bold:true,sz:9,color:{rgb:theme.dark},name:"Arial"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
+    setS(valueRow, c, { font:{bold:true,sz:9,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
     for (let k = 0; k < H; k++) {
       const r = chartTop + (H - 1 - k); // k=0 = ล่างสุด
       setS(r, c, { fill:{fgColor:{rgb: k < filled ? barOn : barOff }} });
     }
-    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Arial"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
+    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Tahoma"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
   });
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
 }
@@ -597,18 +597,18 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
     if (f) { ws[ref].t = "n"; ws[ref].f = f; }
     ws[ref].s = s;
   };
-  setS(0,0,{ font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
-  setS(1,0,{ font:{italic:true,sz:10,color:{rgb:"64748B"},name:"Arial"} });
-  setS(chartTitleRow,0,{ font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  setS(0,0,{ font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Tahoma"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  setS(1,0,{ font:{italic:true,sz:10,color:{rgb:"64748B"},name:"Tahoma"} });
+  setS(chartTitleRow,0,{ font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
   // การ์ดสรุป 4 ใบ (แต่ละใบกว้าง 2 คอลัมน์)
   const ACC = [["DBEAFE","1D4ED8"],["D1FAE5","047857"],["FEF3C7","92400E"],["EDE9FE","6D28D9"]];
   cards.slice(0,4).forEach((cd, i) => {
     const c0 = i*2, c1 = c0+1, [bg,fg] = ACC[i%4];
     ws["!merges"].push({ s:{r:cardLabelRow,c:c0}, e:{r:cardLabelRow,c:c1} });
     ws["!merges"].push({ s:{r:cardValRow,c:c0}, e:{r:cardValRow,c:c1} });
-    setS(cardLabelRow, c0, { font:{bold:true,sz:9.5,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"} }, cd.label);
+    setS(cardLabelRow, c0, { font:{bold:true,sz:9.5,color:{rgb:fg},name:"Tahoma"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"} }, cd.label);
     setS(cardLabelRow, c1, { fill:{fgColor:{rgb:bg}} });
-    setS(cardValRow, c0, { font:{bold:true,sz:15,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"}, numFmt: cd.money?"#,##0":undefined }, cd.value, cd.f);
+    setS(cardValRow, c0, { font:{bold:true,sz:15,color:{rgb:fg},name:"Tahoma"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"}, numFmt: cd.money?"#,##0":undefined }, cd.value, cd.f);
     setS(cardValRow, c1, { fill:{fgColor:{rgb:bg}} });
   });
   // กราฟแท่งรายเดือน
@@ -617,18 +617,18 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
   items.forEach((it, i) => {
     const c = 1+i;
     const filled = Math.max(0, Math.round(((it.value||0)/max)*H));
-    setS(valueRow, c, { font:{bold:true,sz:8.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0, it.f);
+    setS(valueRow, c, { font:{bold:true,sz:8.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0, it.f);
     for (let k=0; k<H; k++) { const r = chartTop+(H-1-k); setS(r, c, { fill:{fgColor:{rgb: k<filled?barOn:barOff }} }); }
-    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Arial"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
+    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Tahoma"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
   });
   // ตารางสรุปตามกลุ่ม + แถบสัดส่วน
   if (hasG) {
     ws["!merges"].push({ s:{r:gTitleRow,c:0}, e:{r:gTitleRow,c:C-1} });
     ws["!rows"][gTitleRow] = {hpx:22};
-    setS(gTitleRow, 0, { font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+    setS(gTitleRow, 0, { font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
     const headFill = lighten(theme.main, 0.82);
     const gh = ["กลุ่ม","ราคาเดิม","เพิ่มรายเดือน","งบรวม","สัดส่วน","กราฟสัดส่วน"];
-    gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_MED(theme.main)} }, h));
+    gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_MED(theme.main)} }, h));
     for (let c=6;c<C;c++) setS(gHeadRow, c, { fill:{fgColor:{rgb:headFill}}, border:{bottom:BORDER_MED(theme.main)} });
     if (C-1 > 5) ws["!merges"].push({ s:{r:gHeadRow,c:5}, e:{r:gHeadRow,c:C-1} });
     ws["!rows"][gHeadRow] = {hpx:22};
@@ -636,18 +636,18 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
     groups.forEach((g, i) => {
       const r = gStart + i, fillZ = i%2===1 ? { fill:{fgColor:{rgb:zeb}} } : {};
       const bd = { border:{bottom:BORDER_THIN("EEF0F2")} };
-      setS(r, 0, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{vertical:"center",horizontal:"left",indent:1} }, g.label);
-      setS(r, 1, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Arial"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.base||0);
-      setS(r, 2, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Arial"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.add||0);
-      setS(r, 3, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:"1F2937"},name:"Arial"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.total||0);
-      setS(r, 4, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{vertical:"center",horizontal:"center"}, numFmt:"0.0%" }, g.pct||0);
-      setS(r, 5, { ...fillZ, ...bd, font:{sz:10,color:{rgb:theme.main},name:"Arial"}, alignment:{vertical:"center",horizontal:"left"} }, "█".repeat(Math.max(0, Math.round(((g.total||0)/gmax)*22))));
+      setS(r, 0, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"left",indent:1} }, g.label);
+      setS(r, 1, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.base||0);
+      setS(r, 2, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.add||0);
+      setS(r, 3, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:"1F2937"},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.total||0);
+      setS(r, 4, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"center"}, numFmt:"0.0%" }, g.pct||0);
+      setS(r, 5, { ...fillZ, ...bd, font:{sz:10,color:{rgb:theme.main},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"left"} }, "█".repeat(Math.max(0, Math.round(((g.total||0)/gmax)*22))));
       for (let c=6;c<C;c++) setS(r, c, { ...fillZ, ...bd });
       if (C-1 > 5) ws["!merges"].push({ s:{r,c:5}, e:{r,c:C-1} });
       ws["!rows"][r] = {hpx:18};
     });
     const rT = gTotalRow, tb = { fill:{fgColor:{rgb:lighten(theme.main,0.75)}}, border:{top:BORDER_MED(theme.main)} };
-    const tf = (h) => ({ ...tb, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{vertical:"center",horizontal:h,indent:h==="left"?1:0} });
+    const tf = (h) => ({ ...tb, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:h,indent:h==="left"?1:0} });
     setS(rT,0,tf("left"),"รวมทั้งหมด");
     setS(rT,1,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.base||0),0));
     setS(rT,2,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.add||0),0));
@@ -676,9 +676,9 @@ function chartPiePNG(items) {
   const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
   const cx=150,cy=155,r=115,tot=items.reduce((s,i)=>s+i.value,0)||1; let a=-Math.PI/2;
   items.forEach(it=>{ const f=it.value/tot,a2=a+f*Math.PI*2; x.beginPath(); x.moveTo(cx,cy); x.arc(cx,cy,r,a,a2); x.closePath(); x.fillStyle="#"+it.color; x.fill();
-    if(f>0.04){ const m=(a+a2)/2; x.fillStyle="#fff"; x.font="bold 12px Arial"; x.textAlign="center"; x.fillText((f*100).toFixed(1)+"%",cx+Math.cos(m)*r*0.62,cy+Math.sin(m)*r*0.62+4);} a=a2; });
+    if(f>0.04){ const m=(a+a2)/2; x.fillStyle="#fff"; x.font="bold 12px Tahoma"; x.textAlign="center"; x.fillText((f*100).toFixed(1)+"%",cx+Math.cos(m)*r*0.62,cy+Math.sin(m)*r*0.62+4);} a=a2; });
   x.beginPath(); x.arc(cx,cy,r*0.52,0,Math.PI*2); x.fillStyle="#fff"; x.fill();
-  let ly=30; x.textAlign="left"; items.forEach(it=>{ x.fillStyle="#"+it.color; x.fillRect(300,ly,12,12); x.fillStyle="#334155"; x.font="12px Arial"; x.fillText(`${it.label} (${(it.value/tot*100).toFixed(1)}%)`,318,ly+11); ly+=23; });
+  let ly=30; x.textAlign="left"; items.forEach(it=>{ x.fillStyle="#"+it.color; x.fillRect(300,ly,12,12); x.fillStyle="#334155"; x.font="12px Tahoma"; x.fillText(`${it.label} (${(it.value/tot*100).toFixed(1)}%)`,318,ly+11); ly+=23; });
   return cv.toDataURL("image/png").split(",")[1];
 }
 function chartBarPNG(items, color) {
@@ -688,8 +688,8 @@ function chartBarPNG(items, color) {
   x.strokeStyle="#e5e7eb"; x.beginPath(); x.moveTo(pad,H-pad); x.lineTo(W-pad,H-pad); x.stroke();
   items.forEach((it,i)=>{ const bw=pw/n*0.6,bh=(it.value/max)*ph,bx=pad+(pw/n)*i+(pw/n-bw)/2,by=H-pad-bh;
     x.fillStyle="#"+color; x.fillRect(bx,by,bw,bh);
-    x.fillStyle="#6b7280"; x.font="9px Arial"; x.textAlign="center"; x.save(); x.translate(bx+bw/2,H-pad+4); x.rotate(-Math.PI/4); x.fillText(it.label,0,4); x.restore();
-    if(it.value>0){ x.fillStyle="#334155"; x.font="bold 9px Arial"; x.textAlign="center"; x.fillText(fmtK(it.value),bx+bw/2,by-4);} });
+    x.fillStyle="#6b7280"; x.font="9px Tahoma"; x.textAlign="center"; x.save(); x.translate(bx+bw/2,H-pad+4); x.rotate(-Math.PI/4); x.fillText(it.label,0,4); x.restore();
+    if(it.value>0){ x.fillStyle="#334155"; x.font="bold 9px Tahoma"; x.textAlign="center"; x.fillText(fmtK(it.value),bx+bw/2,by-4);} });
   return cv.toDataURL("image/png").split(",")[1];
 }
 async function exportQSRich(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
@@ -1113,6 +1113,76 @@ function exportProcurementExcel(project, poEntries) {
   }
 
   XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// จัดซื้อ (PO) แบบ rich: หน้า "สรุป" หน้าเดียว มีการ์ด + pie (สถานะ) + bar (รายเดือน)
+// + ตารางสรุปสถานะ และชีต "PO ทั้งหมด"
+async function exportPORich(project, poEntries) {
+  const ExcelJS = await loadExcelJS();
+  const CL = (c1) => XLSX.utils.encode_col(c1-1);
+  const F = "Tahoma";
+  const total = poEntries.reduce((s,p)=> s + poTotal(p), 0);
+  const suppliers = new Set(poEntries.map(p=>poSupplierName(p))).size;
+  const poMonths = [...new Set(poEntries.map(p=>(p.date||"").slice(0,7)).filter(Boolean))].sort();
+  const monthItems = poMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) }));
+  const PAL = ["94A3B8","2563EB","06B6D4","F59E0B","10B981","8B5CF6","EF4444"];
+  const byS = {}; poEntries.forEach(p=>{ const s=p.status||"-"; (byS[s]=byS[s]||{count:0,value:0}); byS[s].count++; byS[s].value+=poTotal(p); });
+  const order = PO_STATUS.concat(Object.keys(byS).filter(s=>!PO_STATUS.includes(s)));
+  const grand = Object.values(byS).reduce((s,x)=>s+x.value,0)||1;
+  const statuses = order.filter(s=>byS[s]).map((label,i)=>({ label, count:byS[label].count, value:byS[label].value, pct:byS[label].value/grand, color:PAL[i%PAL.length] }));
+  const pie = chartPiePNG(statuses.map(s=>({label:s.label,value:s.value,color:s.color})));
+  const bar = chartBarPNG(monthItems, "F59E0B");
+
+  const wb = new ExcelJS.Workbook();
+  const fillS = (argb) => ({ type:"pattern", pattern:"solid", fgColor:{argb} });
+  const totRowN = 5 + poEntries.length;
+
+  const ws = wb.addWorksheet("สรุป", { views:[{ showGridLines:false }] });
+  ws.columns = Array.from({length:10}, (_,i)=> ({ width: i===0?18:13 }));
+  ws.mergeCells("A1:J1"); const t=ws.getCell("A1"); t.value=`สรุปจัดซื้อ (PO) — ${project.name}`; t.font={bold:true,size:16,color:{argb:"FFFFFFFF"},name:F}; t.fill=fillS("FFF59E0B"); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=32;
+  ws.mergeCells("A2:J2"); const st=ws.getCell("A2"); st.value=`Export: ${new Date().toLocaleDateString("th-TH")}`; st.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; st.alignment={indent:1};
+  const cards = [["มูลค่า PO รวม","FFFEF3C7","FF92400E",{formula:`'PO ทั้งหมด'!D${totRowN}`,result:total}],
+                 ["จำนวน PO","FFDBEAFE","FF1D4ED8",poEntries.length],
+                 ["จำนวน Supplier","FFD1FAE5","FF047857",suppliers],
+                 ["จำนวนเดือน","FFEDE9FE","FF6D28D9",poMonths.length]];
+  cards.forEach((cd,i)=>{ const c0=1+i*2,c1=c0+1;
+    ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
+    const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:9.5,color:{argb:cd[2]},name:F}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
+    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i===0) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
+  }); ws.getRow(4).height=18; ws.getRow(5).height=30;
+  ws.mergeCells("A7:E7"); ws.getCell("A7").value="สัดส่วนมูลค่าตามสถานะ"; ws.getCell("A7").font={bold:true,size:11,color:{argb:"FF92400E"},name:F};
+  ws.mergeCells("F7:J7"); ws.getCell("F7").value="ยอดสั่งซื้อรายเดือน"; ws.getCell("F7").font={bold:true,size:11,color:{argb:"FF92400E"},name:F};
+  ws.addImage(wb.addImage({ base64:pie, extension:"png" }), { tl:{col:0.1,row:7.2}, ext:{width:390,height:225} });
+  ws.addImage(wb.addImage({ base64:bar, extension:"png" }), { tl:{col:5.1,row:7.2}, ext:{width:390,height:225} });
+  const gR = 21;
+  ["สถานะ","จำนวน PO","มูลค่า","สัดส่วน"].forEach((h,i)=>{ const c=ws.getCell(gR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i?"right":"left",vertical:"middle"}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; });
+  statuses.forEach((g,i)=>{ const r=gR+1+i, row=[[g.label,"left"],[g.count,"right","#,##0"],[g.value,"right","#,##0"],[g.pct,"center","0.0%"]];
+    row.forEach((cd,ci)=>{ const c=ws.getCell(r,1+ci); c.value=cd[0]; c.alignment={horizontal:cd[1],vertical:"middle"}; if(cd[2])c.numFmt=cd[2]; c.font={size:9.5,bold:ci===0||ci===2,color:{argb: ci===0?"FF92400E":"FF1F2937"},name:F}; if(i%2)c.fill=fillS("FFFFFAF3"); }); });
+  const rT=gR+1+statuses.length, tv=[["รวมทั้งหมด","left"],[poEntries.length,"right","#,##0"],[statuses.reduce((s,g)=>s+g.value,0),"right","#,##0"],[1,"center","0.0%"]];
+  tv.forEach((cd,ci)=>{ const c=ws.getCell(rT,1+ci); c.value=cd[0]; c.alignment={horizontal:cd[1],vertical:"middle"}; if(cd[2])c.numFmt=cd[2]; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDE7C2"); c.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; });
+
+  const wd = wb.addWorksheet("PO ทั้งหมด", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
+  wd.columns = [{width:13},{width:26},{width:16},{width:16},{width:14},{width:16}];
+  wd.mergeCells(1,1,1,6); const dt=wd.getCell(1,1); dt.value=`รายการ PO ทั้งหมด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FFFFFFFF"},name:F}; dt.fill=fillS("FFF59E0B"); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
+  ["วันเปิด PO","Supplier","PO No.","มูลค่า","สถานะ PO","สถานะจ่ายเงิน"].forEach((h,i)=>{ const c=wd.getCell(4,1+i); c.value=h; c.font={bold:true,size:10,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===3?"right":"left",vertical:"middle"}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wd.getRow(4).height=22;
+  const pillOf = (s) => { const p=statusPill(s); return p ? { fill:fillS("FF"+p.bg), font:{bold:true,size:9.5,color:{argb:"FF"+p.fg},name:F} } : {}; };
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach((p,ri)=>{ const R=5+ri, pay=PAYMENT_LABEL[paymentStatus(p)];
+    wd.getCell(R,1).value=p.date||""; wd.getCell(R,2).value=poSupplierName(p); wd.getCell(R,3).value=poNumbersLabel(p);
+    const vc=wd.getCell(R,4); vc.value=poTotal(p); vc.numFmt="#,##0"; vc.font={name:F,size:9.5};
+    const s1=pillOf(p.status); const c5=wd.getCell(R,5); c5.value=p.status||"-"; c5.alignment={horizontal:"center",vertical:"middle"}; if(s1.fill){c5.fill=s1.fill;c5.font=s1.font;} else c5.font={name:F,size:9.5};
+    const s2=pillOf(pay); const c6=wd.getCell(R,6); c6.value=pay; c6.alignment={horizontal:"center",vertical:"middle"}; if(s2.fill){c6.fill=s2.fill;c6.font=s2.font;} else c6.font={name:F,size:9.5};
+    [1,2,3].forEach(c=>{ wd.getCell(R,c).font={name:F,size:9.5}; wd.getCell(R,c).alignment={vertical:"middle"}; });
+    if(ri%2) [1,2,3,4].forEach(c=>{ const cell=wd.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); });
+  });
+  const tR=5+poEntries.length; const tl=wd.getCell(tR,3); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF92400E"},name:F}; tl.alignment={horizontal:"right"}; tl.fill=fillS("FFFDE7C2"); tl.border={top:{style:"medium",color:{argb:"FFF59E0B"}}};
+  const tvc=wd.getCell(tR,4); tvc.value={ formula:`SUM(D5:D${4+poEntries.length})` }; tvc.numFmt="#,##0"; tvc.font={bold:true,color:{argb:"FF92400E"},name:F}; tvc.fill=fillS("FFFDE7C2"); tvc.border={top:{style:"medium",color:{argb:"FFF59E0B"}}};
+  for(const c of [1,2,5,6]){ const cell=wd.getCell(tR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url;
+  a2.download = `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`;
+  document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1500);
 }
 
 // ─── Accounting: full financial export ─────────────────────────────────────
@@ -1651,7 +1721,7 @@ export default function App() {
         <QSView {...sharedProps} onExport={() => exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); })} />
       )}
       {screen === "app" && effectiveRole === "procurement" && (
-        <ProcurementView {...sharedProps} onExport={() => exportProcurementExcel(activeProject, poEntries)} />
+        <ProcurementView {...sharedProps} onExport={() => exportPORich(activeProject, poEntries).catch(err => { console.warn("Rich PO export failed, ใช้ตัวสำรอง:", err); exportProcurementExcel(activeProject, poEntries); })} />
       )}
       {screen === "app" && effectiveRole === "accounting"  && (
         <AccountingView {...sharedProps} onExport={() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts)} />
