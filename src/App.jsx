@@ -564,32 +564,37 @@ function addBarChartSheet(wb, sheetName, title, theme, items) {
 }
 
 // หน้า "สรุป (Dashboard)" — การ์ดตัวเลข + กราฟแท่งรายเดือน อยู่ในหน้าเดียวกัน
-function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], chartTitle, items = [] }) {
+function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], chartTitle, items = [], groups = null }) {
   items = items.filter(Boolean);
+  groups = (groups || []).filter(Boolean);
   const n = items.length;
-  const C = Math.max(1 + n, 8);              // อย่างน้อย 8 คอลัมน์ (การ์ด 4 ใบ × 2)
+  const C = Math.max(1 + n, 8);              // อย่างน้อย 8 คอลัมน์
   const H = 10;                              // ความสูงกราฟ (แถว)
   const cardLabelRow = 3, cardValRow = 4, chartTitleRow = 6, valueRow = 7, chartTop = 8, labelRow = chartTop + H;
-  const nRows = labelRow + 2;
+  const hasG = groups.length > 0;
+  const gTitleRow = labelRow + 2, gHeadRow = gTitleRow + 1, gStart = gHeadRow + 1, gEnd = gStart + groups.length - 1, gTotalRow = gEnd + 1;
+  const nRows = (hasG ? gTotalRow : labelRow) + 2;
   const aoa = Array.from({ length:nRows }, () => new Array(C).fill(""));
   aoa[0][0] = title; aoa[1][0] = subtitle || ""; aoa[chartTitleRow][0] = chartTitle || "";
+  if (hasG) aoa[gTitleRow][0] = "สรุปตามกลุ่มวัสดุ (สัดส่วนงบรวม)";
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws["!merges"] = [
     { s:{r:0,c:0}, e:{r:0,c:C-1} },
     { s:{r:1,c:0}, e:{r:1,c:C-1} },
     { s:{r:chartTitleRow,c:0}, e:{r:chartTitleRow,c:C-1} },
   ];
-  ws["!cols"] = [{ wch:4 }, ...Array.from({ length:C-1 }, () => ({ wch:11 }))];
+  ws["!cols"] = [{ wch: hasG?18:4 }, ...Array.from({ length:C-1 }, () => ({ wch:12 }))];
   ws["!rows"] = [];
   ws["!rows"][0]={hpx:30}; ws["!rows"][1]={hpx:16};
   ws["!rows"][cardLabelRow]={hpx:18}; ws["!rows"][cardValRow]={hpx:32};
   ws["!rows"][chartTitleRow]={hpx:22};
   for (let r=chartTop; r<chartTop+H; r++) ws["!rows"][r]={hpx:14};
   ws["!rows"][labelRow]={hpx:22};
-  const setS = (r, c, s, v) => {
+  const setS = (r, c, s, v, f) => {
     const ref = XLSX.utils.encode_cell({ r, c });
     if (v != null) ws[ref] = { t: typeof v === "number" ? "n" : "s", v };
     else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    if (f) { ws[ref].t = "n"; ws[ref].f = f; }
     ws[ref].s = s;
   };
   setS(0,0,{ font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Arial"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
@@ -603,20 +608,159 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
     ws["!merges"].push({ s:{r:cardValRow,c:c0}, e:{r:cardValRow,c:c1} });
     setS(cardLabelRow, c0, { font:{bold:true,sz:9.5,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"} }, cd.label);
     setS(cardLabelRow, c1, { fill:{fgColor:{rgb:bg}} });
-    setS(cardValRow, c0, { font:{bold:true,sz:15,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"}, numFmt: cd.money?"#,##0":undefined }, cd.value);
+    setS(cardValRow, c0, { font:{bold:true,sz:15,color:{rgb:fg},name:"Arial"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"}, numFmt: cd.money?"#,##0":undefined }, cd.value, cd.f);
     setS(cardValRow, c1, { fill:{fgColor:{rgb:bg}} });
   });
-  // กราฟแท่ง
+  // กราฟแท่งรายเดือน
   const max = Math.max(...items.map(i=>i.value||0), 1);
   const barOn = theme.main, barOff = "F3F4F6";
   items.forEach((it, i) => {
     const c = 1+i;
     const filled = Math.max(0, Math.round(((it.value||0)/max)*H));
-    setS(valueRow, c, { font:{bold:true,sz:8.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
+    setS(valueRow, c, { font:{bold:true,sz:8.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0, it.f);
     for (let k=0; k<H; k++) { const r = chartTop+(H-1-k); setS(r, c, { fill:{fgColor:{rgb: k<filled?barOn:barOff }} }); }
     setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Arial"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
   });
+  // ตารางสรุปตามกลุ่ม + แถบสัดส่วน
+  if (hasG) {
+    ws["!merges"].push({ s:{r:gTitleRow,c:0}, e:{r:gTitleRow,c:C-1} });
+    ws["!rows"][gTitleRow] = {hpx:22};
+    setS(gTitleRow, 0, { font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+    const headFill = lighten(theme.main, 0.82);
+    const gh = ["กลุ่ม","ราคาเดิม","เพิ่มรายเดือน","งบรวม","สัดส่วน","กราฟสัดส่วน"];
+    gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Arial"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_MED(theme.main)} }, h));
+    for (let c=6;c<C;c++) setS(gHeadRow, c, { fill:{fgColor:{rgb:headFill}}, border:{bottom:BORDER_MED(theme.main)} });
+    if (C-1 > 5) ws["!merges"].push({ s:{r:gHeadRow,c:5}, e:{r:gHeadRow,c:C-1} });
+    ws["!rows"][gHeadRow] = {hpx:22};
+    const zeb = lighten(theme.main, 0.95), gmax = Math.max(...groups.map(g=>g.total||0), 1);
+    groups.forEach((g, i) => {
+      const r = gStart + i, fillZ = i%2===1 ? { fill:{fgColor:{rgb:zeb}} } : {};
+      const bd = { border:{bottom:BORDER_THIN("EEF0F2")} };
+      setS(r, 0, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{vertical:"center",horizontal:"left",indent:1} }, g.label);
+      setS(r, 1, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Arial"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.base||0);
+      setS(r, 2, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Arial"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.add||0);
+      setS(r, 3, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:"1F2937"},name:"Arial"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.total||0);
+      setS(r, 4, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{vertical:"center",horizontal:"center"}, numFmt:"0.0%" }, g.pct||0);
+      setS(r, 5, { ...fillZ, ...bd, font:{sz:10,color:{rgb:theme.main},name:"Arial"}, alignment:{vertical:"center",horizontal:"left"} }, "█".repeat(Math.max(0, Math.round(((g.total||0)/gmax)*22))));
+      for (let c=6;c<C;c++) setS(r, c, { ...fillZ, ...bd });
+      if (C-1 > 5) ws["!merges"].push({ s:{r,c:5}, e:{r,c:C-1} });
+      ws["!rows"][r] = {hpx:18};
+    });
+    const rT = gTotalRow, tb = { fill:{fgColor:{rgb:lighten(theme.main,0.75)}}, border:{top:BORDER_MED(theme.main)} };
+    const tf = (h) => ({ ...tb, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Arial"}, alignment:{vertical:"center",horizontal:h,indent:h==="left"?1:0} });
+    setS(rT,0,tf("left"),"รวมทั้งหมด");
+    setS(rT,1,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.base||0),0));
+    setS(rT,2,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.add||0),0));
+    setS(rT,3,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.total||0),0));
+    setS(rT,4,{...tf("center"),numFmt:"0.0%"}, 1);
+    for (let c=5;c<C;c++) setS(rT,c,{...tb});
+    ws["!rows"][rT] = {hpx:20};
+  }
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
+}
+
+// ── กราฟจริง (pie + bar) ในไฟล์ Excel: โหลด ExcelJS จาก CDN ตอนใช้งาน แล้ววาด
+//    กราฟเป็นรูป PNG ฝังลงไฟล์ — ไม่ต้องเพิ่ม dependency / ไม่กระทบ build ──────────
+function loadExcelJS() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js";
+    s.onload = () => res(window.ExcelJS);
+    s.onerror = () => rej(new Error("โหลด ExcelJS ไม่ได้"));
+    document.head.appendChild(s);
+  });
+}
+function chartPiePNG(items) {
+  const W=520,H=300,dpr=2,cv=document.createElement("canvas"); cv.width=W*dpr; cv.height=H*dpr;
+  const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
+  const cx=150,cy=155,r=115,tot=items.reduce((s,i)=>s+i.value,0)||1; let a=-Math.PI/2;
+  items.forEach(it=>{ const f=it.value/tot,a2=a+f*Math.PI*2; x.beginPath(); x.moveTo(cx,cy); x.arc(cx,cy,r,a,a2); x.closePath(); x.fillStyle="#"+it.color; x.fill();
+    if(f>0.04){ const m=(a+a2)/2; x.fillStyle="#fff"; x.font="bold 12px Arial"; x.textAlign="center"; x.fillText((f*100).toFixed(1)+"%",cx+Math.cos(m)*r*0.62,cy+Math.sin(m)*r*0.62+4);} a=a2; });
+  x.beginPath(); x.arc(cx,cy,r*0.52,0,Math.PI*2); x.fillStyle="#fff"; x.fill();
+  let ly=30; x.textAlign="left"; items.forEach(it=>{ x.fillStyle="#"+it.color; x.fillRect(300,ly,12,12); x.fillStyle="#334155"; x.font="12px Arial"; x.fillText(`${it.label} (${(it.value/tot*100).toFixed(1)}%)`,318,ly+11); ly+=23; });
+  return cv.toDataURL("image/png").split(",")[1];
+}
+function chartBarPNG(items, color) {
+  const W=520,H=300,dpr=2,pad=44,cv=document.createElement("canvas"); cv.width=W*dpr; cv.height=H*dpr;
+  const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
+  const max=Math.max(...items.map(i=>i.value),1),n=items.length||1,pw=W-pad*2,ph=H-pad*2;
+  x.strokeStyle="#e5e7eb"; x.beginPath(); x.moveTo(pad,H-pad); x.lineTo(W-pad,H-pad); x.stroke();
+  items.forEach((it,i)=>{ const bw=pw/n*0.6,bh=(it.value/max)*ph,bx=pad+(pw/n)*i+(pw/n-bw)/2,by=H-pad-bh;
+    x.fillStyle="#"+color; x.fillRect(bx,by,bw,bh);
+    x.fillStyle="#6b7280"; x.font="9px Arial"; x.textAlign="center"; x.save(); x.translate(bx+bw/2,H-pad+4); x.rotate(-Math.PI/4); x.fillText(it.label,0,4); x.restore();
+    if(it.value>0){ x.fillStyle="#334155"; x.font="bold 9px Arial"; x.textAlign="center"; x.fillText(fmtK(it.value),bx+bw/2,by-4);} });
+  return cv.toDataURL("image/png").split(",")[1];
+}
+async function exportQSRich(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
+  const ExcelJS = await loadExcelJS();
+  const CL = (c1) => XLSX.utils.encode_col(c1-1);
+  const combined = buildCombinedBudget(tenderCosts, additions);
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const list = accounts.filter(a => { const bs=parseFloat(tenderCosts[a.code])||0, tt=parseFloat(combined[a.code])||0; return !(tt<=0 && bs<=0); });
+  const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const monthItems = months.map(m => ({ label: monthShortLabel(m), value: list.reduce((s,a)=> s+(parseFloat((additions[m]||{})[a.code])||0),0) }));
+  const base = list.reduce((s,a)=> s+(parseFloat(tenderCosts[a.code])||0),0);
+  const added = monthItems.reduce((s,i)=> s+i.value,0);
+  const PAL = ["2563EB","10B981","F59E0B","8B5CF6","EF4444","06B6D4","EC4899","84CC16","F97316","64748B"];
+  const byG = {}; list.forEach(a=>{ const bs=parseFloat(tenderCosts[a.code])||0, tt=parseFloat(combined[a.code])||0, g=a.group||"อื่น ๆ"; (byG[g]=byG[g]||{base:0,total:0}); byG[g].base+=bs; byG[g].total+=tt; });
+  const grand = Object.values(byG).reduce((s,x)=>s+x.total,0)||1;
+  const groups = Object.entries(byG).map(([label,x],i)=>({ label, base:x.base, add:x.total-x.base, total:x.total, pct:x.total/grand, color:PAL[i%PAL.length] })).sort((a,b)=>b.total-a.total);
+  const pie = chartPiePNG(groups.map(g=>({label:g.label,value:g.total,color:g.color})));
+  const bar = chartBarPNG(monthItems, "2563EB");
+
+  const wb = new ExcelJS.Workbook();
+  const fillS = (argb) => ({ type:"pattern", pattern:"solid", fgColor:{argb} });
+  const totRowN = 5 + list.length;                 // แถว TOTAL ของชีต 'รายละเอียด'
+  const lastMonthL = CL(4 + months.length);        // ตัวอักษรคอลัมน์เดือนสุดท้าย
+  const totColL = CL(5 + months.length);           // คอลัมน์ 'รวมทั้งหมด'
+
+  // ── ชีต "สรุป" ──
+  const ws = wb.addWorksheet("สรุป", { views:[{ showGridLines:false }] });
+  ws.columns = Array.from({length:10}, (_,i)=> ({ width: i===0?18:13 }));
+  ws.mergeCells("A1:J1"); const t=ws.getCell("A1"); t.value=`สรุปงบประมาณ — ${project.name}`; t.font={bold:true,size:16,color:{argb:"FFFFFFFF"}}; t.fill=fillS("FF2563EB"); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=32;
+  ws.mergeCells("A2:J2"); const st=ws.getCell("A2"); st.value=`พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`; st.font={italic:true,size:10,color:{argb:"FF64748B"}}; st.alignment={indent:1};
+  const cards = [["ราคาเดิม (Baseline)","FFDBEAFE","FF1D4ED8",{formula:`'รายละเอียด'!D${totRowN}`,result:base}],
+                 ["เพิ่มรายเดือนรวม","FFD1FAE5","FF047857",{formula:`'รายละเอียด'!${totColL}${totRowN}-'รายละเอียด'!D${totRowN}`,result:added}],
+                 ["งบรวมทั้งหมด","FFFEF3C7","FF92400E",{formula:`'รายละเอียด'!${totColL}${totRowN}`,result:base+added}],
+                 ["จำนวนเดือน","FFEDE9FE","FF6D28D9",months.length]];
+  cards.forEach((cd,i)=>{ const c0=1+i*2,c1=c0+1;
+    ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
+    const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:9.5,color:{argb:cd[2]}}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
+    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i<3) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]}}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
+  }); ws.getRow(4).height=18; ws.getRow(5).height=30;
+  ws.mergeCells("A7:E7"); ws.getCell("A7").value="สัดส่วนงบตามกลุ่ม"; ws.getCell("A7").font={bold:true,size:11,color:{argb:"FF1D4ED8"}};
+  ws.mergeCells("F7:J7"); ws.getCell("F7").value="ยอดเพิ่มรายเดือน"; ws.getCell("F7").font={bold:true,size:11,color:{argb:"FF1D4ED8"}};
+  ws.addImage(wb.addImage({ base64:pie, extension:"png" }), { tl:{col:0.1,row:7.2}, ext:{width:390,height:225} });
+  ws.addImage(wb.addImage({ base64:bar, extension:"png" }), { tl:{col:5.1,row:7.2}, ext:{width:390,height:225} });
+  const gR = 21;
+  ["กลุ่ม","ราคาเดิม","เพิ่มรายเดือน","งบรวม","สัดส่วน"].forEach((h,i)=>{ const c=ws.getCell(gR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"}}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i?"right":"left",vertical:"middle"}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; });
+  groups.forEach((g,i)=>{ const r=gR+1+i, row=[[g.label,"left"],[g.base,"right","#,##0"],[g.add,"right","#,##0"],[g.total,"right","#,##0"],[g.pct,"center","0.0%"]];
+    row.forEach((cd,ci)=>{ const c=ws.getCell(r,1+ci); c.value=cd[0]; c.alignment={horizontal:cd[1],vertical:"middle"}; if(cd[2])c.numFmt=cd[2]; c.font={size:9.5,bold:ci===0||ci===3,color:{argb: ci===0?"FF1D4ED8":"FF1F2937"}}; if(i%2)c.fill=fillS("FFF4F7FE"); }); });
+  const rT=gR+1+groups.length, tv=[["รวมทั้งหมด","left"],[groups.reduce((s,g)=>s+g.base,0),"right","#,##0"],[groups.reduce((s,g)=>s+g.add,0),"right","#,##0"],[groups.reduce((s,g)=>s+g.total,0),"right","#,##0"],[1,"center","0.0%"]];
+  tv.forEach((cd,ci)=>{ const c=ws.getCell(rT,1+ci); c.value=cd[0]; c.alignment={horizontal:cd[1],vertical:"middle"}; if(cd[2])c.numFmt=cd[2]; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"}}; c.fill=fillS("FFC9D8FA"); c.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; });
+
+  // ── ชีต "รายละเอียด" (ลิงก์สูตร) ──
+  const wd = wb.addWorksheet("รายละเอียด", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
+  wd.columns = [{width:12},{width:38},{width:14},{width:15}, ...months.map(()=>({width:12})), {width:16}];
+  const dCols = 5 + months.length;
+  wd.mergeCells(1,1,1,dCols); const dt=wd.getCell(1,1); dt.value=`งบประมาณรายละเอียด — ${project.name}`; dt.font={bold:true,size:13,color:{argb:"FFFFFFFF"}}; dt.fill=fillS("FF2563EB"); dt.alignment={vertical:"middle",indent:1}; wd.getRow(1).height=26;
+  ["Acc. Code","Account Name","Group","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"].forEach((h,i)=>{ const c=wd.getCell(4,1+i); c.value=h; c.font={bold:true,size:10,color:{argb:"FF1D4ED8"}}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); wd.getRow(4).height=24;
+  list.forEach((a,ri)=>{ const R=5+ri, mv=months.map(m=>parseFloat((additions[m]||{})[a.code])||0), bs=parseFloat(tenderCosts[a.code])||0;
+    wd.getCell(R,1).value=a.code; wd.getCell(R,2).value=a.name; wd.getCell(R,3).value=a.group;
+    const bc=wd.getCell(R,4); bc.value=bs; bc.numFmt="#,##0";
+    mv.forEach((v,mi)=>{ const c=wd.getCell(R,5+mi); c.value=v; c.numFmt="#,##0"; });
+    const tc=wd.getCell(R,dCols); tc.value = { formula: months.length? `D${R}+SUM(E${R}:${lastMonthL}${R})` : `D${R}`, result: bs+mv.reduce((s,v)=>s+v,0) }; tc.numFmt="#,##0"; tc.font={bold:true};
+    if(ri%2) for(let c=1;c<=dCols;c++){ const cell=wd.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
+  });
+  [4, ...months.map((_,i)=>5+i), dCols].forEach(col=>{ const c=wd.getCell(totRowN,col), L=CL(col); c.value={ formula:`SUM(${L}5:${L}${4+list.length})` }; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"}}; c.fill=fillS("FFC9D8FA"); c.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; });
+  const tl=wd.getCell(totRowN,2); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF1D4ED8"}}; tl.fill=fillS("FFC9D8FA"); tl.border={top:{style:"medium",color:{argb:"FF2563EB"}}};
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url;
+  a2.download = `QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`;
+  document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1500);
 }
 
 // ─── QS: budget / tender-cost export ───────────────────────────────────────
@@ -625,45 +769,72 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const theme = { main:"2563EB", dark:"1D4ED8" };
   const combinedBudget = buildCombinedBudget(tenderCosts, additions);
   const accounts = exportAccountList(extraItems, hiddenAccounts);
+  // รายการบัญชีที่มีค่า (ใช้ร่วมกันทั้ง 2 ชีต เพื่อให้ตำแหน่งแถวตรงกัน → ลิงก์สูตรได้)
+  const dashList = accounts.filter(a => {
+    const bs = parseFloat(tenderCosts[a.code]) || 0;
+    const tt = parseFloat(combinedBudget[a.code]) || 0;
+    return !(tt <= 0 && bs <= 0);
+  });
 
   // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดเพิ่มรายเดือน (ในหน้าเดียว)
   const dashMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
   const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + (parseFloat((additions[m]||{})[a.code])||0), 0) }));
   const dashBase   = accounts.reduce((s,a)=> s + (parseFloat(tenderCosts[a.code])||0), 0);
   const dashAdded  = dashItems.reduce((s,i)=> s + i.value, 0);
+  // แถว TOTAL (A1) ของชีต "งบประมาณ"/"รายเดือน (สรุป)" = 5 + จำนวนแถวข้อมูล
+  // (หัวข้อ 3 แถว + หัวตารางแถว 4 → ข้อมูลเริ่มแถว 5 → TOTAL อยู่แถว 5+N)
+  const TR = 5 + dashList.length;
+  const dashItemsF = dashItems.map((it, i) => ({ ...it, f: `'รายเดือน (สรุป)'!${XLSX.utils.encode_col(3 + i)}${TR}` }));
+  // สรุปตามกลุ่มวัสดุ (ไว้โชว์ตาราง+แถบสัดส่วนในหน้าสรุป)
+  const byG = {};
+  dashList.forEach(a => {
+    const bs = parseFloat(tenderCosts[a.code]) || 0, tt = parseFloat(combinedBudget[a.code]) || 0, g = a.group || "อื่น ๆ";
+    (byG[g] = byG[g] || { base:0, total:0 }); byG[g].base += bs; byG[g].total += tt;
+  });
+  const grandTot = Object.values(byG).reduce((s,x)=>s+x.total,0) || 1;
+  const groupData = Object.entries(byG)
+    .map(([label,x]) => ({ label, base:x.base, add:x.total-x.base, total:x.total, pct:x.total/grandTot }))
+    .sort((a,b)=> b.total - a.total);
   addDashboardSheet(wb, "สรุป", {
     title: `สรุปงบประมาณ — ${project.name}`,
     subtitle: `พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`,
     theme,
     cards: [
-      { label:"ราคาเดิม (Baseline)", value: dashBase, money:true },
-      { label:"เพิ่มรายเดือนรวม",    value: dashAdded, money:true },
-      { label:"งบรวมทั้งหมด",         value: dashBase + dashAdded, money:true },
+      { label:"ราคาเดิม (Baseline)", value: dashBase, money:true, f:`'งบประมาณ'!D${TR}` },
+      { label:"เพิ่มรายเดือนรวม",    value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}` },
+      { label:"งบรวมทั้งหมด",         value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}` },
       { label:"จำนวนเดือน",           value: dashMonths.length },
     ],
     chartTitle: "กราฟ: ยอดเพิ่มรายเดือน (THB)",
-    items: dashItems,
+    items: dashItemsF,
+    groups: groupData,
   });
 
   // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
   const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
   rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม (Baseline)","เพิ่มรายเดือน (รวม)","งบรวมทั้งหมด"]);
   const dataStart1 = rows1.length;
-  let gB=0, gA=0, gT=0;
   const rowGroups1 = [];
-  accounts.forEach(a => {
+  dashList.forEach(a => {
     const baseline = parseFloat(tenderCosts[a.code]) || 0;
     const total    = parseFloat(combinedBudget[a.code]) || 0;
-    if (total<=0 && baseline<=0) return;
     const added = total - baseline;
     rows1.push([a.code, a.name, a.group, baseline, added, total]);
     rowGroups1.push(a.group);
-    gB += baseline; gA += added; gT += total;
   });
   const dataEnd1 = rows1.length-1;
-  rows1.push(["","TOTAL","",gB,gA,gT]);
+  rows1.push(["","TOTAL","",0,0,0]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
+  // ลิงก์ด้วยสูตร: งบรวม = ราคาเดิม + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
+  for (let r = dataStart1; r <= dataEnd1; r++) {
+    const R = r + 1, ref = XLSX.utils.encode_cell({ r, c:5 });
+    if (ws1[ref]) ws1[ref].f = `D${R}+E${R}`;
+  }
+  ["D","E","F"].forEach((L, i) => {
+    const ref = XLSX.utils.encode_cell({ r:totalRow1, c:3+i });
+    if (ws1[ref]) ws1[ref].f = `SUM(${L}${dataStart1+1}:${L}${dataEnd1+1})`;
+  });
   ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18}];
   styleSheet(ws1, { numCols:6, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
     moneyCols:[3,4,5], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
@@ -674,24 +845,30 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const rows2 = [[`รายการเพิ่มรายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
   rows2.push(["Acc. Code","Account Name","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"]);
   const dataStart2 = rows2.length;
-  const monthTotals = months.map(()=>0);
-  let gB2=0, gT2=0;
   const rowGroups2 = [];
-  accounts.forEach(a => {
+  dashList.forEach(a => {
     const baseline  = parseFloat(tenderCosts[a.code]) || 0;
     const monthVals = months.map(m => parseFloat((additions[m]||{})[a.code]) || 0);
     const total = baseline + monthVals.reduce((s,v)=>s+v,0);
-    if (total<=0 && baseline<=0) return;
     rows2.push([a.code, a.name, baseline, ...monthVals, total]);
     rowGroups2.push(a.group);
-    monthVals.forEach((v,i) => monthTotals[i]+=v);
-    gB2 += baseline; gT2 += total;
   });
   const dataEnd2 = rows2.length-1;
-  rows2.push(["","TOTAL",gB2, ...monthTotals, gT2]);
+  const M = months.length, totColC = 3 + M;
+  rows2.push(["","TOTAL",0, ...months.map(()=>0), 0]);
   const totalRow2 = rows2.length-1;
   const numCols2 = 4 + months.length;
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
+  // ลิงก์ด้วยสูตร: รวมทั้งหมด(ต่อแถว) = ราคาเดิม + ผลรวมทุกเดือน · TOTAL = ผลรวมคอลัมน์
+  const lastMonthL = XLSX.utils.encode_col(2 + M);
+  for (let r = dataStart2; r <= dataEnd2; r++) {
+    const R = r + 1, ref = XLSX.utils.encode_cell({ r, c: totColC });
+    if (ws2[ref]) ws2[ref].f = M > 0 ? `C${R}+SUM(D${R}:${lastMonthL}${R})` : `C${R}`;
+  }
+  [2, ...months.map((_,i)=>3+i), totColC].forEach(c => {
+    const L = XLSX.utils.encode_col(c), ref = XLSX.utils.encode_cell({ r:totalRow2, c });
+    if (ws2[ref]) ws2[ref].f = `SUM(${L}${dataStart2+1}:${L}${dataEnd2+1})`;
+  });
   ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}];
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
     moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length], theme, rowGroups:rowGroups2 });
@@ -1471,7 +1648,7 @@ export default function App() {
           onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
       )}
       {screen === "app" && effectiveRole === "qs"          && (
-        <QSView {...sharedProps} onExport={() => exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts)} />
+        <QSView {...sharedProps} onExport={() => exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); })} />
       )}
       {screen === "app" && effectiveRole === "procurement" && (
         <ProcurementView {...sharedProps} onExport={() => exportProcurementExcel(activeProject, poEntries)} />
