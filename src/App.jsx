@@ -264,17 +264,20 @@ const poPayLines = (p) => {
         const amount = roundAmt(r);
         if (amount <= 0) return;
         const incoming = r.actualDate || r.planDate || "";
+        // "จ่ายแล้ว" ต้อง (1) รับของจริงแล้ว และ (2) ถึงวันครบกำหนดจ่าย — ถ้ามีแต่
+        // วันรับของแต่ยังไม่กรอกจำนวนที่รับจริง ถือว่ายังไม่รับ = ยังไม่จ่าย
+        const received = roundReceived(r);
         out.push({ code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
-          payDate: dueOf(incoming), amount, paid: roundPaid(P, r) });
+          payDate: dueOf(incoming), amount, received, paid: received && roundPaid(P, r) });
       });
     } else if (itemAmt > 0) {
       // ยอดงวดไม่ตรง (หรือไม่มีงวด) → ยุบเหลือบรรทัดเดียว ใช้ยอด item เป็นหลัก
       const actualDates = rounds.map(r=>r.actualDate).filter(Boolean).sort();
       const planDates   = rounds.map(r=>r.planDate).filter(Boolean).sort();
       const incoming = actualDates[0] || planDates[0] || "";
-      const paidAmt  = rounds.filter(r=>roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+      const paidAmt  = rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
       out.push({ code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
-        payDate: dueOf(incoming), amount: itemAmt, paid: paidAmt >= itemAmt-0.5 });
+        payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: paidAmt >= itemAmt-0.5 });
     }
   });
   const today = todayStr();
@@ -283,7 +286,8 @@ const poPayLines = (p) => {
     supplier: poSupplierName(P), poNo: poNumbersLabel(P),
     accName: (ACCOUNTS.find(a=>a.code===l.code)?.name)||"",
     month: l.payDate ? l.payDate.slice(0,7) : "",
-    status: l.paid ? "paid" : (l.payDate && l.payDate < today ? "late" : "pending"),
+    // "เกินกำหนดจ่าย" เฉพาะของที่รับแล้วแต่ยังไม่จ่ายและเลยกำหนด; ของที่ยังไม่รับ = "รอจ่าย"
+    status: l.paid ? "paid" : (l.received && l.payDate && l.payDate < today ? "late" : "pending"),
   }));
 };
 
@@ -422,12 +426,25 @@ const GLOBAL_CSS = `
 // Every department gets its own styled workbook — xlsx-js-style (a SheetJS
 // fork) lets us actually write cell colors/fonts/borders, which the plain
 // community "xlsx" package silently drops on write.
+// ยอดเพิ่มของ Acc. Code ในเดือน m = ค่าธรรมดา + ผลรวมทุกคอลัมน์ย่อยของ code นั้น
+// ตรงกับ rowMonthValue ในหน้าแอพ เพื่อให้ตัวเลขในไฟล์ Export ตรงกับที่เห็นบนแอพ
+// แม้เดือนนั้นจะมีการตั้งคอลัมน์ย่อยไว้ (ไม่ทำให้ค่าธรรมดาที่ตกค้างหาย)
+const monthAddValue = (additions, m, code) => {
+  const mo = additions && additions[m];
+  if (!mo) return 0;
+  let v = parseFloat(mo[code]) || 0;
+  const prefix = code + ":";
+  for (const k in mo) if (k.startsWith(prefix)) v += parseFloat(mo[k]) || 0;
+  return v;
+};
 const buildCombinedBudget = (tenderCosts, additions) => {
   const combined = {...tenderCosts};
   Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
     if (mKey.startsWith("$")) return;
-    Object.entries(monthObj || {}).forEach(([code, val]) => {
-      if (code.startsWith("$") || code.includes(":")) return;
+    Object.entries(monthObj || {}).forEach(([key, val]) => {
+      if (key.startsWith("$")) return;
+      // คีย์คอลัมน์ย่อย "code:colId" ให้รวมยอดเข้ากับ code แม่ (เดิมถูกข้าม)
+      const code = key.includes(":") ? key.slice(0, key.indexOf(":")) : key;
       combined[code] = (parseFloat(combined[code]) || 0) + (parseFloat(val) || 0);
     });
   });
@@ -780,7 +797,7 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
   const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
   const M = months.length;
   const base = list.reduce((s,a)=> s+(parseFloat(tenderCosts[a.code])||0),0);
-  const added = list.reduce((s,a)=> s + months.reduce((ss,m)=> ss+(parseFloat((additions[m]||{})[a.code])||0),0), 0);
+  const added = list.reduce((s,a)=> s + months.reduce((ss,m)=> ss+monthAddValue(additions, m, a.code),0), 0);
   const HD = ["Acc. Code","Account Name","Group","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"];
   const NC = HD.length;
   const soft = "FF"+lighten("2563EB",0.55), colL = c => XLSX.utils.encode_col(c);
@@ -800,7 +817,7 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
   HD.forEach((h,i)=>{ const c=ws.getCell(HR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"},name:F}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); ws.getRow(HR).height=24;
   const drows = [];
   list.forEach((a,ri)=>{ const R=HR+1+ri;
-    const mv = months.map(m=>parseFloat((additions[m]||{})[a.code])||0), bs=parseFloat(tenderCosts[a.code])||0;
+    const mv = months.map(m=>monthAddValue(additions, m, a.code)), bs=parseFloat(tenderCosts[a.code])||0;
     drows.push([a.code, a.name, a.group, bs, ...mv, bs+mv.reduce((s,v)=>s+v,0)]);
     ws.getCell(R,1).value=a.code; ws.getCell(R,2).value=a.name; ws.getCell(R,3).value=a.group;
     const bc=ws.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
@@ -837,11 +854,14 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
     list.forEach((a,ri)=>{ const R=5+ri;
       const bs = parseFloat(tenderCosts[a.code])||0;
       const cv = hasCols ? cols.map(c=>parseFloat((additions[m]||{})[`${a.code}:${c.id}`])||0) : [parseFloat((additions[m]||{})[a.code])||0];
-      mrows.push([a.code, a.name, a.group, bs, ...cv, cv.reduce((s,v)=>s+v,0)]);
+      // ค่าธรรมดาที่ตกค้างในเดือนที่มีคอลัมน์ (บวกเข้ายอดรวมเดือนนี้ให้ตรงกับแอพ/สรุป)
+      const residual = hasCols ? (parseFloat((additions[m]||{})[a.code])||0) : 0;
+      const rowTot = cv.reduce((s,v)=>s+v,0) + residual;
+      mrows.push([a.code, a.name, a.group, bs, ...cv, rowTot]);
       wsm.getCell(R,1).value=a.code; wsm.getCell(R,2).value=a.name; wsm.getCell(R,3).value=a.group;
       const bc=wsm.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
       cv.forEach((v,vi)=>{ const c=wsm.getCell(R,5+vi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
-      const tc=wsm.getCell(R,nc); tc.value = { formula:`SUM(E${R}:${lastValL}${R})`, result: cv.reduce((s,v)=>s+v,0) }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
+      const tc=wsm.getCell(R,nc); tc.value = { formula: residual ? `SUM(E${R}:${lastValL}${R})+${residual}` : `SUM(E${R}:${lastValL}${R})`, result: rowTot }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
       [1,2,3].forEach(c=>{ wsm.getCell(R,c).font={name:F,size:9.5}; wsm.getCell(R,c).alignment={vertical:"middle"}; });
       if(ri%2) for(let c=1;c<=nc;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
     });
@@ -871,7 +891,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
 
   // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดเพิ่มรายเดือน (ในหน้าเดียว)
   const dashMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
-  const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + (parseFloat((additions[m]||{})[a.code])||0), 0) }));
+  const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + monthAddValue(additions, m, a.code), 0) }));
   const dashBase   = accounts.reduce((s,a)=> s + (parseFloat(tenderCosts[a.code])||0), 0);
   const dashAdded  = dashItems.reduce((s,i)=> s + i.value, 0);
   // แถว TOTAL (A1) ของชีต "งบประมาณ"/"รายเดือน (สรุป)" = 5 + จำนวนแถวข้อมูล
@@ -941,7 +961,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const rowGroups2 = [];
   dashList.forEach(a => {
     const baseline  = parseFloat(tenderCosts[a.code]) || 0;
-    const monthVals = months.map(m => parseFloat((additions[m]||{})[a.code]) || 0);
+    const monthVals = months.map(m => monthAddValue(additions, m, a.code));
     const total = baseline + monthVals.reduce((s,v)=>s+v,0);
     rows2.push([a.code, a.name, baseline, ...monthVals, total]);
     rowGroups2.push(a.group);
@@ -1045,8 +1065,10 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     const vals = hasCols
       ? cols.map(c => parseFloat((additions[month] || {})[`${a.code}:${c.id}`]) || 0)
       : [parseFloat((additions[month] || {})[a.code]) || 0];
-    const monthTot = vals.reduce((s, v) => s + v, 0);
-    const cum = baseline + upto.reduce((s, m) => s + (parseFloat((additions[m] || {})[a.code]) || 0), 0);
+    // เดือนที่มีคอลัมน์: บวกค่าธรรมดาที่ตกค้างเข้ายอดรวมเดือนนี้ให้ตรงกับแอพ
+    const residual = hasCols ? (parseFloat((additions[month] || {})[a.code]) || 0) : 0;
+    const monthTot = vals.reduce((s, v) => s + v, 0) + residual;
+    const cum = baseline + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
     if (monthTot <= 0 && baseline <= 0 && cum <= 0) return;
     rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum]);
     rowGroups.push(a.group);
@@ -1418,7 +1440,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
     let cumB = baselineTotal, cumC = 0;
     allMonths.forEach(m => {
-      const addedThisMonth     = accounts.reduce((s,a)=>s+(parseFloat((additions[m]||{})[a.code])||0),0);
+      const addedThisMonth     = accounts.reduce((s,a)=>s+monthAddValue(additions, m, a.code),0);
       const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0);
       cumB += addedThisMonth;
       cumC += committedThisMonth;
@@ -4029,16 +4051,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const closeDetail = () => setDetailId(null);
   const toggleGroup = (code) => setCollapsed(c => ({...c, [code]: !c[code]}));
 
-  // Budget (QS) = baseline Tender Cost + every monthly addition entered so far,
-  // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
-  const combinedBudget = {...tenderCosts};
-  Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
-    if (mKey.startsWith("$")) return; // skip project-level meta keys like $columns
-    Object.entries(monthObj || {}).forEach(([code, val]) => {
-      if (code.startsWith("$") || code.includes(":")) return; // skip meta keys / per-column sub-entries, already rolled into the plain code key
-      combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
-    });
-  });
+  // Budget (QS) = baseline Tender Cost + every monthly addition (ค่าธรรมดา +
+  // คอลัมน์ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตรงกัน
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
   // Sum only top-level codes (accounts not hidden + standalone extras).
   // combinedBudget also carries an entry for every sub-item (EX-xxxx with a
   // parentCode) since those persist in tenderCosts/additions individually —
@@ -4709,16 +4724,9 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     return next;
   });
 
-  // Budget = baseline Tender Cost + every monthly addition entered so far,
-  // combined per Acc. Code — matches the "รวมทั้งหมด" total on the QS Monthly tab.
-  const combinedBudget = {...tenderCosts};
-  Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
-    if (mKey.startsWith("$")) return; // skip project-level meta keys like $columns
-    Object.entries(monthObj || {}).forEach(([code, val]) => {
-      if (code.startsWith("$") || code.includes(":")) return; // skip meta keys / per-column sub-entries, already rolled into the plain code key
-      combinedBudget[code] = (parseFloat(combinedBudget[code]) || 0) + (parseFloat(val) || 0);
-    });
-  });
+  // Budget = baseline Tender Cost + every monthly addition (ค่าธรรมดา + คอลัมน์
+  // ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตัวเลขตรงกัน
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
 
   // Sum only top-level codes — see note in ProcurementView. Object.values()
   // over the whole combinedBudget double-counts sub-items (EX-xxxx rows),
@@ -4729,7 +4737,9 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
   ];
   const tenderTotal   = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm     = poEntries.reduce((s,p)=>s+poTotal(p),0);
-  const totalPaid     = poEntries.filter(p=>p.status==="Paid").reduce((s,p)=>s+poTotal(p),0);
+  // จ่ายแล้ว = ยอดที่ตัดจ่ายอัตโนมัติจริง (งวดที่รับของแล้ว + ถึงกำหนดจ่าย) ให้ตรงกับไฟล์ Excel
+  const totalPaid     = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundReceived(r)&&roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0), 0);
+  const paidPOCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
   const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
   const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
 
@@ -4869,7 +4879,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <StatCard label="งบประมาณ (QS)" value={fmt(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
               <StatCard label="Committed (PO)" value={fmt(totalComm)} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
               <StatCard label="Invoiced" value={fmt(totalInvoiced)} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
-              <StatCard label="ชำระแล้ว (Paid)" value={fmt(totalPaid)} sub={`${poEntries.filter(p=>p.status==="Paid").length} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label="ชำระแล้ว (Paid)" value={fmt(totalPaid)} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
 
             {/* Progress */}
@@ -4933,7 +4943,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                     {label:"ส่วนต่าง", key:"variance"},
                   ].map(({label,key})=>(
                     <th key={label||"__actions"}
-                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","ส่วนต่าง","% Used"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","ส่วนต่าง"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                       <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                     </th>
                   ))}
@@ -4951,8 +4961,8 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                       </td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}</td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?700:500}}>
-                        {a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—"}
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.budget<=0&&a.committed>0?T.textMuted:variance<0?T.red:T.textSecondary,fontWeight:a.budget<=0&&a.committed>0?500:variance<0?700:500}}>
+                        {a.budget<=0&&a.committed>0 ? "No Budget" : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
                       </td>
                     </tr>
                   );
