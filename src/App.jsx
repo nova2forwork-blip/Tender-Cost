@@ -2528,7 +2528,7 @@ function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
 // คืน null ถ้าไม่ได้เปิดใช้อัตราแลกเปลี่ยน
 function usdLine(thb, rate) {
   if (!rate || rate <= 0 || typeof thb !== "number" || !isFinite(thb)) return null;
-  return <div className="usd-sub" style={{fontSize:11.5,color:"#64748b",fontWeight:600,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.2,marginTop:2}}>≈ ${fmt(thb/rate)}</div>;
+  return <div className="usd-sub" style={{fontSize:11.5,color:T.green,fontWeight:600,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.2,marginTop:2}}>≈ ${fmt(thb/rate)}</div>;
 }
 
 // อัตราแลกเปลี่ยนของโปรเจกต์ที่ควรใช้แสดงผล (0 = ปิด/ไม่แสดง $)
@@ -4456,6 +4456,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ${fmt(poTotal(po))} บาท` : "";
     if (!window.confirm(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`)) return;
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
+    if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
   };
   const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
   // กด Esc ระหว่างเปิดฟอร์มเพิ่ม/แก้ PO = ยกเลิก (ปิดฟอร์มโดยไม่บันทึก)
@@ -4659,9 +4660,15 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               </label>
             </div>
             {/* เว้นที่ด้านล่างให้พ้นแถบ "ย้อนกลับ/ทำซ้ำ" ที่ลอยมุมซ้ายล่าง ไม่ให้ทับปุ่ม */}
-            <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap",alignItems:"center"}}>
               <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editId?"บันทึก":"เพิ่ม PO"}</button>
               <button onClick={closeForm} className="btn-ghost">ยกเลิก</button>
+              {editId && (
+                <button onClick={()=>{ deletePO(editId); }}
+                  style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,color:T.red,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                  🗑 ลบ PO นี้
+                </button>
+              )}
             </div>
           </div>
         ) : tab==="tracking" ? (
@@ -4768,10 +4775,8 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                                   {poLastUpdate(p) && <div style={{fontSize:9,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข"}
-                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6,marginRight:4}}>✏️</button>
-                                  <button onClick={()=>deletePO(p.id)} disabled={locked} title={locked?"ลบได้เฉพาะ Admin":"ลบ"}
-                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.red,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>🗑</button>
+                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข (ลบได้ในหน้านี้)"}
+                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
                                 </td>
                               </tr>
                             );})}
