@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Fragment } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
 import { supabase, sg, ss, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
@@ -267,17 +267,19 @@ const poPayLines = (p) => {
         // "จ่ายแล้ว" ต้อง (1) รับของจริงแล้ว และ (2) ถึงวันครบกำหนดจ่าย — ถ้ามีแต่
         // วันรับของแต่ยังไม่กรอกจำนวนที่รับจริง ถือว่ายังไม่รับ = ยังไม่จ่าย
         const received = roundReceived(r);
+        const paid = received && roundPaid(P, r);
         out.push({ code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
-          payDate: dueOf(incoming), amount, received, paid: received && roundPaid(P, r) });
+          payDate: dueOf(incoming), amount, received, paid, paidAmount: paid ? amount : 0 });
       });
     } else if (itemAmt > 0) {
       // ยอดงวดไม่ตรง (หรือไม่มีงวด) → ยุบเหลือบรรทัดเดียว ใช้ยอด item เป็นหลัก
+      // จ่ายบางส่วน: เก็บ paidAmount ไว้ให้ยอด "คงเหลือต้องจ่าย" หักออกถูกต้อง
       const actualDates = rounds.map(r=>r.actualDate).filter(Boolean).sort();
       const planDates   = rounds.map(r=>r.planDate).filter(Boolean).sort();
       const incoming = actualDates[0] || planDates[0] || "";
-      const paidAmt  = rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+      const paidAmt  = Math.min(rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0), itemAmt);
       out.push({ code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
-        payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: paidAmt >= itemAmt-0.5 });
+        payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: paidAmt >= itemAmt-0.5, paidAmount: paidAmt });
     }
   });
   const today = todayStr();
@@ -1464,7 +1466,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const cash   = lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0);
       const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
       const sum    = cash+credit;
-      const paidA  = lines.filter(l=>l.paid).reduce((s,l)=>s+l.amount,0);
+      const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รองรับจ่ายบางส่วน
       const remain = Math.max(0, sum - paidA);
       const label  = mk==="9999-99" ? "ยังไม่ระบุวันจ่าย" : monthShortLabel(mk);
       rowsP.push([label, lines.length, cash, credit, sum, paidA, remain]);
@@ -1526,6 +1528,28 @@ function buildTSV(cells) {
   return rows.map(r => r.slice().sort((a, b) => a.left - b.left).map(c => c.text).join("\t")).join("\n");
 }
 
+// กันจอขาว: ถ้าหน้าจอส่วนใดโยน error ตอน render จะโชว์กล่องแจ้ง + ปุ่มลองใหม่
+// แทนที่จะพังทั้งแอพ
+class ErrorBoundary extends Component {
+  constructor(props){ super(props); this.state = { err:null }; }
+  static getDerivedStateFromError(err){ return { err }; }
+  componentDidCatch(err, info){ console.error("UI error:", err, info); }
+  render(){
+    if (this.state.err) {
+      return (
+        <div style={{minHeight:"60vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,padding:24,textAlign:"center"}}>
+          <div style={{fontSize:40}}>😵</div>
+          <div style={{fontSize:16,fontWeight:700,color:"#0f172a"}}>เกิดข้อผิดพลาดในการแสดงผลหน้านี้</div>
+          <div style={{fontSize:13,color:"#64748b",maxWidth:460}}>ข้อมูลของคุณยังปลอดภัย ลองกดปุ่มด้านล่างเพื่อโหลดใหม่ ถ้ายังเป็นอยู่ให้แจ้งผู้ดูแลระบบ</div>
+          <button onClick={()=>{ this.setState({err:null}); if(typeof window!=="undefined") window.location.reload(); }}
+            style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:14,fontWeight:600,cursor:"pointer"}}>โหลดหน้าใหม่</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [session,  setSessionState] = useState(null);   // โหลดแบบ async ด้านล่าง
   const [authReady, setAuthReady]   = useState(false);  // true เมื่อเช็ค session เสร็จ
@@ -1542,6 +1566,13 @@ export default function App() {
   const [newProjModal, setNewProjModal] = useState(false);
   const [syncedAt,    setSyncedAt]    = useState(null);
   const [syncing,     setSyncing]     = useState(false);
+  const [syncError,   setSyncError]   = useState("");   // ข้อความเตือนเมื่อบันทึก/โหลดพลาด
+  const [exportMsg,   setExportMsg]   = useState("");   // สถานะตอนกด Export (กำลังสร้าง/เสร็จ/พลาด)
+  const runExport = async (fn) => {
+    setExportMsg("⏳ กำลังสร้างไฟล์ Excel…");
+    try { await fn(); setExportMsg("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด"); setTimeout(()=>setExportMsg(""), 3500); }
+    catch (e) { console.warn("export failed:", e); setExportMsg("⚠ สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง"); setTimeout(()=>setExportMsg(""), 4500); }
+  };
 
   const handleLogin = (user) => { setSession(user); setSessionState(user); };
   const handleLogout = () => {
@@ -1590,10 +1621,17 @@ export default function App() {
   // ผูกกับ session ไว้ พอล็อกอินเสร็จ (session มีค่า) จะดึงข้อมูลใหม่อัตโนมัติ
   useEffect(() => {
     if (!session) { setLoaded(true); return; }
-    (async () => { await fetchProjects(); setLoaded(true); setSyncedAt(new Date()); })();
+    (async () => {
+      try { await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
+      catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า"); }
+      finally { setLoaded(true); }   // กันจอโหลดค้างเสมอ แม้ดึงข้อมูลพลาด
+    })();
   }, [fetchProjects, session]);
 
-  useEffect(() => { if (!activeId || !session) return; fetchProjectData(activeId); }, [activeId, fetchProjectData, session]);
+  useEffect(() => {
+    if (!activeId || !session) return;
+    fetchProjectData(activeId).catch(e => { console.warn("โหลดข้อมูลโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลโครงการไม่สำเร็จ — ลองเปิดใหม่อีกครั้ง"); });
+  }, [activeId, fetchProjectData, session]);
 
   useEffect(() => {
     if (!session) return; // subscribe realtime หลังล็อกอิน เพื่อให้ RLS ยอมส่ง event
@@ -1636,12 +1674,16 @@ export default function App() {
     u: undoRef.current.length, r: redoRef.current.length,
     label: undoRef.current.length ? undoRef.current[undoRef.current.length - 1].label : "",
   });
+  // เขียนลงเซิร์ฟเวอร์ + ดัก error ให้แจ้งเตือน (เดิมล้มเหลวแบบเงียบ ๆ)
+  const persist = (key, value) => ss(key, value)
+    .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+    .catch(e => { console.warn("บันทึกไม่สำเร็จ:", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); });
   const commit = useCallback((key, next, prev, setState, label) => {
     undoRef.current.push({ key, value: prev, setState, label });
     if (undoRef.current.length > 60) undoRef.current.shift();
     redoRef.current = []; // มีการแก้ใหม่ → ล้าง redo
     setState(next);
-    ss(key, next).then(() => setSyncedAt(new Date()));
+    persist(key, next);
     syncUndo();
   }, []);
   const undo = useCallback(() => {
@@ -1649,7 +1691,7 @@ export default function App() {
     if (!e) return;
     redoRef.current.push({ key: e.key, value: currentRef.current[e.key], setState: e.setState, label: e.label });
     e.setState(e.value);
-    ss(e.key, e.value).then(() => setSyncedAt(new Date()));
+    persist(e.key, e.value);
     syncUndo();
   }, []);
   const redo = useCallback(() => {
@@ -1657,11 +1699,11 @@ export default function App() {
     if (!e) return;
     undoRef.current.push({ key: e.key, value: currentRef.current[e.key], setState: e.setState, label: e.label });
     e.setState(e.value);
-    ss(e.key, e.value).then(() => setSyncedAt(new Date()));
+    persist(e.key, e.value);
     syncUndo();
   }, []);
-  // เปลี่ยนโครงการ → ล้างประวัติ undo (กันย้อนข้ามโครงการ)
-  useEffect(() => { undoRef.current = []; redoRef.current = []; syncUndo(); }, [activeId]);
+  // เปลี่ยนโครงการ "หรือ" เปลี่ยนหน้า → ล้างประวัติ undo (กันย้อนข้ามโครงการ/ข้ามบริบท)
+  useEffect(() => { undoRef.current = []; redoRef.current = []; syncUndo(); }, [activeId, screen]);
   // คีย์ลัด: Ctrl/Cmd+Z = ย้อนกลับ · Ctrl+Shift+Z หรือ Ctrl+Y = ทำซ้ำ
   // ไม่ดักถ้ากำลังพิมพ์อยู่ในช่องกรอก (ปล่อยให้ undo ของข้อความทำงานตามปกติ)
   useEffect(() => {
@@ -1863,6 +1905,19 @@ export default function App() {
   return (
     <>
       <style>{GLOBAL_CSS}</style>
+      {syncError && (
+        <div style={{position:"fixed",left:"50%",top:16,transform:"translateX(-50%)",zIndex:200,maxWidth:"92vw",
+          background:"#fef2f2",color:"#991b1b",border:"1px solid #ef4444",borderRadius:12,padding:"10px 16px",
+          boxShadow:"0 8px 28px rgba(15,23,42,0.18)",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",gap:12}}>
+          <span style={{flex:1}}>{syncError}</span>
+          <button onClick={()=>setSyncError("")} style={{border:"none",background:"none",color:"#991b1b",cursor:"pointer",fontSize:16,fontWeight:700,lineHeight:1}}>×</button>
+        </div>
+      )}
+      {exportMsg && (
+        <div style={{position:"fixed",left:"50%",bottom:22,transform:"translateX(-50%)",zIndex:200,
+          background:"#0f172a",color:"#e2e8f0",borderRadius:10,padding:"10px 18px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
+          fontSize:13,fontWeight:600,whiteSpace:"nowrap"}}>{exportMsg}</div>
+      )}
       {marquee && marquee.width > 2 && marquee.height > 2 && (
         <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
           background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
@@ -1911,6 +1966,7 @@ export default function App() {
           )}
         </div>
       )}
+      <ErrorBoundary>
       {screen === "home" && (
         <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
           deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
@@ -1925,14 +1981,15 @@ export default function App() {
           onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
       )}
       {screen === "app" && effectiveRole === "qs"          && (
-        <QSView {...sharedProps} onExport={() => exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); })} />
+        <QSView {...sharedProps} onExport={() => runExport(() => exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); return exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); }))} />
       )}
       {screen === "app" && effectiveRole === "procurement" && (
-        <ProcurementView {...sharedProps} onExport={() => exportPORich(activeProject, poEntries).catch(err => { console.warn("Rich PO export failed, ใช้ตัวสำรอง:", err); exportProcurementExcel(activeProject, poEntries); })} />
+        <ProcurementView {...sharedProps} onExport={() => runExport(() => exportPORich(activeProject, poEntries).catch(err => { console.warn("Rich PO export failed, ใช้ตัวสำรอง:", err); return exportProcurementExcel(activeProject, poEntries); }))} />
       )}
       {screen === "app" && effectiveRole === "accounting"  && (
-        <AccountingView {...sharedProps} onExport={() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts)} />
+        <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts))} />
       )}
+      </ErrorBoundary>
     </>
   );
 }
@@ -2275,7 +2332,7 @@ function AdminPanel({ onBack, onLogout, session }) {
                 {err && <div style={{color:T.red,fontSize:12,marginTop:8,fontWeight:500}}>{err}</div>}
               </div>
             )}
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
                   {["Username","ชื่อที่แสดง","แผนก","สถานะ",""].map(h=>(
@@ -2288,14 +2345,14 @@ function AdminPanel({ onBack, onLogout, session }) {
                   <UserRow key={u.id} u={u} onReset={handleReset} onToggle={handleToggle} onDelete={handleDelete} isSelf={u.id===session.id} />
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
         ) : (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
             <div style={{padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:600,color:T.textPrimary}}>
               ประวัติการเข้าใช้งานล่าสุด ({logs.length})
             </div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
                   {["เวลา","Username","แผนก","ผลลัพธ์"].map(h=>(
@@ -2319,7 +2376,7 @@ function AdminPanel({ onBack, onLogout, session }) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
         )}
       </div>
@@ -2410,7 +2467,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
     <div style={{minHeight:"100vh",background:T.bg}}>
       {/* Header */}
       <div style={{background:T.headerGrad,padding:"0 32px"}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px",flexWrap:"wrap",gap:12}}>
           <div>
             <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600,marginBottom:4}}>TENDER COST SYSTEM</div>
             <div style={{fontSize:22,fontWeight:800,color:"#fff",letterSpacing:"-0.5px"}}>ระบบบริหารต้นทุนโครงการ</div>
@@ -2519,7 +2576,8 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
 }
 
 function ProjectCard({ project, onOpen, onDelete }) {
-  const age = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
+  const ageRaw = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
+  const age = Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : null;
   return (
     <div className="card-hover" onClick={onOpen} title="เปิดโครงการ"
       style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
@@ -2537,7 +2595,7 @@ function ProjectCard({ project, onOpen, onDelete }) {
         {project.currency && <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div style={{fontSize:11,color:T.textMuted}}>{age === 0 ? "สร้างวันนี้" : `${age} วันที่แล้ว`}</div>
+        <div style={{fontSize:11,color:T.textMuted}}>{age === null ? "—" : age === 0 ? "สร้างวันนี้" : `${age} วันที่แล้ว`}</div>
         <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>เปิดโครงการ →</button>
       </div>
     </div>
@@ -2625,9 +2683,9 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
   };
   return (
     <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
-      <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14}}>
+      <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
         <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
-        <div style={{flex:1}}>
+        <div style={{flex:1,minWidth:140}}>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
         </div>
@@ -2858,9 +2916,9 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     <div style={{padding:"4px 28px 24px"}}>
       {/* Stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-        <StatCard label="Tender Cost รวม" value={"฿"+fmt0(base)} sub="Base cost ทั้งหมด (ราคาเดิม)" color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="Spare & Wastage 3%" value={"฿"+fmt0(adj3)} sub="เผื่อสูญหาย" color={T.amber} icon="⚙️" accent={T.amberBg}/>
-        <StatCard label="Total Adjusted" value={"฿"+fmt0(total)} sub="ต้นทุนรวมสุทธิ" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="ราคาเดิมรวม (Tender Cost)" value={"฿"+fmt0(base)} sub="ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="เผื่อเศษ/สูญเสีย 3%" value={"฿"+fmt0(adj3)} sub="ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)" color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label="รวมเผื่อ 3% (อ้างอิง)" value={"฿"+fmt0(total)} sub="ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       {/* Filters + Add row + Save */}
@@ -2944,7 +3002,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
       {/* Table */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
               {[
@@ -3073,7 +3131,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
               <td/>
             </tr>
           </tfoot>
-        </table>
+        </table></div>
       </div>
     </div>
   );
@@ -4158,6 +4216,8 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 
   const submit = () => {
     // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
+    // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
+    if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก"); return; }
     const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
       id: it.id || uid(), code: it.code, store: it.store || "", amount: it.amount,
       rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
@@ -4485,7 +4545,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                         <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}</span>
                       </div>
                       {!isCollapsed && (
-                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
                               {["วันเปิด PO","Supplier","PO No.","มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ / จ่ายเงิน","สถานะ",""].map(h=>(
@@ -4545,7 +4605,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                               </tr>
                             );})}
                           </tbody>
-                        </table>
+                        </table></div>
                       )}
                     </div>
                   );
@@ -4695,7 +4755,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                   {lateCount>0 && <Badge text={`⚠️ ${lateCount} ล่าช้า`} clr={T.red} bg={T.redBg}/>}
                 </div>
                 {!isCollapsed && (
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                   <thead>
                     <tr>
                       {["วันเปิด PO","Supplier","PO No.","มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ","แผนจ่ายเงิน","ติดตาม","สถานะ",""].map(h=>(
@@ -4758,7 +4818,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                       );
                     })}
                   </tbody>
-                </table>
+                </table></div>
                 )}
               </div>
             );
@@ -4817,7 +4877,13 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed,color:GRP_COLORS[i%GRP_COLORS.length]};
   }).filter(g=>g.budget>0||g.committed>0);
 
-  const accountData = ACCOUNTS.map(a=>{
+  // รวมบัญชีมาตรฐาน + "งานเพิ่ม" (standalone extra ที่ไม่ใช่รายการย่อย) ให้ยอดรวม
+  // หน้าบัญชีตรงกับหน้า QS/ภาพรวม ที่นับ topLevelCodes เหมือนกัน
+  const acctRows = [
+    ...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)),
+    ...extraItems.filter(e=>!e.parentCode).map(e=>({ code:e.code, name:e.name, group:e.group||"อื่น ๆ" })),
+  ];
+  const accountData = acctRows.map(a=>{
     const budget=parseFloat(combinedBudget[a.code])||0;
     // Every PO line item booked to this Account Code, whether the PO is
     // single-code or split across several — pos.length still counts POs (a
@@ -4896,14 +4962,15 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     const cash   = lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0);
     const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
     const sum    = cash+credit;
-    const paidA  = lines.filter(l=>l.paid).reduce((s,l)=>s+l.amount,0);
+    const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รวมยอดจ่ายจริง (รองรับจ่ายบางส่วน)
     return { mk, label: mk==="9999-99"?"ยังไม่ระบุวันจ่าย":monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
   });
   const planTotal  = payLines.reduce((s,l)=>s+l.amount,0);
-  const planPaid   = payLines.filter(l=>l.paid).reduce((s,l)=>s+l.amount,0);
+  const planPaid   = payLines.reduce((s,l)=>s+(l.paidAmount||0),0);
   const planRemain = Math.max(0, planTotal - planPaid);
   const thisMonthKey = payToday.slice(0,7);
-  const dueThisMonth = payByMonth.find(m=>m.mk===thisMonthKey)?.remain || 0;
+  // "ครบกำหนดเดือนนี้" = คงเหลือของเดือนนี้ + ยอดที่เลยกำหนดจากเดือนก่อน ๆ ที่ยังไม่จ่าย
+  const dueThisMonth = payByMonth.filter(m=>m.mk!=="9999-99" && m.mk<=thisMonthKey).reduce((s,m)=>s+m.remain,0);
   // เดือนถัดไป — สำหรับแจ้งเตือนให้บัญชีเตรียมเงินล่วงหน้า
   const nextMonthKey = (() => { const [y,m]=thisMonthKey.split("-").map(Number); const ny=m===12?y+1:y, nm=m===12?1:m+1; return `${ny}-${String(nm).padStart(2,"0")}`; })();
   const nextBucket   = payByMonth.find(m=>m.mk===nextMonthKey);
@@ -5071,7 +5138,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               </div>
             </div>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginTop:20}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
                   {[
@@ -5123,7 +5190,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                   })()}
                 </tr>
               </tfoot>
-            </table>
+            </table></div>
             </div>
           </>
         ) : view==="dates" ? (
@@ -5219,7 +5286,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                         a.rows.length===0 ? (
                           <div style={{padding:"14px 18px",fontSize:12,color:T.textMuted}}>ยังไม่มี PO ผูกกับ Acc. Code นี้</div>
                         ) : (
-                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
                               {["วันเปิด PO (แพลน)","Supplier","PO No.","มูลค่า (THB)","ของเข้า (แผน→จริง)","ต้องจ่ายเงินวันไหน","สถานะจ่าย"].map(h=>(
@@ -5244,7 +5311,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                               );
                             })}
                           </tbody>
-                        </table>
+                        </table></div>
                         )
                       )}
                     </div>
@@ -5304,7 +5371,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                         </div>
                       </div>
                       {!isCollapsed && (
-                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
                               {["ครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","วิธีจ่าย","วันรับของ","ยอดต้องจ่าย (THB)","สถานะ"].map(h=>(
@@ -5331,7 +5398,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                               </tr>
                             ))}
                           </tbody>
-                        </table>
+                        </table></div>
                       )}
                     </div>
                   );
