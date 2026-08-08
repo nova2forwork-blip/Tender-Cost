@@ -3858,13 +3858,11 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
     setItemRounds(itemId, it.rounds.map(r => r.id===roundId ? {...r,[key]:val} : r));
   };
+  // เพิ่มงวดของเข้าใหม่ (งวดเปล่า) — ให้ผู้ใช้กรอกยอด/วันของเข้าเอง โดยยอดของเข้า
+  // รวมทุกงวดถูกจำกัดไม่ให้เกินยอดสั่งอยู่แล้ว (setActualAmount) จึงไม่ตั้งยอดแผนซ้ำ
   const splitRound = (itemId) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
-    // ยอดงวดใหม่ = ส่วนที่ยัง "ไม่ถูกวางแผน" (ยอด item − ยอดแผนของงวดที่มีอยู่)
-    // เพื่อให้ผลรวมยอดทุกงวด = ยอด item เสมอ ไม่เกิดงวดยอดเต็มซ้ำ
-    const plannedSoFar = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
-    const remaining = Math.max((parseFloat(it.amount)||0) - plannedSoFar, 0);
-    setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:remaining, actualAmount:"", actualDate:"" }]);
+    setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }]);
   };
   // ลบงวดส่งของ — ต้องเหลืออย่างน้อย 1 งวดเสมอ (ใช้แก้กรณีมีงวดเกิน/ซ้ำ)
   const removeRound = (itemId, roundId) => {
@@ -3875,6 +3873,8 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   };
   const roundBadge = (r) => {
     if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
+    // ถ้าวันของเข้าจริงยังมาไม่ถึง (วันในอนาคต) = ยังไม่ถือว่ารับของ แสดงเป็น "นัดรับ"
+    if (r.actualDate > todayStr()) return [`นัดรับ ${r.actualDate} (ยังไม่ถึงวัน)`, INCOMING_BG.pending, INCOMING_CLR.pending];
     return roundPaid(po,r) ? ["ถึงกำหนดจ่ายแล้ว", PAYMENT_BG.paid, PAYMENT_CLR.paid]
                            : ["ของเข้าแล้ว · รอครบกำหนด", INCOMING_BG.partial, INCOMING_CLR.partial];
   };
@@ -3962,7 +3962,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                   return (
                     <div key={r.id||ri} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:10,marginBottom:6,background:T.card}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:8}}>
-                        <span style={{fontSize:11,fontWeight:700,color:T.textSecondary}}>งวดที่ {ri+1} · แผน {fmt(r.planAmount)}</span>
+                        <span style={{fontSize:11,fontWeight:700,color:T.textSecondary}}>งวดที่ {ri+1}{(parseFloat(r.planAmount)||0)>0 ? ` · แผน ${fmt(r.planAmount)}` : ""}</span>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
                           {!locked && it.rounds.length>1 && (
@@ -4005,10 +4005,10 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                     ⚠ ยอดรวมทุกงวด <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
                   </div>
                 )}
-                {!locked && planRemain>0.001 ? (
+                {!locked && ordered>0 && remain>0.001 ? (
                   <button type="button" onClick={()=>splitRound(it.id)} className="btn-ghost"
                     style={{marginTop:8,padding:"6px 12px",fontSize:12,borderColor:T.amber,color:T.amber}}>
-                    ✂️ แบ่งงวด — เพิ่มงวดยอดคงเหลือ {fmt(planRemain)}
+                    ➕ เพิ่มงวดของเข้า — เหลือรับอีก {fmt(remain)}
                   </button>
                 ) : recv>0.001 && remain<=0.001 && ordered>0 ? (
                   <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ ของเข้าครบตามยอดสั่งแล้ว</div>
@@ -4064,7 +4064,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             disabled={locked} className="btn-primary"
             style={{background:locked?"#e2e8f0":T.green,color:locked?"#94a3b8":"#fff",cursor:locked?"not-allowed":"pointer"}}>{locked?"🔒":"💾"} บันทึก</button>
           {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title="แก้ผู้ขาย / หมวด / ยอดสั่ง">✏️ แก้ไข PO</button>}
-          <button onClick={()=>{ if(window.confirm("ลบรายการ PO นี้?")) onDelete(po.id); }} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
+          <button onClick={()=>onDelete(po.id)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
           <div style={{flex:1}}/>
           <button onClick={onClose} className="btn-ghost">ปิด</button>
         </div>
@@ -4152,12 +4152,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const budgetForCode = (code) => parseFloat(combinedBudget[code])||0;
   const itemNet = (it) => Math.max(budgetForCode(it.code) - (parseFloat(it.store)||0), 0);
   const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
-  const setItemPct = (id, pct) => setForm(f=>({...f, items: f.items.map(it=>{
-    if (it.id!==id) return it;
-    const net = Math.max(budgetForCode(it.code) - (parseFloat(it.store)||0), 0);
-    const amt = Math.round(net * (parseFloat(pct)||0) / 100);
-    return {...it, amount: amt ? String(amt) : ""};
-  })}));
+  // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
 
   const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
 
@@ -4227,6 +4222,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const deletePO = (id) => {
     const po = poEntries.find(x=>x.id===id);
     if (po && !canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin"); return; }
+    // ถามยืนยันทุกครั้งก่อนลบ (ลบแล้วย้อนกลับไม่ได้)
+    const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ${fmt(poTotal(po))} บาท` : "";
+    if (!window.confirm(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`)) return;
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
   };
   const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
@@ -4375,8 +4373,8 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                         <MoneyInput value={it.amount} onChange={v=>setItemAmount(it.id,v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>% ของยอดสั่ง</span>
-                        <input type="number" placeholder="0" value={net>0 && amt ? pct : ""} onChange={e=>setItemPct(it.id,e.target.value)}
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>% ของยอดสั่ง (กรอกเอง)</span>
+                        <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)}
                           className="input-base" style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
@@ -4426,8 +4424,9 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} className="input-base" style={{resize:"vertical"}}/>
               </label>
             </div>
-            <div style={{display:"flex",gap:10,marginTop:20}}>
-              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editId?"อัปเดต":"เพิ่ม PO"}</button>
+            {/* เว้นที่ด้านล่างให้พ้นแถบ "ย้อนกลับ/ทำซ้ำ" ที่ลอยมุมซ้ายล่าง ไม่ให้ทับปุ่ม */}
+            <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap"}}>
+              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editId?"บันทึก":"เพิ่ม PO"}</button>
               <button onClick={closeForm} className="btn-ghost">ยกเลิก</button>
             </div>
           </div>
@@ -4884,6 +4883,13 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
   const planRemain = Math.max(0, planTotal - planPaid);
   const thisMonthKey = payToday.slice(0,7);
   const dueThisMonth = payByMonth.find(m=>m.mk===thisMonthKey)?.remain || 0;
+  // เดือนถัดไป — สำหรับแจ้งเตือนให้บัญชีเตรียมเงินล่วงหน้า
+  const nextMonthKey = (() => { const [y,m]=thisMonthKey.split("-").map(Number); const ny=m===12?y+1:y, nm=m===12?1:m+1; return `${ny}-${String(nm).padStart(2,"0")}`; })();
+  const nextBucket   = payByMonth.find(m=>m.mk===nextMonthKey);
+  const dueNextMonth = nextBucket?.remain || 0;
+  const nextCash     = nextBucket?.cash || 0;
+  const nextCredit   = nextBucket?.credit || 0;
+  const nextCount    = nextBucket?.lines.length || 0;
 
   const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+poTotal(p),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
@@ -4949,6 +4955,26 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
             </span>
           ))}
         </div>
+
+        {/* 🔔 แจ้งเตือนยอดต้องจ่ายเดือนหน้า — เห็นทุกแท็บ กดแล้วไปหน้าแผนจ่าย */}
+        {dueNextMonth>0 && (
+          <div onClick={()=>setView("plan")} title="ดูรายละเอียดในหน้าแผนจ่าย"
+            style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
+              background:"linear-gradient(90deg,#fffbeb,#fff)",border:`1px solid ${T.amber}`,borderLeft:`5px solid ${T.amber}`,
+              borderRadius:12,padding:"12px 16px",marginBottom:20}}>
+            <span style={{fontSize:22,lineHeight:1}}>🔔</span>
+            <div style={{minWidth:180}}>
+              <div style={{fontSize:12,color:T.textSecondary,fontWeight:600}}>เตรียมเงินจ่ายเดือนหน้า · {monthShortLabel(nextMonthKey)}</div>
+              <div style={{fontSize:20,fontWeight:800,color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueNextMonth)}</div>
+            </div>
+            <div style={{display:"flex",gap:18,flexWrap:"wrap",flex:1}}>
+              <div><div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เงินสด</div><div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green}}>{nextCash>0?fmt(nextCash):"—"}</div></div>
+              <div><div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เครดิต</div><div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.blue}}>{nextCredit>0?fmt(nextCredit):"—"}</div></div>
+              <div><div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>จำนวน</div><div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.textPrimary}}>{nextCount} งวด</div></div>
+            </div>
+            <span style={{fontSize:12,color:T.amber,fontWeight:700,whiteSpace:"nowrap"}}>ดูแผนจ่าย →</span>
+          </div>
+        )}
 
         {view==="dashboard" ? (
           <>
@@ -5201,6 +5227,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <StatCard label="จ่ายแล้ว" value={"฿"+fmt0(planPaid)} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
               <StatCard label="คงเหลือต้องจ่าย" value={"฿"+fmt0(planRemain)} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
               <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
+              <StatCard label={`ครบกำหนดเดือนหน้า (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} sub={dueNextMonth>0?`${nextCount} งวด · เตรียมล่วงหน้า`:"ยังไม่มีที่ครบกำหนด"} color={T.amber} icon="🔔" accent={T.amberBg}/>
             </div>
 
             {payByMonth.length===0 ? (
