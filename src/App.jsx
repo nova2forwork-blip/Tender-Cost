@@ -757,6 +757,7 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
     ws["!rows"][rT] = {hpx:20};
   }
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  return { ws, nextRow: nRows };   // คืน worksheet + แถวว่างถัดไป เผื่ออยากต่อตารางใต้ dashboard
 }
 
 // ── กราฟจริง (pie + bar) ในไฟล์ Excel: โหลด ExcelJS จาก CDN ตอนใช้งาน แล้ววาด
@@ -1101,7 +1102,7 @@ function exportProcurementExcel(project, poEntries) {
   const dPaid = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
   const dTotal = poEntries.reduce((s,p)=> s + poTotal(p), 0);
   const dMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
-  addDashboardSheet(wb, "สรุป", {
+  const dash = addDashboardSheet(wb, "สรุป", {
     title: `สรุปจัดซื้อ (PO) — ${project.name}`,
     subtitle: `Export: ${new Date().toLocaleDateString("th-TH")}`,
     theme,
@@ -1115,7 +1116,7 @@ function exportProcurementExcel(project, poEntries) {
     items: dMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) })),
   });
 
-  // Sheet 1 — every PO line, with open/delivery/payment dates side by side
+  // Sheet 1 — every PO line → วางต่อท้ายหน้า "สรุป" (ชีตเดียวกัน)
   const rows1 = [[`รายการ PO — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}  ·  ทั้งหมด ${poEntries.length} PO${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}`], []];
   rows1.push(["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)",...(U?["มูลค่า (USD)"]:[]),"สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"]);
   const dataStart1 = rows1.length;
@@ -1135,11 +1136,15 @@ function exportProcurementExcel(project, poEntries) {
   const dataEnd1 = rows1.length-1;
   rows1.push(["","","","","TOTAL", grand1, ...(U?[toUsd(grand1,rate)]:[]),"","","","",""]);
   const totalRow1 = rows1.length-1;
-  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
-  ws1["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
-  styleSheet(ws1, { numCols:11+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+  // เขียนตาราง PO ต่อท้าย dashboard ในชีต "สรุป" (เว้น 1 บรรทัด) แล้วจัดสไตล์ตามออฟเซ็ตแถว
+  const poStart = dash.nextRow + 1;
+  XLSX.utils.sheet_add_aoa(dash.ws, rows1, { origin: { r: poStart, c: 0 } });
+  styleSheet(dash.ws, { numCols:11+(U?1:0),
+    titleRow: poStart, subRows:[poStart+1], headerRow: poStart+3,
+    dataStart: poStart+dataStart1, dataEnd: poStart+dataEnd1, totalRow: poStart+totalRow1,
     moneyCols:U?[5,6]:[5], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
-  XLSX.utils.book_append_sheet(wb, ws1, "PO Entries");
+  delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
+  dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
 
   // Sheet 2 — status pipeline at a glance
   const rows2 = [[`สรุปสถานะ PO — ${project.name}`], [], ["สถานะ","จำนวน PO","มูลค่ารวม (THB)",...(U?["มูลค่ารวม (USD)"]:[])]];
