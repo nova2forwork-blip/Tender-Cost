@@ -4157,7 +4157,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
   const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
 
   const submit = () => {
-    if (!form.supplier.name.trim()) { alert("กรุณากรอกชื่อ Supplier"); return; }
+    // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
     const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
       id: it.id || uid(), code: it.code, store: it.store || "", amount: it.amount,
       rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
@@ -4319,10 +4319,10 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 
               {/* Supplier — exactly one vendor per PO. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier * (หนึ่งเจ้าต่อ PO)</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier (ไม่บังคับ · หนึ่งเจ้าต่อ PO)</span>
               </div>
               <div style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                <input placeholder="ชื่อ Supplier *" value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
+                <input placeholder="ชื่อ Supplier (ถ้ามี)" value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
                 <input placeholder="เลข PO" value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"/>
               </div>
 
@@ -4774,6 +4774,9 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
   const [view, setView] = useState("dashboard");
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
+  // ค้นหา + ตัวกรอง "เฉพาะที่มี PO" บนแท็บ Cash Flow
+  const [dateSearch, setDateSearch] = useState("");
+  const [onlyWithPO, setOnlyWithPO] = useState(false);
   // Which Acc. Code groups are collapsed on the "วันที่ (Cash Flow)" tab.
   const [dateCollapsed, setDateCollapsed] = useState(() => new Set());
   const toggleDateGroup = (code) => setDateCollapsed(prev => {
@@ -4846,6 +4849,20 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
     const toReserve = Math.max(a.committed - paid, 0);
     return { ...a, rows, variance, variancePct, paid, toReserve };
   }).sort((x, y) => x.code.localeCompare(y.code));
+  // ตัวกรองแท็บ Cash Flow: ค้นหา (วันที่/Acc.Code/ชื่อรายการ/เลข PO) + เฉพาะที่มี PO
+  const dq = dateSearch.trim().toLowerCase();
+  const shownDateGroups = dateGroups.filter(a => {
+    if (onlyWithPO && a.rows.length === 0) return false;
+    if (!dq) return true;
+    if (a.code.toLowerCase().includes(dq) || (a.name||"").toLowerCase().includes(dq)) return true;
+    return a.rows.some(({po}) =>
+      (poNumbersLabel(po)||"").toLowerCase().includes(dq) ||
+      (po.date||"").includes(dq) ||
+      (poNextDueDate(po)||"").includes(dq) ||
+      poRounds(po).some(r => (r.actualDate||"").includes(dq) || (r.planDate||"").includes(dq))
+    );
+  });
+  const withPOCount = dateGroups.filter(a => a.rows.length > 0).length;
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => -d);
     else { setSortKey(key); setSortDir(1); }
@@ -4942,7 +4959,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
-          {[["dashboard","📊 ภาพรวม","ภาพรวมงบ vs ที่ผูกพันแล้ว (PO)"],["dates","📅 วันที่ (Cash Flow)","PO แต่ละหมวด + วันของเข้า/วันครบกำหนดจ่าย"],["plan","💰 แผนจ่าย","เงินที่ต้องเตรียมจ่าย แยกรายเดือน"]].map(([v,l,tip])=>(
+          {[["dashboard","📊 ภาพรวมงบ","ภาพรวม: งบประมาณ vs ที่ผูกพันแล้ว (PO) ทั้งโครงการ"],["dates","📅 ราย Acc. Code","รายหมวด: PO + วันของเข้า/วันครบกำหนดจ่าย + ยอดที่ต้องเก็บไว้จ่าย"],["plan","💰 แผนจ่ายรายเดือน","รายเดือน: เงินที่ต้องเตรียมจ่ายแยกตามเดือนครบกำหนด"]].map(([v,l,tip])=>(
             <button key={v} onClick={()=>setView(v)} title={tip}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
@@ -4961,21 +4978,24 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
         </div>
 
         {/* 🔔 แจ้งเตือนยอดต้องจ่ายเดือนหน้า — เห็นทุกแท็บ กดแล้วไปหน้าแผนจ่าย */}
-        {dueNextMonth>0 && (
+        {(dueThisMonth>0 || dueNextMonth>0) && (
           <div onClick={()=>setView("plan")} title="ดูรายละเอียดในหน้าแผนจ่าย"
-            style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
+            style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
               background:"linear-gradient(90deg,#fffbeb,#fff)",border:`1px solid ${T.amber}`,borderLeft:`5px solid ${T.amber}`,
               borderRadius:12,padding:"12px 16px",marginBottom:20}}>
             <span style={{fontSize:22,lineHeight:1}}>🔔</span>
-            <div style={{minWidth:180}}>
-              <div style={{fontSize:12,color:T.textSecondary,fontWeight:600}}>เตรียมเงินจ่ายเดือนหน้า · {monthShortLabel(nextMonthKey)}</div>
-              <div style={{fontSize:20,fontWeight:800,color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueNextMonth)}</div>
+            <span style={{fontSize:13,color:T.textSecondary,fontWeight:700}}>เตรียมเงินจ่าย</span>
+            {/* เดือนนี้ */}
+            <div style={{background:T.redBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
+              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>ครบกำหนดเดือนนี้ · {monthShortLabel(thisMonthKey)}</div>
+              <div style={{fontSize:18,fontWeight:800,color:T.red,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueThisMonth)}</div>
             </div>
-            <div style={{display:"flex",gap:18,flexWrap:"wrap",flex:1}}>
-              <div><div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เงินสด</div><div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green}}>{nextCash>0?fmt(nextCash):"—"}</div></div>
-              <div><div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เครดิต</div><div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.blue}}>{nextCredit>0?fmt(nextCredit):"—"}</div></div>
-              <div><div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>จำนวน</div><div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.textPrimary}}>{nextCount} งวด</div></div>
+            {/* เดือนหน้า */}
+            <div style={{background:T.amberBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
+              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เตรียมเดือนหน้า · {monthShortLabel(nextMonthKey)}</div>
+              <div style={{fontSize:18,fontWeight:800,color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueNextMonth)}</div>
             </div>
+            <div style={{flex:1}}/>
             <span style={{fontSize:12,color:T.amber,fontWeight:700,whiteSpace:"nowrap"}}>ดูแผนจ่าย →</span>
           </div>
         )}
@@ -4989,22 +5009,15 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
 
-            {/* แถบเตือน "สิ่งที่ต้องสนใจ" */}
+            {/* แถบเตือน "เกินงบ" (เรื่องเงินจ่ายย้ายไปรวมที่แถบ 🔔 ด้านบนแล้ว) */}
             {(() => {
               const overCount = accountData.filter(a=>a.over).length;
-              if (!overCount && dueThisMonth<=0) return null;
+              if (!overCount) return null;
               return (
                 <div style={{display:"flex",flexWrap:"wrap",gap:12,marginBottom:20}}>
-                  {overCount>0 && (
-                    <button onClick={()=>handleSort("variance")} title="เรียงตารางตามส่วนต่าง" style={{display:"flex",alignItems:"center",gap:8,background:T.redBg,color:T.red,border:`1px solid ${T.red}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                      ⚠ {overCount} หมวดเกินงบ <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· กดเพื่อเรียงดู</span>
-                    </button>
-                  )}
-                  {dueThisMonth>0 && (
-                    <button onClick={()=>setView("plan")} title="ไปหน้าแผนจ่าย" style={{display:"flex",alignItems:"center",gap:8,background:T.amberBg,color:T.amber,border:`1px solid ${T.amber}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                      💰 ครบกำหนดจ่ายเดือนนี้ ฿{fmt0(dueThisMonth)} <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· ดูแผนจ่าย</span>
-                    </button>
-                  )}
+                  <button onClick={()=>handleSort("variance")} title="เรียงตารางตามส่วนต่าง" style={{display:"flex",alignItems:"center",gap:8,background:T.redBg,color:T.red,border:`1px solid ${T.red}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                    ⚠ {overCount} หมวดเกินงบ <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· กดเพื่อเรียงดู</span>
+                  </button>
                 </div>
               );
             })()}
@@ -5128,14 +5141,31 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                 sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} PO รอจ่าย`} color={T.red} icon="⏳" accent={T.redBg}/>
             </div>
 
+            {/* ค้นหา + ตัวกรอง */}
+            <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
+              <input value={dateSearch} onChange={e=>setDateSearch(e.target.value)}
+                placeholder="🔍 ค้นหา: วันที่ / Acc. Code / ชื่อรายการ / เลข PO"
+                style={{flex:1,minWidth:240,maxWidth:420,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
+              <button onClick={()=>setOnlyWithPO(v=>!v)} title="แสดงเฉพาะ Acc. Code ที่มี PO"
+                style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",
+                  border:`1.5px solid ${onlyWithPO?T.green:T.cardBorder}`,background:onlyWithPO?T.green:"transparent",color:onlyWithPO?"#fff":T.textSecondary}}>
+                <span style={{fontSize:14}}>{onlyWithPO?"☑":"☐"}</span> เฉพาะที่มี PO ({withPOCount})
+              </button>
+              <span style={{fontSize:12,color:T.textMuted}}>แสดง {shownDateGroups.length} / {dateGroups.length} หมวด</span>
+            </div>
+
             {dateGroups.length===0 ? (
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
                 <div style={{fontSize:32,marginBottom:12}}>📅</div>
                 <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>ยังไม่มีงบหรือ PO ให้แสดง</div>
               </div>
+            ) : shownDateGroups.length===0 ? (
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>
+                ไม่พบหมวดที่ตรงกับเงื่อนไข {dateSearch.trim() && <>"{dateSearch}"</>} {onlyWithPO && "· (กรองเฉพาะที่มี PO)"}
+              </div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                {dateGroups.map(a => {
+                {shownDateGroups.map(a => {
                   const isCollapsed = dateCollapsed.has(a.code);
                   // แถบ = ความคืบหน้าการจ่ายของ PO ที่ผูกพันแล้ว (จ่ายแล้ว vs ต้องเก็บไว้จ่าย)
                   const paidPct   = a.committed>0 ? (a.paid/a.committed*100) : 0;
