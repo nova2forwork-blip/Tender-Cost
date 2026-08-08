@@ -604,6 +604,12 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
 }
 
 // จัดความกว้างคอลัมน์ให้พอดีข้อความ สำหรับตาราง ExcelJS (จากหัว + แถวข้อมูล)
+// ── ตัวช่วย USD สำหรับ Export ── ให้ไฟล์ Excel มีข้อมูลสอดคล้องกับหน้าจอ (บาท + ดอลลาร์)
+// exportRate: อัตราแลกเปลี่ยนของโปรเจกต์ (0 = ปิด USD → export เป็นบาทล้วนตามเดิม)
+function exportRate(project){ return (project?.showUsd !== false) ? (parseFloat(project?.usdRate)||0) : 0; }
+// toUsd: แปลงยอดบาท→USD (คืน "" ถ้าไม่ได้เปิด USD หรือค่าไม่ใช่ตัวเลข)
+function toUsd(thb, rate){ return (rate>0 && typeof thb==="number" && isFinite(thb)) ? Math.round((thb/rate)*100)/100 : ""; }
+
 function fitExcelCols(ws, header, dataRows, { min=8, max=55 } = {}) {
   header.forEach((h, c) => {
     let m = String(h == null ? "" : h).length;
@@ -875,6 +881,7 @@ async function exportQSRich(project, tenderCosts, additions, extraItems=[], hidd
 function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"2563EB", dark:"1D4ED8" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
   const combinedBudget = buildCombinedBudget(tenderCosts, additions);
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   // รายการบัญชีที่มีค่า (ใช้ร่วมกันทั้ง 2 ชีต เพื่อให้ตำแหน่งแถวตรงกัน → ลิงก์สูตรได้)
@@ -920,18 +927,18 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
 
   // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
   const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม (Baseline)","เพิ่มรายเดือน (รวม)","งบรวมทั้งหมด"]);
+  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม (Baseline)","เพิ่มรายเดือน (รวม)","งบรวมทั้งหมด",...(U?["งบรวม (USD)"]:[])]);
   const dataStart1 = rows1.length;
   const rowGroups1 = [];
   dashList.forEach(a => {
     const baseline = parseFloat(tenderCosts[a.code]) || 0;
     const total    = parseFloat(combinedBudget[a.code]) || 0;
     const added = total - baseline;
-    rows1.push([a.code, a.name, a.group, baseline, added, total]);
+    rows1.push([a.code, a.name, a.group, baseline, added, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups1.push(a.group);
   });
   const dataEnd1 = rows1.length-1;
-  rows1.push(["","TOTAL","",0,0,0]);
+  rows1.push(["","TOTAL","",0,0,0, ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
   // ลิงก์ด้วยสูตร: งบรวม = ราคาเดิม + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
@@ -943,29 +950,29 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     const ref = XLSX.utils.encode_cell({ r:totalRow1, c:3+i });
     if (ws1[ref]) ws1[ref].f = `SUM(${L}${dataStart1+1}:${L}${dataEnd1+1})`;
   });
-  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18}];
-  styleSheet(ws1, { numCols:6, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:[3,4,5], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18},...(U?[{wch:18}]:[])];
+  styleSheet(ws1, { numCols:6+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:U?[3,4,5,6]:[3,4,5], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
   XLSX.utils.book_append_sheet(wb, ws1, "งบประมาณ");
 
   // Sheet 2 — one column per month, so QS can see exactly how the budget grew
   const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
   const rows2 = [[`รายการเพิ่มรายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows2.push(["Acc. Code","Account Name","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"]);
+  rows2.push(["Acc. Code","Account Name","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด", ...(U?["รวม (USD)"]:[])]);
   const dataStart2 = rows2.length;
   const rowGroups2 = [];
   dashList.forEach(a => {
     const baseline  = parseFloat(tenderCosts[a.code]) || 0;
     const monthVals = months.map(m => monthAddValue(additions, m, a.code));
     const total = baseline + monthVals.reduce((s,v)=>s+v,0);
-    rows2.push([a.code, a.name, baseline, ...monthVals, total]);
+    rows2.push([a.code, a.name, baseline, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups2.push(a.group);
   });
   const dataEnd2 = rows2.length-1;
   const M = months.length, totColC = 3 + M;
-  rows2.push(["","TOTAL",0, ...months.map(()=>0), 0]);
+  rows2.push(["","TOTAL",0, ...months.map(()=>0), 0, ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
   const totalRow2 = rows2.length-1;
-  const numCols2 = 4 + months.length;
+  const numCols2 = 4 + months.length + (U?1:0);
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
   // ลิงก์ด้วยสูตร: รวมทั้งหมด(ต่อแถว) = ราคาเดิม + ผลรวมทุกเดือน · TOTAL = ผลรวมคอลัมน์
   const lastMonthL = XLSX.utils.encode_col(2 + M);
@@ -977,9 +984,9 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     const L = XLSX.utils.encode_col(c), ref = XLSX.utils.encode_cell({ r:totalRow2, c });
     if (ws2[ref]) ws2[ref].f = `SUM(${L}${dataStart2+1}:${L}${dataEnd2+1})`;
   });
-  ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}];
+  ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
-    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length], theme, rowGroups:rowGroups2 });
+    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], theme, rowGroups:rowGroups2 });
   XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
 
   // Sheet 3+ — แยกรายเดือน โดย breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น ๆ
@@ -995,7 +1002,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
       [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
                : `Export: ${new Date().toLocaleDateString("th-TH")}`],
       [],
-      ["Acc. Code", "Account Name", "Group", ...valLabels, "รวมเดือนนี้"],
+      ["Acc. Code", "Account Name", "Group", ...valLabels, "รวมเดือนนี้", ...(U?["รวม (USD)"]:[])],
     ];
     const dataStart = rows.length;
     const colTotals = valLabels.map(() => 0);
@@ -1007,21 +1014,21 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
         : [parseFloat((additions[m] || {})[a.code]) || 0];
       const rowTotal = vals.reduce((s, v) => s + v, 0);
       if (rowTotal <= 0) return; // เอาเฉพาะรายการที่มียอดในเดือนนี้
-      rows.push([a.code, a.name, a.group, ...vals, rowTotal]);
+      rows.push([a.code, a.name, a.group, ...vals, rowTotal, ...(U?[toUsd(rowTotal,rate)]:[])]);
       rowGroups.push(a.group);
       vals.forEach((v, i) => { colTotals[i] += v; });
       grand += rowTotal;
     });
     if (rows.length === dataStart) return; // เดือนนี้ไม่มีข้อมูล ข้ามชีต
     const dataEnd = rows.length - 1;
-    rows.push(["", "TOTAL", "", ...colTotals, grand]);
+    rows.push(["", "TOTAL", "", ...colTotals, grand, ...(U?[toUsd(grand,rate)]:[])]);
     const totalRow = rows.length - 1;
-    const numCols = 4 + valLabels.length;
+    const numCols = 4 + valLabels.length + (U?1:0);
     const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws["!cols"] = [{ wch: 12 }, { wch: 34 }, { wch: 14 }, ...valLabels.map(() => ({ wch: 15 })), { wch: 16 }];
+    ws["!cols"] = [{ wch: 12 }, { wch: 34 }, { wch: 14 }, ...valLabels.map(() => ({ wch: 15 })), { wch: 16 }, ...(U?[{ wch: 16 }]:[])];
     styleSheet(ws, {
       numCols, subRows: [1], headerRow: 3, dataStart, dataEnd, totalRow,
-      moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length],
+      moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length, ...(U?[4 + valLabels.length]:[])],
       theme, rowGroups, groupDisplayCol: 2,
     });
     let nm = sheetName(monthShortLabel(m));
@@ -1036,6 +1043,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
 function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"2563EB", dark:"1D4ED8" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
   const allMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
@@ -1049,7 +1057,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
              : `Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
-    ["Acc. Code", "Account Name", "Group", "ราคาเดิม", ...valLabels, "รวมเดือนนี้", "รวมสะสมถึงเดือนนี้"],
+    ["Acc. Code", "Account Name", "Group", "ราคาเดิม", ...valLabels, "รวมเดือนนี้", "รวมสะสมถึงเดือนนี้", ...(U?["รวมสะสม (USD)"]:[])],
   ];
   const dataStart = rows.length;
   const colTotals = valLabels.map(() => 0);
@@ -1063,20 +1071,20 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     const monthTot = vals.reduce((s, v) => s + v, 0);
     const cum = baseline + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
     if (monthTot <= 0 && baseline <= 0 && cum <= 0) return;
-    rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum]);
+    rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
     rowGroups.push(a.group);
     vals.forEach((v, i) => { colTotals[i] += v; });
     gBase += baseline; gMonth += monthTot; gCum += cum;
   });
   const dataEnd = rows.length - 1;
-  rows.push(["", "TOTAL", "", gBase, ...colTotals, gMonth, gCum]);
+  rows.push(["", "TOTAL", "", gBase, ...colTotals, gMonth, gCum, ...(U?[toUsd(gCum,rate)]:[])]);
   const totalRow = rows.length - 1;
-  const numCols = 6 + valLabels.length;
+  const numCols = 6 + valLabels.length + (U?1:0);
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }];
+  ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }, ...(U?[{ wch:18 }]:[])];
   styleSheet(ws, {
     numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
-    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length],
+    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length, ...(U?[6 + valLabels.length]:[])],
     theme, rowGroups, groupDisplayCol: 2,
   });
   XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
@@ -1087,6 +1095,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
 function exportProcurementExcel(project, poEntries) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"F59E0B", dark:"B45309" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
 
   // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดสั่งซื้อรายเดือน
   const dPaid = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
@@ -1107,8 +1116,8 @@ function exportProcurementExcel(project, poEntries) {
   });
 
   // Sheet 1 — every PO line, with open/delivery/payment dates side by side
-  const rows1 = [[`รายการ PO — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}  ·  ทั้งหมด ${poEntries.length} PO`], []];
-  rows1.push(["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"]);
+  const rows1 = [[`รายการ PO — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}  ·  ทั้งหมด ${poEntries.length} PO${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}`], []];
+  rows1.push(["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)",...(U?["มูลค่า (USD)"]:[]),"สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"]);
   const dataStart1 = rows1.length;
   let grand1 = 0;
   const rowGroups1 = [];
@@ -1118,34 +1127,36 @@ function exportProcurementExcel(project, poEntries) {
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
       const amount = parseFloat(it.amount) || 0;
-      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, p.status, deliveryStr, poNextDueDate(p)||"-", PAYMENT_LABEL[pay], p.notes||""]);
+      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(p)||"-", PAYMENT_LABEL[pay], p.notes||""]);
       rowGroups1.push(acc?.group || "-");
       grand1 += amount;
     });
   });
   const dataEnd1 = rows1.length-1;
-  rows1.push(["","","","","TOTAL", grand1,"","","","",""]);
+  rows1.push(["","","","","TOTAL", grand1, ...(U?[toUsd(grand1,rate)]:[]),"","","","",""]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
-  ws1["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
-  styleSheet(ws1, { numCols:11, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:[5], centerCols:[6,9], statusCols:[6,9], theme, rowGroups:rowGroups1 });
+  ws1["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
+  styleSheet(ws1, { numCols:11+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:U?[5,6]:[5], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
   XLSX.utils.book_append_sheet(wb, ws1, "PO Entries");
 
   // Sheet 2 — status pipeline at a glance
-  const rows2 = [[`สรุปสถานะ PO — ${project.name}`], [], ["สถานะ","จำนวน PO","มูลค่ารวม (THB)"]];
+  const rows2 = [[`สรุปสถานะ PO — ${project.name}`], [], ["สถานะ","จำนวน PO","มูลค่ารวม (THB)",...(U?["มูลค่ารวม (USD)"]:[])]];
   const dataStart2 = 3;
   PO_STATUS.forEach(s => {
     const list = poEntries.filter(p => p.status === s);
     if (!list.length) return;
-    rows2.push([s, list.length, list.reduce((sum,p)=>sum+poTotal(p),0)]);
+    const t = list.reduce((sum,p)=>sum+poTotal(p),0);
+    rows2.push([s, list.length, t, ...(U?[toUsd(t,rate)]:[])]);
   });
   const dataEnd2 = rows2.length-1;
-  rows2.push(["TOTAL", poEntries.length, poEntries.reduce((s,p)=>s+poTotal(p),0)]);
+  const grand2 = poEntries.reduce((s,p)=>s+poTotal(p),0);
+  rows2.push(["TOTAL", poEntries.length, grand2, ...(U?[toUsd(grand2,rate)]:[])]);
   const totalRow2 = rows2.length-1;
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
-  ws2["!cols"] = [{wch:16},{wch:14},{wch:18}];
-  styleSheet(ws2, { numCols:3, headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:[2], centerCols:[1], statusCols:[0], theme });
+  ws2["!cols"] = [{wch:16},{wch:14},{wch:18},...(U?[{wch:18}]:[])];
+  styleSheet(ws2, { numCols:3+(U?1:0), headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:U?[2,3]:[2], centerCols:[1], statusCols:[0], theme });
   XLSX.utils.book_append_sheet(wb, ws2, "สรุปสถานะ");
 
   // Sheet 3 — spend per month, broken down by material group, so trends
@@ -1153,7 +1164,7 @@ function exportProcurementExcel(project, poEntries) {
   const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
   if (poMonths.length) {
     const rows3 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-    rows3.push(["Group", ...poMonths.map(monthShortLabel), "รวมทั้งหมด"]);
+    rows3.push(["Group", ...poMonths.map(monthShortLabel), "รวมทั้งหมด", ...(U?["รวม (USD)"]:[])]);
     const dataStart3 = rows3.length;
     const monthTotals3 = poMonths.map(()=>0);
     let grand3 = 0;
@@ -1166,19 +1177,19 @@ function exportProcurementExcel(project, poEntries) {
       );
       const total = monthVals.reduce((s,v)=>s+v,0);
       if (total<=0) return;
-      rows3.push([g, ...monthVals, total]);
+      rows3.push([g, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
       rowGroups3.push(g);
       monthVals.forEach((v,i)=>monthTotals3[i]+=v);
       grand3 += total;
     });
     const dataEnd3 = rows3.length-1;
-    rows3.push(["TOTAL", ...monthTotals3, grand3]);
+    rows3.push(["TOTAL", ...monthTotals3, grand3, ...(U?[toUsd(grand3,rate)]:[])]);
     const totalRow3 = rows3.length-1;
-    const numCols3 = 2 + poMonths.length;
+    const numCols3 = 2 + poMonths.length + (U?1:0);
     const ws3 = XLSX.utils.aoa_to_sheet(rows3);
-    ws3["!cols"] = [{wch:18}, ...poMonths.map(()=>({wch:12})), {wch:16}];
+    ws3["!cols"] = [{wch:18}, ...poMonths.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
     styleSheet(ws3, { numCols:numCols3, subRows:[1], headerRow:3, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3,
-      moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
+      moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length, ...(U?[2+poMonths.length]:[])], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
     XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน (สรุปกลุ่ม)");
 
     // Sheet 4+ — รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
@@ -1189,7 +1200,7 @@ function exportProcurementExcel(project, poEntries) {
         [`PO รายเดือน ${monthShortLabel(m)} — ${project.name}`],
         [`ตามวันเปิด PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
         [],
-        ["Acc. Code", "Account Name", "Group", "Supplier", "PO No.", "วันเปิด PO", "มูลค่า (THB)", "สถานะ PO", "สถานะจ่ายเงิน"],
+        ["Acc. Code", "Account Name", "Group", "Supplier", "PO No.", "วันเปิด PO", "มูลค่า (THB)", ...(U?["มูลค่า (USD)"]:[]), "สถานะ PO", "สถานะจ่ายเงิน"],
       ];
       const dataStart = rows.length;
       const rowGroups = [];
@@ -1201,19 +1212,19 @@ function exportProcurementExcel(project, poEntries) {
           poItems(p).forEach(it => {
             const acc = ACCOUNTS.find(a=>a.code===it.code);
             const amount = parseFloat(it.amount) || 0;
-            rows.push([it.code, acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, p.status, PAYMENT_LABEL[pay]]);
+            rows.push([it.code, acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, ...(U?[toUsd(amount,rate)]:[]), p.status, PAYMENT_LABEL[pay]]);
             rowGroups.push(acc?.group||"-");
             grand += amount;
           });
         });
       if (rows.length === dataStart) return; // เดือนนี้ไม่มี PO
       const dataEnd = rows.length-1;
-      rows.push(["", "", "", "", "", "TOTAL", grand, "", ""]);
+      rows.push(["", "", "", "", "", "TOTAL", grand, ...(U?[toUsd(grand,rate)]:[]), "", ""]);
       const totalRow = rows.length-1;
       const ws = XLSX.utils.aoa_to_sheet(rows);
-      ws["!cols"] = [{wch:10},{wch:32},{wch:14},{wch:22},{wch:16},{wch:12},{wch:16},{wch:12},{wch:16}];
-      styleSheet(ws, { numCols:9, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
-        moneyCols:[6], centerCols:[7,8], statusCols:[7,8], theme, rowGroups, groupDisplayCol:2 });
+      ws["!cols"] = [{wch:10},{wch:32},{wch:14},{wch:22},{wch:16},{wch:12},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:16}];
+      styleSheet(ws, { numCols:9+(U?1:0), subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
+        moneyCols:U?[6,7]:[6], centerCols:U?[8,9]:[7,8], statusCols:U?[8,9]:[7,8], theme, rowGroups, groupDisplayCol:2 });
       let nm = clean(monthShortLabel(m));
       if (usedNames[nm]) { usedNames[nm] += 1; nm = clean(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
       XLSX.utils.book_append_sheet(wb, ws, nm);
@@ -1334,12 +1345,13 @@ async function exportPORich(project, poEntries) {
 function exportAccountingExcel(project, tenderCosts, additions, poEntries, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"10B981", dark:"047857" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
   const combinedBudget = buildCombinedBudget(tenderCosts, additions);
   const accounts = exportAccountList(extraItems, hiddenAccounts);
 
   // Sheet 1 — Budget vs Committed vs Variance per Acc. Code
   const rows1 = [[`สรุปงบประมาณ — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows1.push(["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Committed (PO)","ส่วนต่าง","% ใช้ไป","สถานะ"]);
+  rows1.push(["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Committed (PO)","ส่วนต่าง","% ใช้ไป","สถานะ",...(U?["Budget (USD)","Committed (USD)"]:[])]);
   const dataStart1 = rows1.length;
   let gB=0, gC=0;
   const rowGroups1 = [];
@@ -1350,17 +1362,17 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const variance = budget - committed;
     const pctUsed  = budget>0 ? committed/budget : (committed>0 ? 9.99 : 0);
     const status   = committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
-    rows1.push([a.code, a.name, a.group, budget, committed, variance, pctUsed, status]);
+    rows1.push([a.code, a.name, a.group, budget, committed, variance, pctUsed, status, ...(U?[toUsd(budget,rate),toUsd(committed,rate)]:[])]);
     rowGroups1.push(a.group);
     gB += budget; gC += committed;
   });
   const dataEnd1 = rows1.length-1;
-  rows1.push(["","TOTAL","",gB,gC,gB-gC,gB>0?gC/gB:0,""]);
+  rows1.push(["","TOTAL","",gB,gC,gB-gC,gB>0?gC/gB:0,"",...(U?[toUsd(gB,rate),toUsd(gC,rate)]:[])]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
-  ws1["!cols"] = [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12}];
-  styleSheet(ws1, { numCols:8, subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:[3,4,5], pctCols:[6], centerCols:[7], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+  ws1["!cols"] = [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12},...(U?[{wch:16},{wch:16}]:[])];
+  styleSheet(ws1, { numCols:8+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:U?[3,4,5,8,9]:[3,4,5], pctCols:[6], centerCols:[7], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
   // Flag over-budget rows in red so they jump out without opening the app
   for (let r=dataStart1; r<=dataEnd1; r++) {
     const varRef = XLSX.utils.encode_cell({r,c:5});
@@ -1376,7 +1388,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
 
   // Sheet 2 — every PO line, full date + status detail
   const rows2 = [[`รายการ PO ทั้งหมด — ${project.name}`], [`ทั้งหมด ${poEntries.length} PO  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows2.push(["วันเปิด PO","Acc. Code","Account Name","Group","Supplier","PO No.","มูลค่า (THB)","สถานะ","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่าย"]);
+  rows2.push(["วันเปิด PO","Acc. Code","Account Name","Group","Supplier","PO No.","มูลค่า (THB)",...(U?["มูลค่า (USD)"]:[]),"สถานะ","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่าย"]);
   const dataStart2 = rows2.length;
   let grand2 = 0;
   const rowGroups2 = [];
@@ -1386,22 +1398,22 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
       const amount = parseFloat(it.amount) || 0;
-      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, p.status, deliveryStr, poNextDueDate(p)||"-", PAYMENT_LABEL[pay]]);
+      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(p)||"-", PAYMENT_LABEL[pay]]);
       rowGroups2.push(acc?.group || "-");
       grand2 += amount;
     });
   });
   const dataEnd2 = rows2.length-1;
-  rows2.push(["","","","","","TOTAL", grand2,"","","",""]);
+  rows2.push(["","","","","","TOTAL", grand2, ...(U?[toUsd(grand2,rate)]:[]),"","","",""]);
   const totalRow2 = rows2.length-1;
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
-  ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},{wch:12},{wch:26},{wch:16},{wch:16}];
-  styleSheet(ws2, { numCols:11, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
-    moneyCols:[6], centerCols:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
+  ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16}];
+  styleSheet(ws2, { numCols:11+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
+    moneyCols:U?[6,7]:[6], centerCols:U?[8,11]:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
   XLSX.utils.book_append_sheet(wb, ws2, "PO Entries");
 
   // Sheet 3 — roll-up by Group
-  const rows3 = [[`สรุปตามกลุ่ม — ${project.name}`], [], ["Group","Budget","Committed","ส่วนต่าง","% ใช้ไป"]];
+  const rows3 = [[`สรุปตามกลุ่ม — ${project.name}`], [], ["Group","Budget","Committed","ส่วนต่าง","% ใช้ไป",...(U?["Budget (USD)","Committed (USD)"]:[])]];
   const dataStart3 = 3;
   let g3B=0, g3C=0;
   GROUPS.forEach(g => {
@@ -1409,15 +1421,15 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const b  = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
     const c2 = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
     if (b<=0 && c2<=0) return;
-    rows3.push([g,b,c2,b-c2,b>0?c2/b:0]);
+    rows3.push([g,b,c2,b-c2,b>0?c2/b:0,...(U?[toUsd(b,rate),toUsd(c2,rate)]:[])]);
     g3B += b; g3C += c2;
   });
   const dataEnd3 = rows3.length-1;
-  rows3.push(["TOTAL",g3B,g3C,g3B-g3C,g3B>0?g3C/g3B:0]);
+  rows3.push(["TOTAL",g3B,g3C,g3B-g3C,g3B>0?g3C/g3B:0,...(U?[toUsd(g3B,rate),toUsd(g3C,rate)]:[])]);
   const totalRow3 = rows3.length-1;
   const ws3 = XLSX.utils.aoa_to_sheet(rows3);
-  ws3["!cols"] = [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10}];
-  styleSheet(ws3, { numCols:5, headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:[1,2,3], pctCols:[4], theme });
+  ws3["!cols"] = [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10},...(U?[{wch:16},{wch:16}]:[])];
+  styleSheet(ws3, { numCols:5+(U?2:0), headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:U?[1,2,3,5,6]:[1,2,3], pctCols:[4], theme });
   XLSX.utils.book_append_sheet(wb, ws3, "By Group");
 
   // Sheet 4 — monthly cash-flow: how much budget was added and how much got
@@ -1428,7 +1440,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   const allMonths = [...new Set([...additionMonths, ...poEntryMonths])].sort();
   if (allMonths.length) {
     const rows4 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-    rows4.push(["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม"]);
+    rows4.push(["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม",...(U?["งบสะสม (USD)","Committed สะสม (USD)"]:[])]);
     const dataStart4 = rows4.length;
     const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
     let cumB = baselineTotal, cumC = 0;
@@ -1437,12 +1449,12 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0);
       cumB += addedThisMonth;
       cumC += committedThisMonth;
-      rows4.push([monthShortLabel(m), addedThisMonth, cumB, committedThisMonth, cumC, cumB>0?cumC/cumB:0]);
+      rows4.push([monthShortLabel(m), addedThisMonth, cumB, committedThisMonth, cumC, cumB>0?cumC/cumB:0, ...(U?[toUsd(cumB,rate),toUsd(cumC,rate)]:[])]);
     });
     const dataEnd4 = rows4.length-1;
     const ws4 = XLSX.utils.aoa_to_sheet(rows4);
-    ws4["!cols"] = [{wch:14},{wch:18},{wch:16},{wch:18},{wch:16},{wch:12}];
-    styleSheet(ws4, { numCols:6, subRows:[1], headerRow:3, dataStart:dataStart4, dataEnd:dataEnd4, moneyCols:[1,2,3,4], pctCols:[5], theme });
+    ws4["!cols"] = [{wch:14},{wch:18},{wch:16},{wch:18},{wch:16},{wch:12},...(U?[{wch:16},{wch:18}]:[])];
+    styleSheet(ws4, { numCols:6+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart4, dataEnd:dataEnd4, moneyCols:U?[1,2,3,4,6,7]:[1,2,3,4], pctCols:[5], theme });
     XLSX.utils.book_append_sheet(wb, ws4, "รายเดือน");
   }
 
@@ -1455,11 +1467,15 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const monthKey = (l) => l.month || "9999-99";
     const payMonths = [...new Set(payLines.map(monthKey))].sort();
 
-    // Sheet 5 — สรุปแผนจ่ายรายเดือน (แยกเงินสด/เครดิต + ยอดคงเหลือต้องจ่าย)
-    const rowsP = [[`แผนจ่ายเงินรายเดือน — ${project.name}`],
-      [`ยอดที่ต้องเตรียมจ่ายแต่ละเดือน (ตามวันครบกำหนดจ่าย) · Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-    rowsP.push(["เดือนที่ต้องจ่าย","จำนวนงวด","เงินสด (THB)","เครดิต (THB)","รวมต้องจ่าย (THB)","จ่ายแล้ว (THB)","คงเหลือต้องจ่าย (THB)"]);
-    const dataStartP = rowsP.length;
+    // ── แผนจ่าย (ชีตเดียว) — ส่วนบน: สรุปรายเดือน · ส่วนล่าง: รายละเอียดแต่ละงวด ──
+    const rowsC = [
+      [`แผนจ่ายเงิน — ${project.name}`],
+      [`ตามวันครบกำหนดจ่าย · ${payLines.length} งวด${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`],
+      [],
+    ];
+    // ── ส่วนที่ 1: สรุปรายเดือน ──
+    rowsC.push(["เดือนที่ต้องจ่าย","จำนวนงวด","เงินสด (THB)","เครดิต (THB)","รวมต้องจ่าย (THB)","จ่ายแล้ว (THB)","คงเหลือต้องจ่าย (THB)",...(U?["รวมต้องจ่าย (USD)","คงเหลือ (USD)"]:[])]);
+    const sumHeader = rowsC.length-1, sumStart = rowsC.length;
     let tN=0,tCash=0,tCredit=0,tSum=0,tPaid=0,tRemain=0;
     payMonths.forEach(mk => {
       const lines  = payLines.filter(l=>monthKey(l)===mk);
@@ -1469,45 +1485,49 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รองรับจ่ายบางส่วน
       const remain = Math.max(0, sum - paidA);
       const label  = mk==="9999-99" ? "ยังไม่ระบุวันจ่าย" : monthShortLabel(mk);
-      rowsP.push([label, lines.length, cash, credit, sum, paidA, remain]);
+      rowsC.push([label, lines.length, cash, credit, sum, paidA, remain, ...(U?[toUsd(sum,rate),toUsd(remain,rate)]:[])]);
       tN+=lines.length; tCash+=cash; tCredit+=credit; tSum+=sum; tPaid+=paidA; tRemain+=remain;
     });
-    const dataEndP = rowsP.length-1;
-    rowsP.push(["TOTAL", tN, tCash, tCredit, tSum, tPaid, tRemain]);
-    const totalRowP = rowsP.length-1;
-    const wsP = XLSX.utils.aoa_to_sheet(rowsP);
-    wsP["!cols"] = [{wch:18},{wch:10},{wch:16},{wch:16},{wch:18},{wch:16},{wch:20}];
-    styleSheet(wsP, { numCols:7, subRows:[1], headerRow:3, dataStart:dataStartP, dataEnd:dataEndP, totalRow:totalRowP,
-      moneyCols:[2,3,4,5,6], centerCols:[1], theme });
-    XLSX.utils.book_append_sheet(wb, wsP, "แผนจ่ายรายเดือน");
+    const sumEnd = rowsC.length-1;
+    rowsC.push(["TOTAL", tN, tCash, tCredit, tSum, tPaid, tRemain, ...(U?[toUsd(tSum,rate),toUsd(tRemain,rate)]:[])]);
+    const sumTotal = rowsC.length-1;
 
-    // Sheet 6 — แผนจ่ายแบบละเอียด (แต่ละงวด) จัดกลุ่ม/เรียงตามเดือนที่ต้องจ่าย
-    const sorted = payLines.slice().sort((a,b)=>
+    // เว้นบรรทัดคั่นสองส่วน
+    rowsC.push([]); rowsC.push([]);
+
+    // ── ส่วนที่ 2: รายละเอียดแต่ละงวด (มีแถบหัวข้อของตัวเอง) ──
+    const detTitle = rowsC.length;
+    rowsC.push([`รายละเอียดแต่ละงวด — ${payLines.length} งวด (เรียงตามเดือนที่ต้องจ่าย)`]);
+    rowsC.push(["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","สถานะจ่าย",...(U?["ยอดต้องจ่าย (USD)"]:[])]);
+    const detHeader = rowsC.length-1, detStart = rowsC.length;
+    const sortedD = payLines.slice().sort((a,b)=>
       (monthKey(a).localeCompare(monthKey(b))) ||
       ((a.payDate||"9999").localeCompare(b.payDate||"9999")) ||
       a.supplier.localeCompare(b.supplier));
-    const rowsD = [[`แผนจ่าย (รายละเอียดแต่ละงวด) — ${project.name}`],
-      [`เรียงตามเดือนที่ต้องจ่าย · ${payLines.length} งวด · Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-    rowsD.push(["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","สถานะจ่าย"]);
-    const dataStartD = rowsD.length;
     const rowGroupsD = [];
     let grandD = 0;
-    sorted.forEach(l => {
+    sortedD.forEach(l => {
       const mk = monthKey(l);
       const label = mk==="9999-99" ? "ยังไม่ระบุ" : monthShortLabel(mk);
       const incomingTxt = l.incoming ? `${l.incoming}${l.incomingType?` (${l.incomingType})`:""}` : "-";
-      rowsD.push([label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status]]);
+      rowsC.push([label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status], ...(U?[toUsd(l.amount,rate)]:[])]);
       rowGroupsD.push(mk);
       grandD += l.amount;
     });
-    const dataEndD = rowsD.length-1;
-    rowsD.push(["","","","","","","","TOTAL", grandD, ""]);
-    const totalRowD = rowsD.length-1;
-    const wsD = XLSX.utils.aoa_to_sheet(rowsD);
-    wsD["!cols"] = [{wch:14},{wch:16},{wch:22},{wch:14},{wch:10},{wch:30},{wch:14},{wch:20},{wch:18},{wch:14}];
-    styleSheet(wsD, { numCols:10, subRows:[1], headerRow:3, dataStart:dataStartD, dataEnd:dataEndD, totalRow:totalRowD,
-      moneyCols:[8], statusCols:[9], theme, rowGroups:rowGroupsD, groupDisplayCol:0 });
-    XLSX.utils.book_append_sheet(wb, wsD, "แผนจ่าย (รายละเอียด)");
+    const detEnd = rowsC.length-1;
+    rowsC.push(["","","","","","","","TOTAL", grandD, "", ...(U?[toUsd(grandD,rate)]:[])]);
+    const detTotal = rowsC.length-1;
+
+    const wsC = XLSX.utils.aoa_to_sheet(rowsC);
+    // สไตล์ส่วนสรุปรายเดือน (หัวข้อหลัก + subtitle อยู่บนสุด)
+    styleSheet(wsC, { numCols:7+(U?2:0), titleRow:0, subRows:[1], headerRow:sumHeader, dataStart:sumStart, dataEnd:sumEnd, totalRow:sumTotal,
+      moneyCols:U?[2,3,4,5,6,7,8]:[2,3,4,5,6], centerCols:[1], theme });
+    // สไตล์ส่วนรายละเอียด (มีแถบหัวข้อของตัวเองที่ detTitle)
+    styleSheet(wsC, { numCols:10+(U?1:0), titleRow:detTitle, subRows:[], headerRow:detHeader, dataStart:detStart, dataEnd:detEnd, totalRow:detTotal,
+      moneyCols:U?[8,10]:[8], statusCols:[9], theme, rowGroups:rowGroupsD, groupDisplayCol:0 });
+    delete wsC["!freeze"];   // สองตารางในชีตเดียว ไม่ freeze
+    wsC["!cols"] = [{wch:18},{wch:16},{wch:22},{wch:16},{wch:14},{wch:30},{wch:16},{wch:20},{wch:18},{wch:16},...(U?[{wch:18}]:[])];
+    XLSX.utils.book_append_sheet(wb, wsC, "แผนจ่าย");
   }
 
   XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -1996,10 +2016,20 @@ export default function App() {
           onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
       )}
       {screen === "app" && effectiveRole === "qs"          && (
-        <QSView {...sharedProps} onExport={() => runExport(() => exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); return exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); }))} />
+        <QSView {...sharedProps} onExport={() => runExport(() =>
+          // เปิดใช้ USD → ใช้ไฟล์ที่มีคอลัมน์ USD (ตัวสำรอง) เพื่อให้ข้อมูลตรงกับหน้าจอ
+          effRate(activeProject) > 0
+            ? Promise.resolve(exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts))
+            : exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); return exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); })
+        )} />
       )}
       {screen === "app" && effectiveRole === "procurement" && (
-        <ProcurementView {...sharedProps} onExport={() => runExport(() => exportPORich(activeProject, poEntries).catch(err => { console.warn("Rich PO export failed, ใช้ตัวสำรอง:", err); return exportProcurementExcel(activeProject, poEntries); }))} />
+        <ProcurementView {...sharedProps} onExport={() => runExport(() =>
+          // เปิดใช้ USD → ใช้ไฟล์ที่มีคอลัมน์ USD (ตัวสำรอง) เพื่อให้ข้อมูลตรงกับหน้าจอ
+          effRate(activeProject) > 0
+            ? Promise.resolve(exportProcurementExcel(activeProject, poEntries))
+            : exportPORich(activeProject, poEntries).catch(err => { console.warn("Rich PO export failed, ใช้ตัวสำรอง:", err); return exportProcurementExcel(activeProject, poEntries); })
+        )} />
       )}
       {screen === "app" && effectiveRole === "accounting"  && (
         <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts))} />
