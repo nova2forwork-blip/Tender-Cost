@@ -1891,7 +1891,18 @@ export default function App() {
     else { setRole(session?.role); setScreen("app"); }
   };
   const deleteProject = async (id) => {
-    if (!confirm("ลบโครงการนี้? (กู้คืนได้จากหน้า Admin → กู้คืนข้อมูล)")) return;
+    const proj = projects.find(p => p.id === id);
+    const name = (proj?.name || "").trim();
+    // ยืนยันแบบ "พิมพ์ชื่อโครงการให้ตรง" — กันเผลอลบ เพราะลบแล้วข้อมูลย่อยหายด้วย
+    const typed = window.prompt(
+      `⚠️ ลบโครงการ "${name}" ?\n\n` +
+      `ข้อมูลทั้งหมดของโครงการนี้จะถูกลบด้วย:\n` +
+      `• Tender Cost (ราคาเดิม)\n• PO / จัดซื้อ\n• ยอดเพิ่มรายเดือน · รายการเพิ่ม · หมวดที่ซ่อน\n\n` +
+      `กู้คืนได้จาก Admin → กู้คืนข้อมูล (ได้ถึงสแนปช็อตล่าสุด 12:00/18:00)\n\n` +
+      `ถ้าแน่ใจ พิมพ์ชื่อโครงการให้ตรงเพื่อยืนยัน:\n${name}`
+    );
+    if (typed == null) return;                                   // กดยกเลิก
+    if (typed.trim() !== name) { alert("ชื่อโครงการไม่ตรง — ยกเลิกการลบแล้ว"); return; }
     // ไม่เข้า quick-undo เพราะการลบโครงการลบคีย์ย่อยด้วย — กู้ทั้งโครงการทำผ่านหน้า
     // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
     const next = projects.filter(p => p.id !== id);
