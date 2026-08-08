@@ -1926,18 +1926,25 @@ export default function App() {
         <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
           background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
           fontSize:12.5,fontFamily:"'JetBrains Mono',monospace",overflow:"hidden"}}>
-          {[
-            ["ผลรวม", fmt(selStats.sum), "#34d399"],
-            ["เฉลี่ย", fmt(selStats.avg), "#93c5fd"],
-            ["นับ", String(selStats.count), "#fcd34d"],
-            ["ต่ำสุด", fmt(selStats.min), "#cbd5e1"],
-            ["สูงสุด", fmt(selStats.max), "#cbd5e1"],
-          ].map(([label,val,clr],i)=>(
-            <span key={label} style={{display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderLeft:i?"1px solid #334155":"none"}}>
-              <span style={{color:"#94a3b8",fontFamily:"system-ui,sans-serif",fontSize:11}}>{label}</span>
-              <b style={{color:clr}}>{val}</b>
-            </span>
-          ))}
+          {(() => {
+            const selRate = effRate(activeProject);   // อัตราแลกเปลี่ยน (0 = ปิด/ไม่โชว์ $)
+            const segs = [
+              {label:"ผลรวม", raw:selStats.sum, clr:"#34d399", money:true},
+              {label:"เฉลี่ย", raw:selStats.avg, clr:"#93c5fd", money:true},
+              {label:"นับ",   text:String(selStats.count), clr:"#fcd34d", money:false},
+              {label:"ต่ำสุด", raw:selStats.min, clr:"#cbd5e1", money:true},
+              {label:"สูงสุด", raw:selStats.max, clr:"#cbd5e1", money:true},
+            ];
+            return segs.map((s,i)=>(
+              <span key={s.label} style={{display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderLeft:i?"1px solid #334155":"none"}}>
+                <span style={{color:"#94a3b8",fontFamily:"system-ui,sans-serif",fontSize:11}}>{s.label}</span>
+                <span style={{display:"flex",flexDirection:"column",alignItems:"flex-end",lineHeight:1.15}}>
+                  <b style={{color:s.clr}}>{s.money ? fmt(s.raw) : s.text}</b>
+                  {s.money && selRate>0 && <b style={{color:"#34d399",fontSize:10.5,fontWeight:700}}>${fmt(s.raw/selRate)}</b>}
+                </span>
+              </span>
+            ));
+          })()}
           <button onClick={()=>{ const tsv=buildTSV(selCellsRef.current); if(tsv&&navigator.clipboard?.writeText){ navigator.clipboard.writeText(tsv).then(()=>{setCopied(true); setTimeout(()=>setCopied(false),1300);}); } }}
             title="คัดลอกค่าที่เลือก (Ctrl+C)"
             style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",borderRadius:8,padding:"6px 12px",
@@ -2126,31 +2133,47 @@ function AdminRestoreTab() {
   const DEPTS = [["all","ทั้งหมด"],["qs","QS"],["procurement","จัดซื้อ"],["central","ส่วนกลาง"]];
   const deptTag = { qs:{label:"QS",color:T.blue,bg:T.blueLight}, procurement:{label:"จัดซื้อ",color:T.amber,bg:T.amberBg}, central:{label:"ส่วนกลาง",color:T.purple,bg:T.purpleBg} };
 
-  // จัดกลุ่มตามคีย์ → แต่ละคีย์มีหลายสแนปช็อต (เรียงใหม่→เก่า)
-  const groups = {};
-  snaps.forEach(s => { (groups[s.key] = groups[s.key] || []).push(s); });
-  const allKeys = Object.keys(groups).sort((a,b) => (groups[b][0]?.taken_at||"").localeCompare(groups[a][0]?.taken_at||""));
+  // นับจำนวนไฟล์ข้อมูล (คีย์) ต่อแผนก — ใช้โชว์บนแท็บ
+  const allKeys = [...new Set(snaps.map(s => s.key))];
   const deptCount = { all: allKeys.length, qs:0, procurement:0, central:0 };
   allKeys.forEach(k => { deptCount[deptOf(k)] = (deptCount[deptOf(k)]||0) + 1; });
-  const keys = allKeys.filter(k => dept === "all" || deptOf(k) === dept);
-  const versions = selKey ? groups[selKey] || [] : [];
 
-  const doRestore = async (row) => {
-    if (!window.confirm(`กู้คืน "${keyLabel(row.key)}"\nกลับเป็นสแนปช็อต ${snapLabel(row)}?\n\nค่าปัจจุบันจะถูกแทนที่ด้วยข้อมูลจากสแนปช็อตนี้`)) return;
+  // สแนปช็อตเฉพาะแผนกที่เลือก แล้วรวมเป็น "รอบ" (วันเดียวกัน + รอบเวลาเดียวกัน = 1 รอบ)
+  // แต่ละรอบเก็บเวอร์ชันล่าสุดของแต่ละคีย์ในรอบนั้น เพื่อกู้คืนทั้งชุดในคลิกเดียว
+  const deptSnaps = snaps.filter(s => dept === "all" || deptOf(s.key) === dept);
+  const roundMap = {};
+  deptSnaps.forEach(r => {
+    const rk = `${new Date(r.taken_at).toDateString()}|${r.slot}`;
+    const g = roundMap[rk] || (roundMap[rk] = { rk, slot:r.slot, taken_at:r.taken_at, byKey:{} });
+    const ex = g.byKey[r.key];
+    if (!ex || r.taken_at > ex.taken_at) g.byKey[r.key] = r;
+    if (r.taken_at > g.taken_at) g.taken_at = r.taken_at;
+  });
+  const rounds = Object.values(roundMap).sort((a,b) => b.taken_at.localeCompare(a.taken_at));
+  const roundDateLabel = (r) => new Date(r.taken_at).toLocaleDateString("th-TH",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+  const deptLabelOf = (id) => (DEPTS.find(([d])=>d===id)||[])[1] || "ข้อมูล";
+
+  // กู้คืนทั้งชุดของแผนกที่เลือก กลับไปยังรอบเวลาที่กด — ย้อนทุกไฟล์พร้อมกัน
+  const doRestoreRound = async (round) => {
+    const rows = Object.values(round.byKey);
+    const dl = deptLabelOf(dept);
+    if (!window.confirm(`กู้คืน "${dl}" ทั้งชุด (${rows.length} รายการ)\nกลับเป็นสแนปช็อต ${roundDateLabel(round)} · ${round.slot}?\n\nข้อมูลปัจจุบันของทุกไฟล์ในชุดนี้จะถูกแทนที่ด้วยข้อมูลจากรอบที่เลือก`)) return;
     setBusy(true); setMsg("");
-    try {
-      await restoreKvSnapshot(row);
-      setMsg("✅ กู้คืนสำเร็จ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน");
-      await load();
-    } catch (e) {
-      setMsg("❌ กู้คืนไม่สำเร็จ: " + (e?.message || e));
+    let ok = 0, fail = 0;
+    for (const row of rows) {
+      try { await restoreKvSnapshot(row); ok++; }
+      catch (e) { fail++; }
     }
+    setMsg(fail === 0
+      ? `✅ กู้คืน ${dl} สำเร็จ ${ok} รายการ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน`
+      : `⚠️ กู้คืนสำเร็จ ${ok} รายการ · ไม่สำเร็จ ${fail} รายการ`);
+    await load();
     setBusy(false);
   };
 
   if (loading) return <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลดสแนปช็อต...</div>;
 
-  if (!keys.length) return (
+  if (!snaps.length) return (
     <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textSecondary,lineHeight:1.7}}>
       ยังไม่มีสแนปช็อต<br/>
       <span style={{color:T.textMuted}}>ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์ <b>kv-snapshots.sql</b> ใน Supabase</span>
@@ -2161,16 +2184,17 @@ function AdminRestoreTab() {
     <div>
       {msg && (
         <div style={{marginBottom:14,padding:"10px 14px",borderRadius:10,fontSize:13,fontWeight:600,
-          background:msg.startsWith("✅")?T.greenBg:T.redBg,color:msg.startsWith("✅")?T.green:T.red}}>{msg}</div>
+          background:msg.startsWith("✅")?T.greenBg:msg.startsWith("⚠️")?T.amberBg:T.redBg,
+          color:msg.startsWith("✅")?T.green:msg.startsWith("⚠️")?T.amber:T.red}}>{msg}</div>
       )}
       <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>
-        สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · แยกตามแผนก · เลือกแผนก → เลือกรายการ → กดกู้คืนรอบที่ต้องการ
+        สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · เลือกแผนก แล้วกด "กู้คืนทั้งชุด" กลับไปยังรอบเวลาที่ต้องการ — ทุกไฟล์ของแผนกนั้นจะย้อนกลับพร้อมกัน
       </div>
       <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
         {DEPTS.map(([id,label])=>{
           const active = dept===id;
           return (
-            <button key={id} onClick={()=>{ setDept(id); setSelKey(null); }}
+            <button key={id} onClick={()=>setDept(id)}
               style={{padding:"7px 16px",borderRadius:999,border:`1.5px solid ${active?T.blue:T.cardBorder}`,cursor:"pointer",fontSize:12.5,fontWeight:600,
                 background:active?T.blue:T.card,color:active?"#fff":T.textSecondary}}>
               {label} <span style={{opacity:0.7,fontWeight:500}}>({deptCount[id]||0})</span>
@@ -2178,58 +2202,46 @@ function AdminRestoreTab() {
           );
         })}
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(220px,320px) 1fr",gap:16,alignItems:"start"}}>
-        {/* ซ้าย: รายการข้อมูลที่มีสแนปช็อต */}
-        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-          <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>รายการข้อมูล ({keys.length})</div>
-          <div style={{maxHeight:520,overflowY:"auto"}}>
-            {keys.map(k => {
-              const active = k === selKey;
-              const dt = deptTag[deptOf(k)];
-              return (
-                <button key={k} onClick={()=>setSelKey(k)}
-                  style={{display:"block",width:"100%",textAlign:"left",padding:"11px 16px",border:"none",borderBottom:`1px solid ${T.cardBorder}`,
-                    background:active?T.blueLight:"transparent",cursor:"pointer"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <span style={{flexShrink:0,fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:5,background:dt.bg,color:dt.color}}>{dt.label}</span>
-                    <div style={{fontSize:13,fontWeight:600,color:active?T.blue:T.textPrimary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(k)}</div>
-                  </div>
-                  <div style={{fontSize:11,color:T.textMuted,marginTop:3}}>{groups[k].length} สแนปช็อต · ล่าสุด {snapLabel(groups[k][0])}</div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
 
-        {/* ขวา: สแนปช็อตของรายการที่เลือก */}
-        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",minHeight:200}}>
-          {!selKey ? (
-            <div style={{padding:"40px 20px",textAlign:"center",color:T.textMuted,fontSize:13}}>← เลือกรายการทางซ้ายเพื่อดูสแนปช็อต</div>
-          ) : (
-            <>
-              <div style={{padding:"12px 16px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:700,color:T.textPrimary}}>{keyLabel(selKey)}</div>
-              <div style={{maxHeight:520,overflowY:"auto"}}>
-                {versions.map((r,i)=>(
-                  <div key={r.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",borderBottom:i<versions.length-1?`1px solid ${T.cardBorder}`:"none"}}>
-                    <div style={{minWidth:0,flex:1}}>
-                      <div style={{fontSize:12,fontWeight:600,color:T.textPrimary}}>
-                        <span style={{fontSize:10,padding:"1px 7px",borderRadius:6,background:T.blueLight,color:T.blue,fontWeight:700,marginRight:8}}>{r.slot}</span>
-                        {new Date(r.taken_at).toLocaleDateString("th-TH",{weekday:"short",day:"numeric",month:"short"})}
-                        {i===0 && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>(ล่าสุด)</span>}
-                      </div>
-                      <div style={{fontSize:11,color:T.textMuted,marginTop:3,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{preview(r.value)}</div>
-                    </div>
-                    <button onClick={()=>doRestore(r)} disabled={busy}
-                      className="btn-ghost" style={{flexShrink:0,padding:"7px 14px",fontSize:12,borderColor:T.blue,color:T.blue,cursor:busy?"default":"pointer",opacity:busy?0.5:1}}>
-                      ↩︎ กู้คืนรอบนี้
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+      {!rounds.length ? (
+        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textMuted}}>
+          แผนก "{deptLabelOf(dept)}" ยังไม่มีสแนปช็อตให้กู้คืน
         </div>
-      </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>
+            รอบสแนปช็อตของ {deptLabelOf(dept)} ({rounds.length} รอบ)
+          </div>
+          {rounds.map(round => {
+            const rows = Object.values(round.byKey);
+            return (
+              <div key={round.rk} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                  <span style={{flexShrink:0,fontSize:11,fontWeight:700,padding:"3px 11px",borderRadius:8,background:T.blueLight,color:T.blue}}>{round.slot}</span>
+                  <div style={{fontSize:14,fontWeight:700,color:T.textPrimary}}>{roundDateLabel(round)}</div>
+                  <span style={{fontSize:12,color:T.textMuted}}>· {rows.length} ไฟล์ในชุดนี้</span>
+                  <div style={{flex:1,minWidth:12}}/>
+                  <button onClick={()=>doRestoreRound(round)} disabled={busy}
+                    className="btn-primary" style={{flexShrink:0,padding:"8px 18px",fontSize:13,opacity:busy?0.5:1,cursor:busy?"default":"pointer"}}>
+                    ↩︎ กู้คืนทั้งชุด ({rows.length})
+                  </button>
+                </div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:12}}>
+                  {rows.map(r => {
+                    const dt = deptTag[deptOf(r.key)];
+                    return (
+                      <span key={r.id} style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px",borderRadius:7,background:T.bg,border:`1px solid ${T.cardBorder}`,color:T.textSecondary,maxWidth:260}}>
+                        <span style={{flexShrink:0,fontSize:9,fontWeight:700,padding:"0 5px",borderRadius:4,background:dt.bg,color:dt.color}}>{dt.label}</span>
+                        <span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(r.key)}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -2759,6 +2771,9 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  // ปุ่ม "Export เดือนนี้" ของแท็บรายเดือน ถูกยกขึ้นมาไว้ข้างปุ่ม Export หลักด้านบน
+  const monthlyExportRef = useRef(null);
+  const registerMonthExport = useCallback(fn => { monthlyExportRef.current = fn; }, []);
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
   // and kept in sync with tenderCosts + every month's additions on delete.
@@ -2809,6 +2824,12 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
             </button>
           ))}
           <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+          {tab==="monthly" && (
+            <button onClick={()=>monthlyExportRef.current && monthlyExportRef.current()} className="btn-ghost"
+              style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
+              ⬇️ Export เดือนนี้
+            </button>
+          )}
           <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.blue,color:T.blue}}>
             ⬇️ Export Excel
           </button>
@@ -2820,7 +2841,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
                          hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
                          extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
-                         hiddenAccounts={hiddenAccounts} setEditMode={setEditMode} project={project} />}
+                         hiddenAccounts={hiddenAccounts} setEditMode={setEditMode} project={project} registerMonthExport={registerMonthExport} />}
     </Shell>
   );
 }
@@ -2830,6 +2851,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
+  const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (ราคาเดิม = 0)
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "value" | null
   const [sortDir, setSortDir] = useState(1);       // 1 = asc, -1 = desc
@@ -2903,9 +2925,12 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
     if (sortKey === key) setSortDir(d => -d);
     else { setSortKey(key); setSortDir(1); }
   };
+  const hiddenEmptyCount = hideEmpty ? filtered.length - filtered.filter(a => effectiveValue(a) !== 0).length : 0;
   const displayRows = (() => {
-    if (!sortKey) return filtered;
-    const arr = [...filtered];
+    // ซ่อนแถวที่ไม่มีค่า = ราคาเดิม (รวมรายการย่อย) เป็น 0
+    const baseRows = hideEmpty ? filtered.filter(a => effectiveValue(a) !== 0) : filtered;
+    if (!sortKey) return baseRows;
+    const arr = [...baseRows];
     arr.sort((a, b) => {
       let av, bv;
       if (sortKey === "code")       { av = a.code; bv = b.code; }
@@ -2970,6 +2995,12 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
       {/* Filters + Add row + Save */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
         <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account Code / ชื่อ..." width={240}/>
+        <button onClick={()=>setHideEmpty(v=>!v)}
+          title="ซ่อน/แสดงแถวที่ไม่มีค่า (ราคาเดิม = 0)"
+          style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11.5,fontWeight:600,cursor:"pointer",
+            border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
+          {hideEmpty ? `✓ เฉพาะที่มีค่า${hiddenEmptyCount?` (ซ่อน ${hiddenEmptyCount})`:""}` : "⚡ เฉพาะที่มีค่า"}
+        </button>
         <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
           {["All",...GROUPS].map(g=>(
             <button key={g} onClick={()=>setFilter(g)}
@@ -3186,13 +3217,14 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
-function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project }) {
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project, registerMonthExport }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
   const [newMonth, setNewMonth] = useState("");
   const [filter, setFilter] = useState("All");
+  const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (รวมสะสม = 0)
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "before" | "add" | "cum" | null
   const [sortDir, setSortDir] = useState(1);
@@ -3210,6 +3242,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   useEffect(() => { setDraftAdd({...(additions[month]||{})}); }, [month, additions]);
   useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
   useEffect(() => { setForceEdit(false); setAddColOpen(false); }, [month]); // switching months always re-locks until "แก้ไข" is clicked again
+  // ผูกปุ่ม "Export เดือนนี้" ที่ยกไปไว้บนหัว (QSView) ให้ยิง export ของเดือนที่เลือกอยู่
+  useEffect(() => {
+    if (!registerMonthExport) return;
+    registerMonthExport(() => exportQSMonthExcel(project, tenderCosts, additions, month, extraItems, hiddenAccounts));
+    return () => registerMonthExport(null);
+  }, [registerMonthExport, project, tenderCosts, additions, month, extraItems, hiddenAccounts]);
 
   // "เพิ่มรายการ" — named sub-columns (e.g. CC#16, CC#17), each holding its own
   // set of per-Account-Code entries that add up to a row's monthly total.
@@ -3333,8 +3371,10 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     else { setSortKey(key); setSortDir(1); }
   };
   const displayRows = (() => {
-    if (!sortKey) return filtered;
-    const arr = [...filtered];
+    // ซ่อนแถวที่ไม่มีค่า = รวมสะสมของเดือนนี้เป็น 0 (ทั้งยอดยกมาและเพิ่มเดือนนี้ว่าง)
+    const base = hideEmpty ? filtered.filter(r => cumOf(r) !== 0) : filtered;
+    if (!sortKey) return base;
+    const arr = [...base];
     arr.sort((a, b) => {
       let av, bv;
       if (sortKey === "code")        { av = a.code; bv = b.code; }
@@ -3348,6 +3388,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     });
     return arr;
   })();
+  const hiddenEmptyCount = hideEmpty ? filtered.length - filtered.filter(r => cumOf(r) !== 0).length : 0;
 
   const handleAddMonth = () => {
     if (!newMonth) return;
@@ -3531,12 +3572,6 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             background:monthEditMode?T.blue:T.card,color:monthEditMode?"#fff":T.textSecondary,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
           {monthEditMode?"✓ เสร็จ":"✏️ จัดการเดือน"}
         </button>
-        <button onClick={()=>exportQSMonthExcel(project, tenderCosts, additions, month, extraItems, hiddenAccounts)}
-          title={`Export เฉพาะเดือน ${monthShortLabel(month)}`}
-          style={{flexShrink:0,alignSelf:"flex-start",padding:"9px 14px",borderRadius:10,border:`1.5px solid ${T.green}`,
-            background:T.card,color:T.green,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-          ⬇️ Export เดือนนี้
-        </button>
       </div>
 
       {/* Stats for selected month */}
@@ -3550,6 +3585,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       {/* Toolbar: search + group filter + actions */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
         <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account Code / ชื่อ..." width={220}/>
+        <button onClick={()=>setHideEmpty(v=>!v)}
+          title="ซ่อน/แสดงแถวที่ไม่มีค่า (รวมสะสม = 0)"
+          style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11.5,fontWeight:600,cursor:"pointer",
+            border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
+          {hideEmpty ? `✓ เฉพาะที่มีค่า${hiddenEmptyCount?` (ซ่อน ${hiddenEmptyCount})`:""}` : "⚡ เฉพาะที่มีค่า"}
+        </button>
         <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
           {["All",...GROUPS].map(g=>(
             <button key={g} onClick={()=>setFilter(g)}
