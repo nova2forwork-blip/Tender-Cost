@@ -2431,7 +2431,9 @@ function SearchInput({ value, onChange, placeholder, width = 240 }) {
 }
 
 // ─── StatCard ─────────────────────────────────────────────────────────────────
-function StatCard({ label, value, sub, color, icon, accent }) {
+function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
+  // ถ้าใส่ยอดบาท (thb) + อัตราแลกเปลี่ยน (rate = บาท/USD) จะโชว์ ≈ $ ควบคู่ให้
+  const usd = (rate && rate > 0 && typeof thb === "number") ? thb / rate : null;
   return (
     <div style={{background:T.card,borderRadius:14,padding:"20px 22px",border:`1px solid ${T.cardBorder}`,position:"relative",overflow:"hidden"}}>
       <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:color,borderRadius:"14px 14px 0 0"}}/>
@@ -2440,6 +2442,7 @@ function StatCard({ label, value, sub, color, icon, accent }) {
         {icon && <div style={{width:34,height:34,borderRadius:10,background:accent||T.blueLight,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{icon}</div>}
       </div>
       <div style={{fontSize:22,fontWeight:700,color:T.textPrimary,letterSpacing:"-0.5px",fontFamily:"'JetBrains Mono',monospace"}}>{value}</div>
+      {usd != null && <div style={{fontSize:12,color:T.green,fontWeight:600,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>≈ ${fmt0(usd)}</div>}
       {sub && <div style={{fontSize:11,color:T.textMuted,marginTop:5}}>{sub}</div>}
     </div>
   );
@@ -2447,7 +2450,7 @@ function StatCard({ label, value, sub, color, icon, accent }) {
 
 // ─── Home Screen ──────────────────────────────────────────────────────────────
 function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
-  const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB" });
+  const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
   const [projSearch, setProjSearch] = useState("");
   const shownProjects = projects.filter(p => {
     const q = projSearch.trim().toLowerCase();
@@ -2460,7 +2463,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
     const id = uid();
     saveProjects([...projects, { ...draft, id, createdAt: new Date().toISOString() }]);
     setNewProjModal(false);
-    setDraft({ name:"", area:"", panels:"", client:"", currency:"THB" });
+    setDraft({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
   };
 
   return (
@@ -2557,10 +2560,11 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
                 ["พื้นที่รวม (ft²)","area","number","auto"],
                 ["จำนวน Panels","panels","number","auto"],
                 ["สกุลเงิน","currency","text","auto"],
+                ["อัตราแลกเปลี่ยน (บาท/USD)","usdRate","number","auto"],
               ].map(([label,key,type,col]) => (
                 <label key={key} style={{display:"flex",flexDirection:"column",gap:6,gridColumn:col}}>
                   <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{label}</span>
-                  <input type={type} value={draft[key]} onChange={e=>setDraft(d=>({...d,[key]:e.target.value}))} className="input-base"/>
+                  <input type={type} step={type==="number"?"any":undefined} value={draft[key]} onChange={e=>setDraft(d=>({...d,[key]:e.target.value}))} className="input-base"/>
                 </label>
               ))}
             </div>
@@ -2636,10 +2640,10 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,marginBottom:28,maxWidth:640}}>
             <div style={{fontSize:14,fontWeight:600,color:T.textPrimary,marginBottom:16}}>แก้ไขข้อมูลโครงการ</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
-              {[["ชื่อโครงการ","name","text"],["ลูกค้า","client","text"],["สกุลเงิน","currency","text"],["พื้นที่ (ft²)","area","number"],["Panels","panels","number"]].map(([l,k,t]) => (
+              {[["ชื่อโครงการ","name","text"],["ลูกค้า","client","text"],["สกุลเงิน","currency","text"],["อัตราแลกเปลี่ยน (บาท/USD)","usdRate","number"],["พื้นที่ (ft²)","area","number"],["Panels","panels","number"]].map(([l,k,t]) => (
                 <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
                   <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
-                  <input type={t} value={draft[k]||""} onChange={e=>setDraft(d=>({...d,[k]:e.target.value}))} className="input-base"/>
+                  <input type={t} step={t==="number"?"any":undefined} value={draft[k]||""} onChange={e=>setDraft(d=>({...d,[k]:e.target.value}))} className="input-base"/>
                 </label>
               ))}
             </div>
@@ -2715,6 +2719,7 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 // ─── QS View ─────────────────────────────────────────────────────────────────
 function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
+  const usdRate = parseFloat(project?.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
   // and kept in sync with tenderCosts + every month's additions on delete.
@@ -2916,7 +2921,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
     <div style={{padding:"4px 28px 24px"}}>
       {/* Stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-        <StatCard label="ราคาเดิมรวม (Tender Cost)" value={"฿"+fmt0(base)} sub="ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง" color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="ราคาเดิมรวม (Tender Cost)" value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub="ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง" color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label="เผื่อเศษ/สูญเสีย 3%" value={"฿"+fmt0(adj3)} sub="ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)" color={T.amber} icon="⚙️" accent={T.amberBg}/>
         <StatCard label="รวมเผื่อ 3% (อ้างอิง)" value={"฿"+fmt0(total)} sub="ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
@@ -3139,6 +3144,7 @@ function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDel
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project }) {
+  const usdRate = parseFloat(project?.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
@@ -3492,10 +3498,10 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Stats for selected month */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-        <StatCard label="ยอดยกมา (ก่อนเดือนนี้)" value={"฿"+fmt0(baselineForMonth)} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="เพิ่มเดือนนี้" value={"฿"+fmt0(thisMonthAdd)} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
-        <StatCard label="รวมสะสมถึงเดือนนี้" value={"฿"+fmt0(cumulativeSoFar)} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
-        <StatCard label="รวมทั้งหมด" value={"฿"+fmt0(grandTotal)} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
+        <StatCard label="ยอดยกมา (ก่อนเดือนนี้)" value={"฿"+fmt0(baselineForMonth)} thb={baselineForMonth} rate={usdRate} sub={`สะสมถึง ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label="เพิ่มเดือนนี้" value={"฿"+fmt0(thisMonthAdd)} thb={thisMonthAdd} rate={usdRate} sub={new Date(month+"-01").toLocaleDateString("th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
+        <StatCard label="รวมสะสมถึงเดือนนี้" value={"฿"+fmt0(cumulativeSoFar)} thb={cumulativeSoFar} rate={usdRate} sub="เดิม + เพิ่มสะสมถึงเดือนที่เลือก" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="รวมทั้งหมด" value={"฿"+fmt0(grandTotal)} thb={grandTotal} rate={usdRate} sub="เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)" color={T.purple} icon="🧮" accent={T.purpleBg}/>
       </div>
 
       {/* Toolbar: search + group filter + actions */}
@@ -4146,6 +4152,7 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
 function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
+  const usdRate = parseFloat(project.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
@@ -4319,10 +4326,10 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
     <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-          <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
-          <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-          <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} sub={`${paidCount} รายการ · จ่ายอัตโนมัติ`} color={T.green} icon="✅" accent={T.greenBg}/>
-          <StatCard label="Budget คงเหลือ" value={"฿"+fmt0(tenderTotal-totalComm)} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
+          <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
+          <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} รายการ · จ่ายอัตโนมัติ`} color={T.green} icon="✅" accent={T.greenBg}/>
+          <StatCard label="Budget คงเหลือ" value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
         </div>
 
         {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
@@ -4831,6 +4838,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
 function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
+  const usdRate = parseFloat(project.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
   const [view, setView] = useState("dashboard");
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
@@ -5070,10 +5078,10 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
         {view==="dashboard" ? (
           <>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-              <StatCard label="งบประมาณ (QS)" value={"฿"+fmt0(tenderTotal)} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="ผูกพันแล้ว (PO)" value={"฿"+fmt0(totalComm)} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label="วางบิลแล้ว" value={"฿"+fmt0(totalInvoiced)} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
-              <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label="งบประมาณ (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="ผูกพันแล้ว (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label="วางบิลแล้ว" value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
+              <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
 
             {/* แถบเตือน "เกินงบ" (เรื่องเงินจ่ายย้ายไปรวมที่แถบ 🔔 ด้านบนแล้ว) */}
@@ -5197,14 +5205,14 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
           <div>
             {/* Grand totals across every Acc. Code that has a budget or a PO */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-              <StatCard label="งบประมาณรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="PO รวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label="ส่วนต่างรวม" value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))}
+              <StatCard label="งบประมาณรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} thb={dateGroups.reduce((s,a)=>s+a.budget,0)} rate={usdRate} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="PO รวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} thb={dateGroups.reduce((s,a)=>s+a.committed,0)} rate={usdRate} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label="ส่วนต่างรวม" value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))} thb={Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0))} rate={usdRate}
                 sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"เกินงบ":"คงเหลือ"}
                 color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
                 icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
                 accent={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.redBg:T.greenBg}/>
-              <StatCard label="ต้องเก็บไว้จ่ายรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))}
+              <StatCard label="ต้องเก็บไว้จ่ายรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))} thb={dateGroups.reduce((s,a)=>s+a.toReserve,0)} rate={usdRate}
                 sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} PO รอจ่าย`} color={T.red} icon="⏳" accent={T.redBg}/>
             </div>
 
@@ -5324,11 +5332,11 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
           <div>
             {/* สรุปยอดที่ต้องเตรียมจ่าย */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-              <StatCard label="ต้องจ่ายทั้งหมด" value={"฿"+fmt0(planTotal)} sub={`${payLines.length} งวด`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="จ่ายแล้ว" value={"฿"+fmt0(planPaid)} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
-              <StatCard label="คงเหลือต้องจ่าย" value={"฿"+fmt0(planRemain)} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
-              <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
-              <StatCard label={`ครบกำหนดเดือนหน้า (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} sub={dueNextMonth>0?`${nextCount} งวด · เตรียมล่วงหน้า`:"ยังไม่มีที่ครบกำหนด"} color={T.amber} icon="🔔" accent={T.amberBg}/>
+              <StatCard label="ต้องจ่ายทั้งหมด" value={"฿"+fmt0(planTotal)} thb={planTotal} rate={usdRate} sub={`${payLines.length} งวด`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label="จ่ายแล้ว" value={"฿"+fmt0(planPaid)} thb={planPaid} rate={usdRate} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label="คงเหลือต้องจ่าย" value={"฿"+fmt0(planRemain)} thb={planRemain} rate={usdRate} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
+              <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} thb={dueThisMonth} rate={usdRate} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
+              <StatCard label={`ครบกำหนดเดือนหน้า (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} thb={dueNextMonth} rate={usdRate} sub={dueNextMonth>0?`${nextCount} งวด · เตรียมล่วงหน้า`:"ยังไม่มีที่ครบกำหนด"} color={T.amber} icon="🔔" accent={T.amberBg}/>
             </div>
 
             {payByMonth.length===0 ? (
