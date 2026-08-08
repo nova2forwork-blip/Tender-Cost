@@ -485,7 +485,7 @@ function lighten(hex, ratio) {
 
 // ─── Excel styling ─────────────────────────────────────────────────────────
 function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart, dataEnd,
-                           totalRow=null, moneyCols=[], pctCols=[], centerCols=[], statusCols=[], theme,
+                           totalRow=null, moneyCols=[], usdCols=[], pctCols=[], centerCols=[], statusCols=[], theme,
                            // rowGroups: array aligned to dataStart..dataEnd holding a "group key" per
                            // row. When given, rows are shaded in solid blocks per group (instead of
                            // plain every-other-row zebra) and a heavier divider line marks where one
@@ -556,7 +556,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
         border:{ top: isGroupStart?BORDER_MED(GLINE):BORDER_THIN("EEF0F2"), bottom:BORDER_THIN("EEF0F2"),
                  left:BORDER_THIN("EEF0F2"), right:BORDER_THIN("EEF0F2") } };
       if (zebra)   s.fill   = { fgColor:{rgb:BAND} };
-      if (isMoney) s.numFmt = "#,##0";
+      if (isMoney) s.numFmt = usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0';   // แยกสัญลักษณ์ $ / ฿
       if (isPct)   s.numFmt = "0.0%";
       if (statusCols.includes(c)) {
         const pill = statusPill(ws[ref].v);
@@ -579,7 +579,7 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:TFILL}},
         alignment:{vertical:"center",horizontal:isMoney||isPct?"right":"left"},
         border:{ top:BORDER_MED(theme.main) },
-        numFmt: isMoney?"#,##0":isPct?"0.0%":undefined };
+        numFmt: isMoney ? (usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0') : isPct?"0.0%":undefined };
     }
     ws["!rows"][totalRow] = { hpx:24 };
   }
@@ -609,6 +609,33 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
 function exportRate(project){ return (project?.showUsd !== false) ? (parseFloat(project?.usdRate)||0) : 0; }
 // toUsd: แปลงยอดบาท→USD (คืน "" ถ้าไม่ได้เปิด USD หรือค่าไม่ใช่ตัวเลข)
 function toUsd(thb, rate){ return (rate>0 && typeof thb==="number" && isFinite(thb)) ? Math.round((thb/rate)*100)/100 : ""; }
+
+// ── ลิงก์ข้ามชีต (hyperlink ภายในไฟล์) — คลิกแล้วกระโดดไปชีตปลายทาง ช่วยไล่ว่าข้อมูลมาจากไหน ──
+// ทำให้เซลล์ที่ ref เป็นลิงก์ไปยัง 'sheetName'  (สีน้ำเงินขีดเส้นใต้)
+function xLinkCell(ws, ref, sheetName, tip){
+  if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+  ws[ref].l = { Target:`#'${sheetName}'!A1`, Tooltip: tip || `ไปที่ชีต ${sheetName}` };
+  const prev = ws[ref].s || {};
+  ws[ref].s = { ...prev, font:{ ...(prev.font||{}), color:{rgb:"1D4ED8"}, underline:true } };
+}
+// วางแถวลิงก์ (links = [{text, sheet}]) ที่แถว r — ใช้ sheet_add_aoa เพื่อขยาย !ref ให้ด้วย
+function xLinkRow(ws, r, links){
+  if (!links || !links.length) return;
+  XLSX.utils.sheet_add_aoa(ws, [links.map(l=>l.text)], { origin:{ r, c:0 } });
+  links.forEach((l,i)=>{
+    const ref = XLSX.utils.encode_cell({ r, c:i });
+    ws[ref].l = { Target:`#'${l.sheet}'!A1`, Tooltip:`ไปที่ชีต ${l.sheet}` };
+    ws[ref].s = { font:{ color:{rgb:"1D4ED8"}, underline:true, bold:true, name:"Tahoma", sz:10 }, alignment:{ vertical:"center" } };
+  });
+  ws["!rows"] = ws["!rows"] || []; ws["!rows"][r] = { hpx:20 };
+}
+// ลิงก์ "↑ กลับหน้าสรุป" ที่แถว r คอลัมน์ท้าย ๆ ของชีตรายละเอียด
+function xBackLink(ws, r, c, backSheet){
+  XLSX.utils.sheet_add_aoa(ws, [["↑ กลับหน้าสรุป"]], { origin:{ r, c } });
+  const ref = XLSX.utils.encode_cell({ r, c });
+  ws[ref].l = { Target:`#'${backSheet}'!A1`, Tooltip:`กลับไปชีต ${backSheet}` };
+  ws[ref].s = { font:{ color:{rgb:"1D4ED8"}, underline:true, bold:true, name:"Tahoma", sz:10 }, alignment:{ horizontal:"right", vertical:"center" } };
+}
 
 function fitExcelCols(ws, header, dataRows, { min=8, max=55 } = {}) {
   header.forEach((h, c) => {
@@ -911,7 +938,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const groupData = Object.entries(byG)
     .map(([label,x]) => ({ label, base:x.base, add:x.total-x.base, total:x.total, pct:x.total/grandTot }))
     .sort((a,b)=> b.total - a.total);
-  addDashboardSheet(wb, "สรุป", {
+  const dashQS = addDashboardSheet(wb, "สรุป", {
     title: `สรุปงบประมาณ — ${project.name}`,
     subtitle: `พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`,
     theme,
@@ -925,6 +952,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     items: dashItemsF,
     groups: groupData,
   });
+  const monthLinksQS = [];   // เก็บชื่อชีตรายเดือนไว้ทำลิงก์บนหน้าสรุป
 
   // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
   const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
@@ -953,7 +981,8 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   });
   ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18},...(U?[{wch:18}]:[])];
   styleSheet(ws1, { numCols:6+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:U?[3,4,5,6]:[3,4,5], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+    moneyCols:U?[3,4,5,6]:[3,4,5], usdCols:U?[6]:[], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+  xBackLink(ws1, 2, (6+(U?1:0))-1, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws1, "งบประมาณ");
 
   // Sheet 2 — one column per month, so QS can see exactly how the budget grew
@@ -987,13 +1016,15 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   });
   ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
-    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], theme, rowGroups:rowGroups2 });
+    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], usdCols:U?[4+months.length]:[], theme, rowGroups:rowGroups2 });
+  xBackLink(ws2, 2, numCols2-1, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
 
   // Sheet 3+ — แยกรายเดือน โดย breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น ๆ
   // คอลัมน์เก็บเป็นรายเดือน แต่ละเดือนอาจมีชุดคอลัมน์ต่างกัน → ทำหนึ่งชีตต่อเดือน
   const sheetName = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
   const usedNames = {};
+  const monthSheetMap = {};   // เดือน → ชื่อชีต ไว้ทำลิงก์
   months.forEach((m) => {
     const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
     const hasCols = cols.length > 0;
@@ -1029,13 +1060,30 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     ws["!cols"] = [{ wch: 12 }, { wch: 34 }, { wch: 14 }, ...valLabels.map(() => ({ wch: 15 })), { wch: 16 }, ...(U?[{ wch: 16 }]:[])];
     styleSheet(ws, {
       numCols, subRows: [1], headerRow: 3, dataStart, dataEnd, totalRow,
-      moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length, ...(U?[4 + valLabels.length]:[])],
+      moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length, ...(U?[4 + valLabels.length]:[])], usdCols:U?[4 + valLabels.length]:[],
       theme, rowGroups, groupDisplayCol: 2,
     });
     let nm = sheetName(monthShortLabel(m));
     if (usedNames[nm]) { usedNames[nm] += 1; nm = sheetName(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
+    xBackLink(ws, 2, numCols-1, "สรุป");
     XLSX.utils.book_append_sheet(wb, ws, nm);
+    monthSheetMap[m] = nm;
+    monthLinksQS.push({ text: monthShortLabel(m), sheet: nm });
   });
+  // ลิงก์หัวคอลัมน์เดือนในชีต "รายเดือน (สรุป)" → กระโดดไปชีตของเดือนนั้น (ไล่ที่มา)
+  months.forEach((m,i)=>{ if (monthSheetMap[m]) xLinkCell(ws2, XLSX.utils.encode_cell({ r:3, c:3+i }), monthSheetMap[m], `ดูรายละเอียดเดือน ${monthShortLabel(m)}`); });
+  // แถบลิงก์นำทางใต้ dashboard หน้าสรุป
+  {
+    const navR = dashQS.nextRow + 1;
+    XLSX.utils.sheet_add_aoa(dashQS.ws, [["🔗 ไปที่ชีต:"]], { origin:{ r:navR, c:0 } });
+    dashQS.ws[XLSX.utils.encode_cell({ r:navR, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+    xLinkRow(dashQS.ws, navR+1, [{text:"📄 งบประมาณ (รายรหัส)", sheet:"งบประมาณ"}, {text:"📅 รายเดือน (สรุป)", sheet:"รายเดือน (สรุป)"}]);
+    if (monthLinksQS.length) {
+      XLSX.utils.sheet_add_aoa(dashQS.ws, [["🔗 รายละเอียดรายเดือน:"]], { origin:{ r:navR+2, c:0 } });
+      dashQS.ws[XLSX.utils.encode_cell({ r:navR+2, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+      xLinkRow(dashQS.ws, navR+3, monthLinksQS);
+    }
+  }
 
   XLSX.writeFile(wb, `QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
@@ -1085,7 +1133,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
   ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }, ...(U?[{ wch:18 }]:[])];
   styleSheet(ws, {
     numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
-    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length, ...(U?[6 + valLabels.length]:[])],
+    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length, ...(U?[6 + valLabels.length]:[])], usdCols:U?[6 + valLabels.length]:[],
     theme, rowGroups, groupDisplayCol: 2,
   });
   XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
@@ -1142,12 +1190,13 @@ function exportProcurementExcel(project, poEntries) {
   styleSheet(dash.ws, { numCols:11+(U?1:0),
     titleRow: poStart, subRows:[poStart+1], headerRow: poStart+3,
     dataStart: poStart+dataStart1, dataEnd: poStart+dataEnd1, totalRow: poStart+totalRow1,
-    moneyCols:U?[5,6]:[5], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
+    moneyCols:U?[5,6]:[5], usdCols:U?[6]:[], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
   delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
   dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
 
   // แยกรายเดือนแบบละเอียด (หนึ่งชีตต่อเดือน) — เอา "สรุปสถานะ" และ "รายเดือน (สรุปกลุ่ม)" ออกแล้ว
   const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
+  const monthLinks = [];   // เก็บชื่อชีตรายเดือนไว้ทำลิงก์บนหน้าสรุป
   if (poMonths.length) {
     // รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
     const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
@@ -1181,11 +1230,20 @@ function exportProcurementExcel(project, poEntries) {
       const ws = XLSX.utils.aoa_to_sheet(rows);
       ws["!cols"] = [{wch:10},{wch:32},{wch:14},{wch:22},{wch:16},{wch:12},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:16}];
       styleSheet(ws, { numCols:9+(U?1:0), subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
-        moneyCols:U?[6,7]:[6], centerCols:U?[8,9]:[7,8], statusCols:U?[8,9]:[7,8], theme, rowGroups, groupDisplayCol:2 });
+        moneyCols:U?[6,7]:[6], usdCols:U?[7]:[], centerCols:U?[8,9]:[7,8], statusCols:U?[8,9]:[7,8], theme, rowGroups, groupDisplayCol:2 });
       let nm = clean(monthShortLabel(m));
       if (usedNames[nm]) { usedNames[nm] += 1; nm = clean(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
+      xBackLink(ws, 2, (9+(U?1:0))-1, "สรุป");   // ลิงก์กลับหน้าสรุป
       XLSX.utils.book_append_sheet(wb, ws, nm);
+      monthLinks.push({ text: monthShortLabel(m), sheet: nm });
     });
+  }
+  // ลิงก์ไปยังชีตรายเดือน วางไว้ใต้ตาราง PO ในหน้าสรุป — คลิกเพื่อไล่ที่มาของตัวเลข
+  if (monthLinks.length) {
+    const navR = poStart + rows1.length + 1;
+    XLSX.utils.sheet_add_aoa(dash.ws, [["🔗 ไปดูรายละเอียดรายเดือน (คลิกเพื่อดูที่มา):"]], { origin:{ r:navR, c:0 } });
+    dash.ws[XLSX.utils.encode_cell({ r:navR, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+    xLinkRow(dash.ws, navR+1, monthLinks);
   }
 
   XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -1308,7 +1366,9 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
 
   // Sheet 1 — Budget vs Committed vs Variance per Acc. Code
   const rows1 = [[`สรุปงบประมาณ — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows1.push(["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Committed (PO)","ส่วนต่าง","% ใช้ไป","สถานะ",...(U?["Budget (USD)","Committed (USD)"]:[])]);
+  rows1.push(U
+    ? ["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Budget (USD)","Committed (PO)","Committed (USD)","ส่วนต่าง","% ใช้ไป","สถานะ"]
+    : ["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Committed (PO)","ส่วนต่าง","% ใช้ไป","สถานะ"]);
   const dataStart1 = rows1.length;
   let gB=0, gC=0;
   const rowGroups1 = [];
@@ -1319,21 +1379,28 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const variance = budget - committed;
     const pctUsed  = budget>0 ? committed/budget : (committed>0 ? 9.99 : 0);
     const status   = committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
-    rows1.push([a.code, a.name, a.group, budget, committed, variance, pctUsed, status, ...(U?[toUsd(budget,rate),toUsd(committed,rate)]:[])]);
+    rows1.push(U
+      ? [a.code, a.name, a.group, budget, toUsd(budget,rate), committed, toUsd(committed,rate), variance, pctUsed, status]
+      : [a.code, a.name, a.group, budget, committed, variance, pctUsed, status]);
     rowGroups1.push(a.group);
     gB += budget; gC += committed;
   });
   const dataEnd1 = rows1.length-1;
-  rows1.push(["","TOTAL","",gB,gC,gB-gC,gB>0?gC/gB:0,"",...(U?[toUsd(gB,rate),toUsd(gC,rate)]:[])]);
+  rows1.push(U
+    ? ["","TOTAL","",gB,toUsd(gB,rate),gC,toUsd(gC,rate),gB-gC,gB>0?gC/gB:0,""]
+    : ["","TOTAL","",gB,gC,gB-gC,gB>0?gC/gB:0,""]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
-  ws1["!cols"] = [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12},...(U?[{wch:16},{wch:16}]:[])];
+  ws1["!cols"] = U
+    ? [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12}]
+    : [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12}];
   styleSheet(ws1, { numCols:8+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:U?[3,4,5,8,9]:[3,4,5], pctCols:[6], centerCols:[7], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+    moneyCols:U?[3,4,5,6,7]:[3,4,5], usdCols:U?[4,6]:[], pctCols:U?[8]:[6], centerCols:U?[9]:[7], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
   // Flag over-budget rows in red so they jump out without opening the app
+  const varC1 = U?7:5, stC1 = U?9:7;
   for (let r=dataStart1; r<=dataEnd1; r++) {
-    const varRef = XLSX.utils.encode_cell({r,c:5});
-    const stRef  = XLSX.utils.encode_cell({r,c:7});
+    const varRef = XLSX.utils.encode_cell({r,c:varC1});
+    const stRef  = XLSX.utils.encode_cell({r,c:stC1});
     if (ws1[varRef] && typeof ws1[varRef].v === "number" && ws1[varRef].v < 0) {
       ws1[varRef].s = { ...ws1[varRef].s, font:{...ws1[varRef].s.font, color:{rgb:"DC2626"}, bold:true} };
     }
@@ -1366,11 +1433,13 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
   ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16}];
   styleSheet(ws2, { numCols:11+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
-    moneyCols:U?[6,7]:[6], centerCols:U?[8,11]:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
+    moneyCols:U?[6,7]:[6], usdCols:U?[7]:[], centerCols:U?[8,11]:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
   XLSX.utils.book_append_sheet(wb, ws2, "PO Entries");
 
   // Sheet 3 — roll-up by Group
-  const rows3 = [[`สรุปตามกลุ่ม — ${project.name}`], [], ["Group","Budget","Committed","ส่วนต่าง","% ใช้ไป",...(U?["Budget (USD)","Committed (USD)"]:[])]];
+  const rows3 = [[`สรุปตามกลุ่ม — ${project.name}`], [], (U
+    ? ["Group","Budget","Budget (USD)","Committed","Committed (USD)","ส่วนต่าง","% ใช้ไป"]
+    : ["Group","Budget","Committed","ส่วนต่าง","% ใช้ไป"])];
   const dataStart3 = 3;
   let g3B=0, g3C=0;
   GROUPS.forEach(g => {
@@ -1378,15 +1447,15 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const b  = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
     const c2 = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
     if (b<=0 && c2<=0) return;
-    rows3.push([g,b,c2,b-c2,b>0?c2/b:0,...(U?[toUsd(b,rate),toUsd(c2,rate)]:[])]);
+    rows3.push(U ? [g,b,toUsd(b,rate),c2,toUsd(c2,rate),b-c2,b>0?c2/b:0] : [g,b,c2,b-c2,b>0?c2/b:0]);
     g3B += b; g3C += c2;
   });
   const dataEnd3 = rows3.length-1;
-  rows3.push(["TOTAL",g3B,g3C,g3B-g3C,g3B>0?g3C/g3B:0,...(U?[toUsd(g3B,rate),toUsd(g3C,rate)]:[])]);
+  rows3.push(U ? ["TOTAL",g3B,toUsd(g3B,rate),g3C,toUsd(g3C,rate),g3B-g3C,g3B>0?g3C/g3B:0] : ["TOTAL",g3B,g3C,g3B-g3C,g3B>0?g3C/g3B:0]);
   const totalRow3 = rows3.length-1;
   const ws3 = XLSX.utils.aoa_to_sheet(rows3);
-  ws3["!cols"] = [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10},...(U?[{wch:16},{wch:16}]:[])];
-  styleSheet(ws3, { numCols:5+(U?2:0), headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:U?[1,2,3,5,6]:[1,2,3], pctCols:[4], theme });
+  ws3["!cols"] = U ? [{wch:18},{wch:16},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10}] : [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10}];
+  styleSheet(ws3, { numCols:5+(U?2:0), headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:U?[1,2,3,4,5]:[1,2,3], usdCols:U?[2,4]:[], pctCols:U?[6]:[4], theme });
   XLSX.utils.book_append_sheet(wb, ws3, "By Group");
 
   // Sheet 4 — monthly cash-flow: how much budget was added and how much got
@@ -1397,7 +1466,9 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   const allMonths = [...new Set([...additionMonths, ...poEntryMonths])].sort();
   if (allMonths.length) {
     const rows4 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-    rows4.push(["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม",...(U?["งบสะสม (USD)","Committed สะสม (USD)"]:[])]);
+    rows4.push(U
+      ? ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","งบสะสม (USD)","Committed เดือนนี้","Committed สะสม","Committed สะสม (USD)","% ใช้ไปสะสม"]
+      : ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม"]);
     const dataStart4 = rows4.length;
     const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
     let cumB = baselineTotal, cumC = 0;
@@ -1406,12 +1477,14 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0);
       cumB += addedThisMonth;
       cumC += committedThisMonth;
-      rows4.push([monthShortLabel(m), addedThisMonth, cumB, committedThisMonth, cumC, cumB>0?cumC/cumB:0, ...(U?[toUsd(cumB,rate),toUsd(cumC,rate)]:[])]);
+      rows4.push(U
+        ? [monthShortLabel(m), addedThisMonth, cumB, toUsd(cumB,rate), committedThisMonth, cumC, toUsd(cumC,rate), cumB>0?cumC/cumB:0]
+        : [monthShortLabel(m), addedThisMonth, cumB, committedThisMonth, cumC, cumB>0?cumC/cumB:0]);
     });
     const dataEnd4 = rows4.length-1;
     const ws4 = XLSX.utils.aoa_to_sheet(rows4);
-    ws4["!cols"] = [{wch:14},{wch:18},{wch:16},{wch:18},{wch:16},{wch:12},...(U?[{wch:16},{wch:18}]:[])];
-    styleSheet(ws4, { numCols:6+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart4, dataEnd:dataEnd4, moneyCols:U?[1,2,3,4,6,7]:[1,2,3,4], pctCols:[5], theme });
+    ws4["!cols"] = U ? [{wch:14},{wch:18},{wch:16},{wch:16},{wch:18},{wch:16},{wch:18},{wch:12}] : [{wch:14},{wch:18},{wch:16},{wch:18},{wch:16},{wch:12}];
+    styleSheet(ws4, { numCols:6+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart4, dataEnd:dataEnd4, moneyCols:U?[1,2,3,4,5,6]:[1,2,3,4], usdCols:U?[3,6]:[], pctCols:U?[7]:[5], theme });
     XLSX.utils.book_append_sheet(wb, ws4, "รายเดือน");
   }
 
@@ -1424,39 +1497,16 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const monthKey = (l) => l.month || "9999-99";
     const payMonths = [...new Set(payLines.map(monthKey))].sort();
 
-    // ── แผนจ่าย (ชีตเดียว) — ส่วนบน: สรุปรายเดือน · ส่วนล่าง: รายละเอียดแต่ละงวด ──
+    // ── แผนจ่าย — รายละเอียดแต่ละงวด (เอาตารางสรุปรายเดือนด้านบนออกแล้ว) ──
     const rowsC = [
       [`แผนจ่ายเงิน — ${project.name}`],
-      [`ตามวันครบกำหนดจ่าย · ${payLines.length} งวด${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`],
+      [`รายละเอียดแต่ละงวด · เรียงตามเดือนที่ต้องจ่าย · ${payLines.length} งวด${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`],
       [],
     ];
-    // ── ส่วนที่ 1: สรุปรายเดือน ──
-    rowsC.push(["เดือนที่ต้องจ่าย","จำนวนงวด","เงินสด (THB)","เครดิต (THB)","รวมต้องจ่าย (THB)","จ่ายแล้ว (THB)","คงเหลือต้องจ่าย (THB)",...(U?["รวมต้องจ่าย (USD)","คงเหลือ (USD)"]:[])]);
-    const sumHeader = rowsC.length-1, sumStart = rowsC.length;
-    let tN=0,tCash=0,tCredit=0,tSum=0,tPaid=0,tRemain=0;
-    payMonths.forEach(mk => {
-      const lines  = payLines.filter(l=>monthKey(l)===mk);
-      const cash   = lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0);
-      const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
-      const sum    = cash+credit;
-      const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รองรับจ่ายบางส่วน
-      const remain = Math.max(0, sum - paidA);
-      const label  = mk==="9999-99" ? "ยังไม่ระบุวันจ่าย" : monthShortLabel(mk);
-      rowsC.push([label, lines.length, cash, credit, sum, paidA, remain, ...(U?[toUsd(sum,rate),toUsd(remain,rate)]:[])]);
-      tN+=lines.length; tCash+=cash; tCredit+=credit; tSum+=sum; tPaid+=paidA; tRemain+=remain;
-    });
-    const sumEnd = rowsC.length-1;
-    rowsC.push(["TOTAL", tN, tCash, tCredit, tSum, tPaid, tRemain, ...(U?[toUsd(tSum,rate),toUsd(tRemain,rate)]:[])]);
-    const sumTotal = rowsC.length-1;
-
-    // เว้นบรรทัดคั่นสองส่วน
-    rowsC.push([]); rowsC.push([]);
-
-    // ── ส่วนที่ 2: รายละเอียดแต่ละงวด (มีแถบหัวข้อของตัวเอง) ──
-    const detTitle = rowsC.length;
-    rowsC.push([`รายละเอียดแต่ละงวด — ${payLines.length} งวด (เรียงตามเดือนที่ต้องจ่าย)`]);
-    rowsC.push(["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","สถานะจ่าย",...(U?["ยอดต้องจ่าย (USD)"]:[])]);
-    const detHeader = rowsC.length-1, detStart = rowsC.length;
+    rowsC.push(U
+      ? ["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","ยอดต้องจ่าย (USD)","สถานะจ่าย"]
+      : ["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","สถานะจ่าย"]);
+    const detStart = rowsC.length;
     const sortedD = payLines.slice().sort((a,b)=>
       (monthKey(a).localeCompare(monthKey(b))) ||
       ((a.payDate||"9999").localeCompare(b.payDate||"9999")) ||
@@ -1467,24 +1517,38 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const mk = monthKey(l);
       const label = mk==="9999-99" ? "ยังไม่ระบุ" : monthShortLabel(mk);
       const incomingTxt = l.incoming ? `${l.incoming}${l.incomingType?` (${l.incomingType})`:""}` : "-";
-      rowsC.push([label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status], ...(U?[toUsd(l.amount,rate)]:[])]);
+      rowsC.push(U
+        ? [label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, toUsd(l.amount,rate), PAYMENT_LABEL[l.status]]
+        : [label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status]]);
       rowGroupsD.push(mk);
       grandD += l.amount;
     });
     const detEnd = rowsC.length-1;
-    rowsC.push(["","","","","","","","TOTAL", grandD, "", ...(U?[toUsd(grandD,rate)]:[])]);
+    rowsC.push(U
+      ? ["","","","","","","","TOTAL", grandD, toUsd(grandD,rate), ""]
+      : ["","","","","","","","TOTAL", grandD, ""]);
     const detTotal = rowsC.length-1;
-
     const wsC = XLSX.utils.aoa_to_sheet(rowsC);
-    // สไตล์ส่วนสรุปรายเดือน (หัวข้อหลัก + subtitle อยู่บนสุด)
-    styleSheet(wsC, { numCols:7+(U?2:0), titleRow:0, subRows:[1], headerRow:sumHeader, dataStart:sumStart, dataEnd:sumEnd, totalRow:sumTotal,
-      moneyCols:U?[2,3,4,5,6,7,8]:[2,3,4,5,6], centerCols:[1], theme });
-    // สไตล์ส่วนรายละเอียด (มีแถบหัวข้อของตัวเองที่ detTitle)
-    styleSheet(wsC, { numCols:10+(U?1:0), titleRow:detTitle, subRows:[], headerRow:detHeader, dataStart:detStart, dataEnd:detEnd, totalRow:detTotal,
-      moneyCols:U?[8,10]:[8], statusCols:[9], theme, rowGroups:rowGroupsD, groupDisplayCol:0 });
-    delete wsC["!freeze"];   // สองตารางในชีตเดียว ไม่ freeze
-    wsC["!cols"] = [{wch:18},{wch:16},{wch:22},{wch:16},{wch:14},{wch:30},{wch:16},{wch:20},{wch:18},{wch:16},...(U?[{wch:18}]:[])];
+    wsC["!cols"] = U
+      ? [{wch:18},{wch:16},{wch:22},{wch:16},{wch:14},{wch:30},{wch:16},{wch:20},{wch:18},{wch:18},{wch:16}]
+      : [{wch:18},{wch:16},{wch:22},{wch:16},{wch:14},{wch:30},{wch:16},{wch:20},{wch:18},{wch:16}];
+    styleSheet(wsC, { numCols:10+(U?1:0), subRows:[1], headerRow:3, dataStart:detStart, dataEnd:detEnd, totalRow:detTotal,
+      moneyCols:U?[8,9]:[8], usdCols:U?[9]:[], statusCols:U?[10]:[9], theme, rowGroups:rowGroupsD, groupDisplayCol:0 });
     XLSX.utils.book_append_sheet(wb, wsC, "แผนจ่าย");
+  }
+
+  // ลิงก์นำทางใต้ตารางหน้า Summary — คลิกเพื่อไปดูที่มาของตัวเลขในแต่ละชีต
+  {
+    const acctLinks = [
+      { text:"📦 PO Entries (รายการ PO)", sheet:"PO Entries" },
+      { text:"🏷 By Group (ตามกลุ่ม)", sheet:"By Group" },
+      ...(allMonths.length ? [{ text:"📅 รายเดือน", sheet:"รายเดือน" }] : []),
+      ...(payLines.length ? [{ text:"💰 แผนจ่าย", sheet:"แผนจ่าย" }] : []),
+    ];
+    const navR = totalRow1 + 2;
+    XLSX.utils.sheet_add_aoa(ws1, [["🔗 ไปที่ชีต (ไล่ที่มาของตัวเลข):"]], { origin:{ r:navR, c:0 } });
+    ws1[XLSX.utils.encode_cell({ r:navR, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+    xLinkRow(ws1, navR+1, acctLinks);
   }
 
   XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -5004,6 +5068,9 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [view, setView] = useState("dashboard");
+  const [viewHist, setViewHist] = useState([]);   // ประวัติแท็บที่ดูมาก่อน — ปุ่มกลับจะย้อนทีละหน้า
+  const goView = (v) => { if (v !== view) { setViewHist(h => [...h, view]); setView(v); } };
+  const backView = () => { if (viewHist.length) { const h = [...viewHist]; const prev = h.pop(); setViewHist(h); setView(prev); } else onBack(); };
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
   // ค้นหา + ตัวกรอง "เฉพาะที่มี PO" บนแท็บ Cash Flow
@@ -5194,12 +5261,12 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   };
 
   return (
-    <Shell role="accounting" color={T.green} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="accounting" color={T.green} project={project} onBack={backView} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
           {[["dashboard","📊 ภาพรวมงบ","ภาพรวม: งบประมาณ vs ที่ผูกพันแล้ว (PO) ทั้งโครงการ"],["dates","📅 ราย Acc. Code","รายหมวด: PO + วันของเข้า/วันครบกำหนดจ่าย + ยอดที่ต้องเก็บไว้จ่าย"],["plan","💰 แผนจ่ายรายเดือน","รายเดือน: เงินที่ต้องเตรียมจ่ายแยกตามเดือนครบกำหนด"]].map(([v,l,tip])=>(
-            <button key={v} onClick={()=>setView(v)} title={tip}
+            <button key={v} onClick={()=>goView(v)} title={tip}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
           <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
@@ -5219,7 +5286,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
 
         {/* 🔔 แจ้งเตือนยอดต้องจ่ายเดือนหน้า — เห็นทุกแท็บ กดแล้วไปหน้าแผนจ่าย */}
         {(dueThisMonth>0 || dueNextMonth>0) && (
-          <div onClick={()=>setView("plan")} title="ดูรายละเอียดในหน้าแผนจ่าย"
+          <div onClick={()=>goView("plan")} title="ดูรายละเอียดในหน้าแผนจ่าย"
             style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
               background:"linear-gradient(90deg,#fffbeb,#fff)",border:`1px solid ${T.amber}`,borderLeft:`5px solid ${T.amber}`,
               borderRadius:12,padding:"12px 16px",marginBottom:20}}>
