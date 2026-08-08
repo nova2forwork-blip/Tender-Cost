@@ -98,6 +98,77 @@ export const ss = async (key, value) => {
   }
 };
 
+// ── เขียนแบบกันชนกันหลายคน (optimistic-concurrency + 3-way merge) ────────────
+//  ปัญหาเดิม: ทั้ง PO/โครงการ เก็บเป็นก้อน JSON ก้อนเดียวต่อคีย์ → ถ้า 2 คนแก้
+//  พร้อมกัน คนบันทึกทีหลังจะทับงานคนแรกหายทั้งก้อน (last-writer-wins).
+//  วิธีแก้: ก่อนเขียน อ่านค่าล่าสุดบนเซิร์ฟเวอร์มาก่อน ถ้ามีคนแก้แทรกระหว่างทาง
+//  ให้ "รวมการแก้ของเรา" ลงบนของล่าสุด (แทนการทับทั้งก้อน) แล้วเขียนแบบมี guard
+//  ด้วย updated_at (ถ้ามีคนเขียนซ้อนอีกก็ลองใหม่). ชนิดข้อมูลที่รวมได้:
+//    • array ที่ทุกตัวมี id (PO, โครงการ, extra) → รวมตาม id
+//    • object ธรรมดา (tenders {code:val}, additions) → รวมตาม field
+//  ชนิดอื่น (เช่น array ของสตริง hidden) → เขียนทับตามเดิม (ไม่แย่ลงกว่าเก่า)
+const _sgRaw = async (key) => {
+  const { data, error } = await supabase
+    .from("kv_store").select("value, updated_at").eq("key", key).maybeSingle();
+  if (error) throw error;
+  return data || null; // { value:string, updated_at } | null
+};
+const _isObj  = (v) => v && typeof v === "object" && !Array.isArray(v);
+const _hasIds = (a) => Array.isArray(a) && a.length > 0 && a.every(x => x && typeof x === "object" && "id" in x);
+
+function _mergeById(base, prev, next) {
+  const nextMap = new Map(next.map(x => [x.id, x]));
+  const removed = new Set(prev.filter(x => !nextMap.has(x.id)).map(x => x.id)); // ตัวที่เราลบ
+  const out = [], seen = new Set();
+  for (const item of base) {
+    if (removed.has(item.id)) continue;                 // เราลบ → เอาออก
+    out.push(nextMap.has(item.id) ? nextMap.get(item.id) : item); // เราแก้→ของเรา / ไม่แตะ→คงไว้
+    seen.add(item.id);
+  }
+  for (const item of next) if (!seen.has(item.id)) out.push(item); // ตัวที่เราเพิ่มใหม่
+  return out;
+}
+function _mergeByKey(base, prev, next) {
+  const out = { ...base };
+  for (const k of Object.keys(prev)) if (!(k in next)) delete out[k];        // field ที่เราลบ
+  for (const k of Object.keys(next)) if (!(k in prev) || next[k] !== prev[k]) out[k] = next[k]; // เพิ่ม/แก้
+  return out;
+}
+
+export const ssMerge = async (key, prev, next, _tries = 0) => {
+  const cur = await _sgRaw(key);
+  let toWrite = next;
+  if (cur) {
+    let server = null;
+    try { server = JSON.parse(cur.value); } catch { server = null; }
+    if (server != null && JSON.stringify(server) !== JSON.stringify(prev)) {
+      // มีคนอื่นแก้ระหว่างที่เรากำลังแก้ → รวมแทนการทับ
+      if (_hasIds(server) && _hasIds(prev) && _hasIds(next))       toWrite = _mergeById(server, prev, next);
+      else if (_isObj(server) && _isObj(prev) && _isObj(next))     toWrite = _mergeByKey(server, prev, next);
+      else                                                          toWrite = next; // ชนิดไม่รู้จัก → LWW
+    }
+  }
+  const payload = { key, value: JSON.stringify(toWrite), updated_at: new Date().toISOString() };
+  if (cur) {
+    // อัปเดตเฉพาะถ้า updated_at ยังไม่เปลี่ยนจากที่เพิ่งอ่าน (กันเขียนซ้อน)
+    let q = supabase.from("kv_store").update(payload).eq("key", key);
+    if (cur.updated_at) q = q.eq("updated_at", cur.updated_at);
+    const { data, error } = await q.select("key");
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      if (_tries < 4) return ssMerge(key, prev, next, _tries + 1); // มีคนเขียนแทรก → ลองใหม่
+      const { error: e2 } = await supabase.from("kv_store").upsert(payload); // ยอมแพ้ → เขียนทับ
+      if (e2) throw e2;
+    }
+  } else {
+    const { error } = await supabase.from("kv_store").insert(payload);
+    if (error) {
+      if (_tries < 4) return ssMerge(key, prev, next, _tries + 1); // อาจมีคนเพิ่งสร้าง → ลองใหม่
+      throw error;
+    }
+  }
+};
+
 export const sd = async (key) => {
   try {
     const { error } = await supabase.from("kv_store").delete().eq("key", key);
