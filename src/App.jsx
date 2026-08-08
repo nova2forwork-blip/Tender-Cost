@@ -1991,6 +1991,7 @@ export default function App() {
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
     additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
     updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
+    onHome: () => setScreen("home"),   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
     syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
 
   return (
@@ -2886,7 +2887,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
 }
 
 // ─── Shell ────────────────────────────────────────────────────────────────────
-function Shell({ role, color, project, onBack, children, syncedAt, syncing, session, onLogout }) {
+function Shell({ role, color, project, onBack, onHome, children, syncedAt, syncing, session, onLogout }) {
   const labels = {qs:"QS · Quantity Surveyor",procurement:"จัดซื้อ · Procurement",accounting:"บัญชี · Accounting"};
   const gradients = {
     qs:          "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
@@ -2896,7 +2897,10 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
   return (
     <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
       <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-        <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <button onClick={onBack} title="กลับหน้าก่อนหน้า" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        {onHome && (
+          <button onClick={onHome} title="ไปหน้าเลือกโครงการ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>🏠 หน้าโครงการ</button>
+        )}
         <div style={{flex:1,minWidth:140}}>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
@@ -2925,8 +2929,11 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
+function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
+  const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
+  const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
+  const backTab = () => { if (tabHist.length) { const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); } else onBack(); };
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   // ปุ่ม "Export เดือนนี้" ของแท็บรายเดือน ถูกยกขึ้นมาไว้ข้างปุ่ม Export หลักด้านบน
   const monthlyExportRef = useRef(null);
@@ -2971,11 +2978,11 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   const handleRestoreAccount = (code) => saveHiddenAccounts(hiddenAccounts.filter(c => c !== code));
 
   return (
-    <Shell role="qs" color={T.blue} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="qs" color={T.blue} project={project} onBack={backTab} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"20px 28px 0"}}>
         <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
           {[["baseline","📐 ราคาเดิม (Baseline)"],["monthly","📅 รายการเพิ่มรายเดือน"]].map(([id,label])=>(
-            <button key={id} onClick={()=>setTab(id)}
+            <button key={id} onClick={()=>goTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
             </button>
@@ -4410,9 +4417,11 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
+function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
+  const [tabHist, setTabHist] = useState([]);   // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
+  const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
   const blankItem = () => ({ id:uid(), code:"", store:"", amount:"",
@@ -4555,6 +4564,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
   };
   const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
+  // ปุ่ม "กลับ" — ย้อนทีละชั้น: ฟอร์ม → ปิดฟอร์ม, รายละเอียด → ปิด, สลับแท็บ → ย้อนแท็บ,
+  // สุดทางแล้วค่อยออกไปหน้าก่อนหน้า (เลือกโครงการ/เลือกโรล)
+  const backNav = () => {
+    if (view === "add")       return closeForm();
+    if (detailId != null)     return closeDetail();
+    if (tabHist.length)       { const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); return; }
+    onBack();
+  };
   // กด Esc ระหว่างเปิดฟอร์มเพิ่ม/แก้ PO = ยกเลิก (ปิดฟอร์มโดยไม่บันทึก)
   useEffect(() => {
     if (view !== "add") return;
@@ -4583,12 +4600,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const sortedGroupCodes = Object.keys(groupedFiltered).sort();
 
   return (
-    <Shell role="procurement" color={T.amber} project={project} onBack={view==="add" ? closeForm : onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
             {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"]].map(([id,label])=>(
-              <button key={id} onClick={()=>setTab(id)}
+              <button key={id} onClick={()=>goTab(id)}
                 style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
                 {label}
               </button>
@@ -4607,7 +4624,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         </div>
 
         {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
-          <div onClick={()=>{ setTab("tracking"); setTrackingOnlyIssues(true); }}
+          <div onClick={()=>{ goTab("tracking"); setTrackingOnlyIssues(true); }}
             style={{background:T.redBg,border:`1.5px solid #fecaca`,borderRadius:12,padding:"12px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}>
             <span style={{fontSize:20}}>⚠️</span>
             <div style={{flex:1}}>
@@ -5103,7 +5120,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
+function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
   // บัญชี = อ่านอย่างเดียว (RLS ไม่ให้เขียน tcs-projects) → ปุ่มสกุลเงินจึงเป็นค่า
   // "ดูเฉพาะเครื่องนี้" ไม่บันทึกกลับไปที่โครงการร่วม กันไม่ให้บัญชีแก้ข้อมูลโครงการ
   const [curOverride, setCurOverride] = useState({});
@@ -5310,7 +5327,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   };
 
   return (
-    <Shell role="accounting" color={T.green} project={project} onBack={backView} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="accounting" color={T.green} project={project} onBack={backView} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
