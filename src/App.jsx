@@ -1146,58 +1146,10 @@ function exportProcurementExcel(project, poEntries) {
   delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
   dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
 
-  // Sheet 2 — status pipeline at a glance
-  const rows2 = [[`สรุปสถานะ PO — ${project.name}`], [], ["สถานะ","จำนวน PO","มูลค่ารวม (THB)",...(U?["มูลค่ารวม (USD)"]:[])]];
-  const dataStart2 = 3;
-  PO_STATUS.forEach(s => {
-    const list = poEntries.filter(p => p.status === s);
-    if (!list.length) return;
-    const t = list.reduce((sum,p)=>sum+poTotal(p),0);
-    rows2.push([s, list.length, t, ...(U?[toUsd(t,rate)]:[])]);
-  });
-  const dataEnd2 = rows2.length-1;
-  const grand2 = poEntries.reduce((s,p)=>s+poTotal(p),0);
-  rows2.push(["TOTAL", poEntries.length, grand2, ...(U?[toUsd(grand2,rate)]:[])]);
-  const totalRow2 = rows2.length-1;
-  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
-  ws2["!cols"] = [{wch:16},{wch:14},{wch:18},...(U?[{wch:18}]:[])];
-  styleSheet(ws2, { numCols:3+(U?1:0), headerRow:2, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2, moneyCols:U?[2,3]:[2], centerCols:[1], statusCols:[0], theme });
-  XLSX.utils.book_append_sheet(wb, ws2, "สรุปสถานะ");
-
-  // Sheet 3 — spend per month, broken down by material group, so trends
-  // (which group is driving spend each month) are visible at a glance
+  // แยกรายเดือนแบบละเอียด (หนึ่งชีตต่อเดือน) — เอา "สรุปสถานะ" และ "รายเดือน (สรุปกลุ่ม)" ออกแล้ว
   const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
   if (poMonths.length) {
-    const rows3 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-    rows3.push(["Group", ...poMonths.map(monthShortLabel), "รวมทั้งหมด", ...(U?["รวม (USD)"]:[])]);
-    const dataStart3 = rows3.length;
-    const monthTotals3 = poMonths.map(()=>0);
-    let grand3 = 0;
-    const rowGroups3 = [];
-    GROUPS.forEach(g => {
-      const codes = ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
-      const monthVals = poMonths.map(m =>
-        poEntries.filter(p => (p.date||"").slice(0,7) === m)
-          .reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0)
-      );
-      const total = monthVals.reduce((s,v)=>s+v,0);
-      if (total<=0) return;
-      rows3.push([g, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
-      rowGroups3.push(g);
-      monthVals.forEach((v,i)=>monthTotals3[i]+=v);
-      grand3 += total;
-    });
-    const dataEnd3 = rows3.length-1;
-    rows3.push(["TOTAL", ...monthTotals3, grand3, ...(U?[toUsd(grand3,rate)]:[])]);
-    const totalRow3 = rows3.length-1;
-    const numCols3 = 2 + poMonths.length + (U?1:0);
-    const ws3 = XLSX.utils.aoa_to_sheet(rows3);
-    ws3["!cols"] = [{wch:18}, ...poMonths.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
-    styleSheet(ws3, { numCols:numCols3, subRows:[1], headerRow:3, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3,
-      moneyCols:[...poMonths.map((_,i)=>1+i), 1+poMonths.length, ...(U?[2+poMonths.length]:[])], theme, rowGroups:rowGroups3, groupDisplayCol:0 });
-    XLSX.utils.book_append_sheet(wb, ws3, "รายเดือน (สรุปกลุ่ม)");
-
-    // Sheet 4+ — รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
+    // รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
     const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
     const usedNames = {};
     poMonths.forEach(m => {
@@ -2033,18 +1985,14 @@ export default function App() {
       )}
       {screen === "app" && effectiveRole === "qs"          && (
         <QSView {...sharedProps} onExport={() => runExport(() =>
-          // เปิดใช้ USD → ใช้ไฟล์ที่มีคอลัมน์ USD (ตัวสำรอง) เพื่อให้ข้อมูลตรงกับหน้าจอ
-          effRate(activeProject) > 0
-            ? Promise.resolve(exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts))
-            : exportQSRich(activeProject, tenderCosts, additions, extraItems, hiddenAccounts).catch(err => { console.warn("Rich export failed, ใช้ตัวสำรอง:", err); return exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts); })
+          // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
+          Promise.resolve(exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts))
         )} />
       )}
       {screen === "app" && effectiveRole === "procurement" && (
         <ProcurementView {...sharedProps} onExport={() => runExport(() =>
-          // เปิดใช้ USD → ใช้ไฟล์ที่มีคอลัมน์ USD (ตัวสำรอง) เพื่อให้ข้อมูลตรงกับหน้าจอ
-          effRate(activeProject) > 0
-            ? Promise.resolve(exportProcurementExcel(activeProject, poEntries))
-            : exportPORich(activeProject, poEntries).catch(err => { console.warn("Rich PO export failed, ใช้ตัวสำรอง:", err); return exportProcurementExcel(activeProject, poEntries); })
+          // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
+          Promise.resolve(exportProcurementExcel(activeProject, poEntries))
         )} />
       )}
       {screen === "app" && effectiveRole === "accounting"  && (
