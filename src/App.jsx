@@ -84,13 +84,19 @@ const GRP_COLORS  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"
 // ─── Incoming / Payment tracking status ────────────────────────────────────
 // A PO's incoming status is derived from its planned/actual dates rather than
 // stored directly, so it's always in sync with today's date.
-const todayStr = () => new Date().toISOString().slice(0,10);
-// "2026-07-31" + 30 -> "2026-08-30" — used to auto-suggest a payment due
-// date for credit-term POs (credit = pay 30 days after order date).
+// วันนี้ตาม "ปฏิทินท้องถิ่น" (ไม่ใช้ UTC เพื่อไม่ให้ข้ามวันตอนเช้ามืดในโซน UTC+7)
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+};
+// "2026-07-02" + 30 -> "2026-08-01" — คำนวณด้วย UTC ล้วนทั้งไปและกลับ กัน bug timezone
+// (ของเดิม parse เป็น local แต่อ่านกลับเป็น UTC ทำให้ในไทยคลาดไป 1 วันและตกเดือนผิด)
 const addDays = (dateStr, days) => {
   if (!dateStr) return "";
-  const d = new Date(dateStr+"T00:00:00");
-  d.setDate(d.getDate()+days);
+  const [y,m,dd] = String(dateStr).split("-").map(Number);
+  if (!y || !m || !dd) return "";
+  const d = new Date(Date.UTC(y, m-1, dd));
+  d.setUTCDate(d.getUTCDate()+days);
   return d.toISOString().slice(0,10);
 };
 
@@ -311,14 +317,17 @@ const deliveryStatus = (d) => {
 // PO-level incoming status by value received across all item rounds: fully
 // received once received ≥ ordered; "partial" once some (but not all) is in.
 const incomingStatus = (p) => {
-  const ordered = poTotal(p);
   const rounds = poRounds(p);
   if (!rounds.length) return "unset";
-  const received = rounds.filter(roundReceived).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+  // เช็ค "รับครบ" ต่อ item — ถ้ารับเกินใน item หนึ่งจะได้ไม่ไปกลบ item ที่ยังรับไม่ครบ
+  // (ก่อนหน้านี้เทียบยอดรวมกับ poTotal จึงล็อก PO เร็วเกินจริง)
+  const items = poItems(p).filter(it => itemOrdered(it) > 0);
+  const allReceived = items.length > 0 && items.every(it => itemReceived(it) >= itemOrdered(it) - 0.001);
+  const anyReceived = rounds.some(roundReceived);
   const anyLate  = rounds.some(r => !roundReceived(r) && r.planDate && r.planDate < todayStr());
-  if (ordered > 0 && received >= ordered - 0.001) return "received";
+  if (allReceived) return "received";
   if (anyLate) return "late";
-  if (received > 0) return "partial";
+  if (anyReceived) return "partial";
   if (rounds.some(r=>r.planDate)) return "pending";
   return "unset";
 };
@@ -328,9 +337,12 @@ const paymentStatus = (p) => {
   const rounds = poRounds(p);
   const recvRounds = rounds.filter(roundReceived);
   if (!recvRounds.length) return "unset";
-  const ordered = poTotal(p);
-  const paidAmt = recvRounds.filter(r=>roundPaid(p,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-  if (ordered > 0 && paidAmt >= ordered - 0.001) return "paid";
+  // จ่ายครบต่อ item: งวดที่ทั้งรับแล้วและถึงกำหนดจ่าย ต้องครอบคลุมยอด item ทุก item
+  // (กันไม่ให้ "จ่ายแล้ว" เกิดขึ้นทั้งที่บาง item ยังจ่ายไม่ครบ)
+  const items = poItems(p).filter(it => itemOrdered(it) > 0);
+  const itemPaid = (it) => (it.rounds||[]).filter(r => roundReceived(r) && roundPaid(p,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+  const allPaid = items.length > 0 && items.every(it => itemPaid(it) >= itemOrdered(it) - 0.001);
+  if (allPaid) return "paid";
   return "pending";
 };
 const INCOMING_LABEL = { received:"รับแล้ว", partial:"รับบางส่วน", late:"ของเข้าล่าช้า", pending:"รอของเข้า", unset:"ยังไม่กำหนด" };
@@ -1471,10 +1483,14 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       : ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม"]);
     const dataStart4 = rows4.length;
     const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
+    // "Committed" ต้องนิยามให้ตรงกับชีตอื่น: ผลรวมยอด item เฉพาะ code ที่อยู่ในผังบัญชี
+    // (ไม่ใช้ poTotal ทั้งใบ เพราะ PO อาจมี item ที่ code ไม่อยู่ในผัง ทำให้ยอดสะสมไม่ตรงกับ Sheet อื่น)
+    const acctCodeSet = new Set(accounts.map(a=>a.code));
+    const poCommitted = (p) => poItems(p).filter(it=>acctCodeSet.has(it.code)).reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
     let cumB = baselineTotal, cumC = 0;
     allMonths.forEach(m => {
       const addedThisMonth     = accounts.reduce((s,a)=>s+monthAddValue(additions, m, a.code),0);
-      const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0);
+      const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poCommitted(p),0);
       cumB += addedThisMonth;
       cumC += committedThisMonth;
       rows4.push(U
@@ -1680,9 +1696,15 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, async (payload) => {
         const key = payload.new?.key || payload.old?.key || "";
         setSyncing(true);
-        if (key === "tcs-projects") await fetchProjects();
-        else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}`)) await fetchProjectData(activeId);
-        setSyncedAt(new Date()); setSyncing(false);
+        try {
+          if (key === "tcs-projects") await fetchProjects();
+          else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}`)) await fetchProjectData(activeId);
+          setSyncedAt(new Date());
+        } catch (e) {
+          console.warn("sync realtime ล้มเหลว:", e);
+        } finally {
+          setSyncing(false); // กันสปินเนอร์ค้างเมื่อ fetch ล้มเหลว
+        }
       }).subscribe();
     return () => supabase.removeChannel(channel);
   }, [activeId, fetchProjects, fetchProjectData, session]);
@@ -1716,9 +1738,13 @@ export default function App() {
     label: undoRef.current.length ? undoRef.current[undoRef.current.length - 1].label : "",
   });
   // เขียนลงเซิร์ฟเวอร์ + ดัก error ให้แจ้งเตือน (เดิมล้มเหลวแบบเงียบ ๆ)
+  // เขียนลงเซิร์ฟเวอร์ พร้อมลองใหม่อัตโนมัติ 1 ครั้งเมื่อเน็ตสะดุดชั่วคราว
+  // ก่อนค่อยแจ้งเตือน (กันเซฟหลุดเพราะ blip เล็ก ๆ)
   const persist = (key, value) => ss(key, value)
     .then(() => { setSyncedAt(new Date()); setSyncError(""); })
-    .catch(e => { console.warn("บันทึกไม่สำเร็จ:", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); });
+    .catch(() => new Promise(res => setTimeout(res, 900)).then(() => ss(key, value))
+      .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+      .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); }));
   const commit = useCallback((key, next, prev, setState, label) => {
     undoRef.current.push({ key, value: prev, setState, label });
     if (undoRef.current.length > 60) undoRef.current.shift();
@@ -4068,7 +4094,10 @@ const evalMoney = (expr) => {
   const terms = cleaned.match(/[+-]?\d*\.?\d+/g);
   if (!terms) return "";
   const sum = terms.reduce((s, t) => s + (parseFloat(t) || 0), 0);
-  return isNaN(sum) ? "" : String(sum);
+  if (isNaN(sum)) return "";
+  // เงินติดลบไม่มีความหมาย (งบ/ยอด PO/ยอดรับ) — ยังพิมพ์สูตรลบได้ (เช่น 100-20=80)
+  // แต่ถ้าผลรวมออกมาติดลบ ให้เป็น 0 กันข้อมูลเสียหาย
+  return String(Math.max(0, sum));
 };
 const fmtMoneyInput = (v) => {
   if (v === "" || v == null || isNaN(Number(v))) return "";
@@ -5110,8 +5139,14 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
   const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
 
-  const groupData = GROUPS.map((g,i)=>{
-    const codes=ACCOUNTS.filter(a=>a.group===g).map(a=>a.code);
+  // รวม "งานเพิ่ม" (standalone extra) เข้าไปในกราฟตามกลุ่มด้วย ไม่งั้นยอดในกราฟ
+  // จะไม่ตรงกับการ์ดสรุป (ที่นับ topLevelCodes รวม extra) — และเคารพบัญชีที่ซ่อนไว้
+  const chartGroups = [...new Set([...GROUPS, ...extraItems.filter(e=>!e.parentCode).map(e=>e.group||"อื่น ๆ")])];
+  const groupData = chartGroups.map((g,i)=>{
+    const codes=[
+      ...ACCOUNTS.filter(a=>a.group===g && !hiddenAccounts.includes(a.code)).map(a=>a.code),
+      ...extraItems.filter(e=>!e.parentCode && (e.group||"อื่น ๆ")===g).map(e=>e.code),
+    ];
     const committed = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
     return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed,color:GRP_COLORS[i%GRP_COLORS.length]};
   }).filter(g=>g.budget>0||g.committed>0);
