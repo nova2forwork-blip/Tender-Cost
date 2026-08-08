@@ -2775,7 +2775,7 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
         </div>
       </div>
       {tab === "baseline"
-        ? <QSBaselineTab tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems}
+        ? <QSBaselineTab project={project} tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems}
                          onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
                          hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
@@ -2786,7 +2786,8 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
 }
 
 // ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
-function QSBaselineTab({ tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
+function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
+  const usdRate = parseFloat(project?.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
