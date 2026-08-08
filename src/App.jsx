@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, ss, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
+import { supabase, sg, ss, ssMerge, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -1737,36 +1737,41 @@ export default function App() {
     u: undoRef.current.length, r: redoRef.current.length,
     label: undoRef.current.length ? undoRef.current[undoRef.current.length - 1].label : "",
   });
-  // เขียนลงเซิร์ฟเวอร์ + ดัก error ให้แจ้งเตือน (เดิมล้มเหลวแบบเงียบ ๆ)
-  // เขียนลงเซิร์ฟเวอร์ พร้อมลองใหม่อัตโนมัติ 1 ครั้งเมื่อเน็ตสะดุดชั่วคราว
-  // ก่อนค่อยแจ้งเตือน (กันเซฟหลุดเพราะ blip เล็ก ๆ)
-  const persist = (key, value) => ss(key, value)
-    .then(() => { setSyncedAt(new Date()); setSyncError(""); })
-    .catch(() => new Promise(res => setTimeout(res, 900)).then(() => ss(key, value))
+  // เขียนลงเซิร์ฟเวอร์ พร้อมลองใหม่อัตโนมัติ 1 ครั้งเมื่อเน็ตสะดุดชั่วคราว ก่อนค่อย
+  // แจ้งเตือน (กันเซฟหลุดเพราะ blip เล็ก ๆ). ถ้าส่ง prev มาด้วย จะใช้ ssMerge เพื่อ
+  // "รวม" การแก้ของเราลงบนของล่าสุดบนเซิร์ฟเวอร์ (กันทับงานคนอื่นที่แก้พร้อมกัน).
+  const persist = (key, value, prev) => {
+    const attempt = () => (prev !== undefined ? ssMerge(key, prev, value) : ss(key, value));
+    return attempt()
       .then(() => { setSyncedAt(new Date()); setSyncError(""); })
-      .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); }));
+      .catch(() => new Promise(res => setTimeout(res, 900)).then(attempt)
+        .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+        .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); }));
+  };
   const commit = useCallback((key, next, prev, setState, label) => {
     undoRef.current.push({ key, value: prev, setState, label });
     if (undoRef.current.length > 60) undoRef.current.shift();
     redoRef.current = []; // มีการแก้ใหม่ → ล้าง redo
     setState(next);
-    persist(key, next);
+    persist(key, next, prev);
     syncUndo();
   }, []);
   const undo = useCallback(() => {
     const e = undoRef.current.pop();
     if (!e) return;
-    redoRef.current.push({ key: e.key, value: currentRef.current[e.key], setState: e.setState, label: e.label });
+    const cur = currentRef.current[e.key];
+    redoRef.current.push({ key: e.key, value: cur, setState: e.setState, label: e.label });
     e.setState(e.value);
-    persist(e.key, e.value);
+    persist(e.key, e.value, cur);
     syncUndo();
   }, []);
   const redo = useCallback(() => {
     const e = redoRef.current.pop();
     if (!e) return;
-    undoRef.current.push({ key: e.key, value: currentRef.current[e.key], setState: e.setState, label: e.label });
+    const cur = currentRef.current[e.key];
+    undoRef.current.push({ key: e.key, value: cur, setState: e.setState, label: e.label });
     e.setState(e.value);
-    persist(e.key, e.value);
+    persist(e.key, e.value, cur);
     syncUndo();
   }, []);
   // เปลี่ยนโครงการ "หรือ" เปลี่ยนหน้า → ล้างประวัติ undo (กันย้อนข้ามโครงการ/ข้ามบริบท)
@@ -2683,10 +2688,12 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
                 ⚙️ Admin
               </button>
             )}
-            <button className="btn-primary" onClick={()=>setNewProjModal(true)}
-              style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:16,lineHeight:1}}>+</span> โครงการใหม่
-            </button>
+            {session?.role !== "accounting" && (
+              <button className="btn-primary" onClick={()=>setNewProjModal(true)}
+                style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:16,lineHeight:1}}>+</span> โครงการใหม่
+              </button>
+            )}
             <div style={{width:1,alignSelf:"stretch",background:"rgba(255,255,255,0.2)"}}/>
             <div style={{textAlign:"right"}}>
               <div style={{fontSize:12,color:"#fff",fontWeight:600}}>{session?.name}</div>
@@ -2734,7 +2741,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
               <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ไม่พบโครงการที่ตรงกับ "{projSearch}"</div>
             ) : (
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
-                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={()=>deleteProject(p.id)} />)}
+                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={session?.role==="accounting" ? null : ()=>deleteProject(p.id)} />)}
               </div>
             )}
           </>
@@ -2787,8 +2794,10 @@ function ProjectCard({ project, onOpen, onDelete }) {
       <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:T.headerGrad,borderRadius:"16px 16px 0 0"}}/>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,paddingTop:2}}>
         <span style={{fontSize:10,letterSpacing:2,color:T.blue,fontWeight:700,textTransform:"uppercase"}}>PROJECT</span>
-        <button onClick={e=>{e.stopPropagation();onDelete();}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14,padding:4,borderRadius:6,transition:"color 0.15s"}}
-          onMouseEnter={e=>e.target.style.color="#ef4444"} onMouseLeave={e=>e.target.style.color=T.textMuted}>🗑</button>
+        {onDelete && (
+          <button onClick={e=>{e.stopPropagation();onDelete();}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14,padding:4,borderRadius:6,transition:"color 0.15s"}}
+            onMouseEnter={e=>e.target.style.color="#ef4444"} onMouseLeave={e=>e.target.style.color=T.textMuted}>🗑</button>
+        )}
       </div>
       <div style={{fontSize:18,fontWeight:700,color:T.textPrimary,marginBottom:4,lineHeight:1.3}}>{project.name}</div>
       {project.client && <div style={{fontSize:12,color:T.textSecondary,marginBottom:14}}>{project.client}</div>}
@@ -5095,7 +5104,12 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
 function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
-  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  // บัญชี = อ่านอย่างเดียว (RLS ไม่ให้เขียน tcs-projects) → ปุ่มสกุลเงินจึงเป็นค่า
+  // "ดูเฉพาะเครื่องนี้" ไม่บันทึกกลับไปที่โครงการร่วม กันไม่ให้บัญชีแก้ข้อมูลโครงการ
+  const [curOverride, setCurOverride] = useState({});
+  const curProject   = { ...project, ...curOverride };
+  const setCurrency  = (fields) => setCurOverride(o => ({ ...o, ...fields }));
+  const usdRate = effRate(curProject);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [view, setView] = useState("dashboard");
   const [viewHist, setViewHist] = useState([]);   // ประวัติแท็บที่ดูมาก่อน — ปุ่มกลับจะย้อนทีละหน้า
   const goView = (v) => { if (v !== view) { setViewHist(h => [...h, view]); setView(v); } };
@@ -5304,7 +5318,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
             <button key={v} onClick={()=>goView(v)} title={tip}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
-          <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+          <div style={{marginLeft:"auto"}}><CurrencyControl project={curProject} updateProject={setCurrency}/></div>
           <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
             ⬇️ Export Excel
           </button>
