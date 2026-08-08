@@ -1746,7 +1746,11 @@ export default function App() {
       const nums = []; const cells = new Set(); const cellData = [];
       document.querySelectorAll("table").forEach((tbl) => {
         const walker = document.createTreeWalker(tbl, NodeFilter.SHOW_TEXT, {
-          acceptNode(n){ return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; },
+          acceptNode(n){
+            // ข้ามตัวเลข USD (บรรทัด ≈ $ ใต้ยอดบาท) ไม่ให้ถูกนับ/รวมซ้ำกับบาท
+            if (n.parentElement && n.parentElement.closest(".usd-sub")) return NodeFilter.FILTER_REJECT;
+            return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          },
         });
         let node;
         while ((node = walker.nextNode())) {
@@ -2442,6 +2446,62 @@ function SearchInput({ value, onChange, placeholder, width = 240 }) {
   );
 }
 
+// ─── Group filter (multi-select dropdown) ─────────────────────────────────────
+// แทนแถวชิปหมวดยาว ๆ ที่รก — เป็นปุ่มเดียวเปิด dropdown ติ๊กเลือกได้หลายหมวด
+// selected = อาเรย์ของหมวดที่เลือก (ว่าง = ทุกหมวด)
+function GroupFilter({ selected, onChange, options = GROUPS, color = T.blue }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const toggle = (g) => onChange(selected.includes(g) ? selected.filter(x => x !== g) : [...selected, g]);
+  const has = selected.length > 0;
+  const label = !has ? "ทุกหมวด" : selected.length === 1 ? selected[0] : `${selected.length} หมวด`;
+  const rowStyle = (on) => ({ display:"flex",alignItems:"center",gap:8,width:"100%",textAlign:"left",border:"none",
+    background: on ? T.blueLight : "transparent", color: on ? color : T.textSecondary, cursor:"pointer",
+    padding:"7px 10px", borderRadius:8, fontSize:12.5, fontWeight: on ? 700 : 500 });
+  return (
+    <div ref={ref} style={{position:"relative",flexShrink:0}}>
+      <button onClick={()=>setOpen(o=>!o)} title="กรองตามหมวด (เลือกได้หลายหมวด)"
+        style={{display:"flex",alignItems:"center",gap:7,padding:"6px 12px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap",
+          border:`1.5px solid ${has?color:T.cardBorder}`, background: has?color:T.card, color: has?"#fff":T.textSecondary}}>
+        🏷 {label}
+        {has && <span style={{fontSize:11,opacity:0.85}}>({selected.length})</span>}
+        <span style={{fontSize:9,opacity:0.8}}>▼</span>
+      </button>
+      {open && (
+        <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:60,background:T.card,border:`1px solid ${T.cardBorder}`,
+          borderRadius:12,boxShadow:"0 10px 32px rgba(15,23,42,0.18)",padding:6,minWidth:210,maxHeight:340,overflowY:"auto"}}>
+          <button onClick={()=>{ onChange([]); }} style={rowStyle(!has)}>
+            <span style={{fontSize:13}}>{!has?"◉":"◯"}</span> ทุกหมวด
+          </button>
+          <div style={{height:1,background:T.cardBorder,margin:"4px 2px"}}/>
+          {options.map(g => {
+            const on = selected.includes(g);
+            return (
+              <button key={g} onClick={()=>toggle(g)} style={rowStyle(on)}>
+                <span style={{fontSize:13}}>{on?"☑":"☐"}</span> {g}
+              </button>
+            );
+          })}
+          {has && (
+            <>
+              <div style={{height:1,background:T.cardBorder,margin:"4px 2px"}}/>
+              <button onClick={()=>onChange([])} style={{...rowStyle(false),color:T.red,justifyContent:"center",fontWeight:600}}>
+                ✕ ล้างตัวเลือก
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── StatCard ─────────────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
   // ถ้าใส่ยอดบาท (thb) + อัตราแลกเปลี่ยน (rate = บาท/USD) จะโชว์ ≈ $ ควบคู่ให้
@@ -2464,7 +2524,7 @@ function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
 // คืน null ถ้าไม่ได้เปิดใช้อัตราแลกเปลี่ยน
 function usdLine(thb, rate) {
   if (!rate || rate <= 0 || typeof thb !== "number" || !isFinite(thb)) return null;
-  return <div style={{fontSize:12,color:T.green,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.2,marginTop:2}}>${fmt(thb/rate)}</div>;
+  return <div className="usd-sub" style={{fontSize:12,color:T.green,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.2,marginTop:2}}>${fmt(thb/rate)}</div>;
 }
 
 // อัตราแลกเปลี่ยนของโปรเจกต์ที่ควรใช้แสดงผล (0 = ปิด/ไม่แสดง $)
@@ -2850,7 +2910,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
 function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [draft,  setDraft]  = useState({...tenderCosts});
-  const [filter, setFilter] = useState("All");
+  const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
   const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (ราคาเดิม = 0)
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "value" | null
@@ -2915,7 +2975,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
 
   const q = search.toLowerCase();
   const filtered = allRows.filter(a => {
-    if (filter!=="All" && a.group!==filter) return false;
+    if (filter.length && !filter.includes(a.group)) return false;
     const selfMatch = a.name.toLowerCase().includes(q) || a.code.includes(search);
     const childMatch = !a.isExtra && childrenOf(a.code).some(k=>k.name.toLowerCase().includes(q));
     return selfMatch || childMatch;
@@ -3001,12 +3061,8 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
             border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
           {hideEmpty ? `✓ เฉพาะที่มีค่า${hiddenEmptyCount?` (ซ่อน ${hiddenEmptyCount})`:""}` : "⚡ เฉพาะที่มีค่า"}
         </button>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
-          {["All",...GROUPS].map(g=>(
-            <button key={g} onClick={()=>setFilter(g)}
-              style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
-          ))}
-        </div>
+        <GroupFilter selected={filter} onChange={setFilter}/>
+        <div style={{flex:1}}/>
         {hiddenList.length > 0 && (
           <button className="btn-ghost" onClick={()=>setShowHidden(v=>!v)} style={{color:T.textMuted}}>
             🗂 ที่ซ่อนไว้ ({hiddenList.length})
@@ -3216,6 +3272,21 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
   );
 }
 
+// ป้ายแกน X ของกราฟแนวโน้ม — เดือนที่เลือกอยู่จะเป็นชิปสีน้ำเงินเด่นชัด
+function MonthAxisTick({ x, y, payload, selectedLabel }) {
+  const sel = payload && payload.value === selectedLabel;
+  if (sel) {
+    const w = Math.max(52, String(payload.value).length * 8 + 20);
+    return (
+      <g transform={`translate(${x},${y})`}>
+        <rect x={-w/2} y={5} width={w} height={22} rx={11} fill={T.blue}/>
+        <text x={0} y={20} textAnchor="middle" fontSize={11} fontWeight={700} fill="#fff">{payload.value}</text>
+      </g>
+    );
+  }
+  return <text x={x} y={y} dy={17} textAnchor="middle" fontSize={11} fill={T.textMuted}>{payload && payload.value}</text>;
+}
+
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project, registerMonthExport }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
@@ -3223,7 +3294,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
   const [newMonth, setNewMonth] = useState("");
-  const [filter, setFilter] = useState("All");
+  const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
   const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (รวมสะสม = 0)
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "before" | "add" | "cum" | null
@@ -3345,6 +3416,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       return { label: monthShortLabel(m), monthKey: m, cumulative, previous: cumulative - added, added };
     }),
   ];
+  const selectedLabel = (chartData.find(e => e.monthKey === month) || {}).label;   // ป้ายเดือนที่กำลังเลือกอยู่บนกราฟ
 
   // "ราคาเดิม (Baseline)" should reflect the running total as of the month
   // BEFORE the one currently selected — not the fixed original baseline —
@@ -3354,7 +3426,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const baselineForMonth = baseTotal + priorMonths.reduce((s,m)=>s+monthTotalLive(m),0);
 
   const filtered = allRows.filter(r => {
-    if (filter!=="All" && r.group!==filter) return false;
+    if (filter.length && !filter.includes(r.group)) return false;
     const q = search.toLowerCase();
     const selfMatch = r.name.toLowerCase().includes(q) || r.code.includes(search);
     const childMatch = kidsAsOf(r.code, month).some(k=>k.name.toLowerCase().includes(q));
@@ -3510,28 +3582,36 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     <div style={{padding:"4px 28px 24px"}}>
       {/* Trend chart — the whole project's cost growth over time, at a glance */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6,flexWrap:"wrap",gap:6}}>
-          <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📈 แนวโน้มต้นทุนสะสม</span>
-          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📈 แนวโน้มต้นทุนสะสม</span>
+            {selectedLabel && (
+              <span style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11.5,fontWeight:700,color:"#fff",background:T.blue,padding:"3px 11px",borderRadius:99}}>
+                👁 กำลังดู: {selectedLabel}
+              </span>
+            )}
+          </div>
+          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b className="usd-sub" style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
         </div>
-        <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap",alignItems:"center"}}>
           <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.blue,display:"inline-block"}}/>ยอดก่อนหน้า (สะสม)</span>
           <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.amber,display:"inline-block"}}/>เพิ่มเดือนนี้</span>
+          <span style={{color:T.textMuted,fontSize:10.5}}>· คลิกที่แท่งเพื่อเลือกเดือน (แท่งที่จางคือเดือนอื่น)</span>
         </div>
-        <ResponsiveContainer width="100%" height={170}>
-          <BarChart data={chartData} margin={{top:8,right:8,left:-18,bottom:0}}
+        <ResponsiveContainer width="100%" height={280}>
+          <BarChart data={chartData} margin={{top:14,right:8,left:-14,bottom:6}} barCategoryGap="22%"
             onClick={(st)=>{ const mk = st && st.activePayload && st.activePayload[0] && st.activePayload[0].payload && st.activePayload[0].payload.monthKey; if (mk) setMonth(mk); }}
             style={{cursor:"pointer"}}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2f7"/>
-            <XAxis dataKey="label" tick={{fontSize:11,fill:T.textMuted}} axisLine={false} tickLine={false}/>
+            <XAxis dataKey="label" tick={<MonthAxisTick selectedLabel={selectedLabel}/>} height={34} axisLine={false} tickLine={false} interval={0}/>
             <YAxis tick={{fontSize:10,fill:T.textMuted}} axisLine={false} tickLine={false} tickFormatter={fmtK}/>
             <Tooltip cursor={{fill:"rgba(37,99,235,0.06)"}} formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
               contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
             <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" radius={[0,0,0,0]}>
-              {chartData.map((e,i)=><Cell key={i} fill={T.blue} stroke={e.monthKey===month?T.blueDark:"none"} strokeWidth={e.monthKey===month?2.5:0} cursor="pointer"/>)}
+              {chartData.map((e,i)=>{ const sel = e.monthKey===month; return <Cell key={i} fill={T.blue} fillOpacity={sel?1:0.3} stroke={sel?T.blueDark:"none"} strokeWidth={sel?3:0} cursor="pointer"/>; })}
             </Bar>
-            <Bar dataKey="added" stackId="cum" name="เพิ่มเดือนนี้" radius={[4,4,0,0]}>
-              {chartData.map((e,i)=><Cell key={i} fill={T.amber} stroke={e.monthKey===month?T.blueDark:"none"} strokeWidth={e.monthKey===month?2.5:0} cursor="pointer"/>)}
+            <Bar dataKey="added" stackId="cum" name="เพิ่มเดือนนี้" radius={[5,5,0,0]}>
+              {chartData.map((e,i)=>{ const sel = e.monthKey===month; return <Cell key={i} fill={T.amber} fillOpacity={sel?1:0.3} stroke={sel?T.blueDark:"none"} strokeWidth={sel?3:0} cursor="pointer"/>; })}
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -3591,12 +3671,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
           {hideEmpty ? `✓ เฉพาะที่มีค่า${hiddenEmptyCount?` (ซ่อน ${hiddenEmptyCount})`:""}` : "⚡ เฉพาะที่มีค่า"}
         </button>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap",flex:1}}>
-          {["All",...GROUPS].map(g=>(
-            <button key={g} onClick={()=>setFilter(g)}
-              style={{background:filter===g?T.blue:"transparent",border:`1.5px solid ${filter===g?T.blue:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===g?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{g}</button>
-          ))}
-        </div>
+        <GroupFilter selected={filter} onChange={setFilter}/>
+        <div style={{flex:1}}/>
         <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)} disabled={!editingUnlocked}
           style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ งานพิเศษ</button>
         {!editingUnlocked && (
@@ -4078,7 +4154,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
             <div><span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>{supplier.name||"—"}</span>
               {supplier.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{supplier.poNumber}</span>}</div>
-            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}{usdRate>0 && <span style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(poTotal(po)/usdRate)}</span>}</span>
+            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(poTotal(po)/usdRate)}</span>}</span>
           </div>
         </div>
 
@@ -4413,7 +4489,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const sortedGroupCodes = Object.keys(groupedFiltered).sort();
 
   return (
-    <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="procurement" color={T.amber} project={project} onBack={view==="add" ? closeForm : onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
@@ -4639,7 +4715,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                         <span style={{flex:1}}/>
                         <span style={{color:T.textMuted,fontSize:11}}>{rows.length} รายการ</span>
-                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
+                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
                       </div>
                       {!isCollapsed && (
                         <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
@@ -4710,7 +4786,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                 })}
                 <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
                   <span>{filtered.length} รายการทั้งหมด</span>
-                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
+                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
                 </div>
               </div>
             )}
