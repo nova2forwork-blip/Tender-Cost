@@ -2442,16 +2442,17 @@ function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
         {icon && <div style={{width:34,height:34,borderRadius:10,background:accent||T.blueLight,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{icon}</div>}
       </div>
       <div style={{fontSize:22,fontWeight:700,color:T.textPrimary,letterSpacing:"-0.5px",fontFamily:"'JetBrains Mono',monospace"}}>{value}</div>
-      {usd != null && <div style={{fontSize:12,color:T.green,fontWeight:600,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>≈ ${fmt0(usd)}</div>}
+      {usd != null && <div style={{fontSize:14,color:T.green,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",marginTop:3}}>≈ ${fmt0(usd)}</div>}
       {sub && <div style={{fontSize:11,color:T.textMuted,marginTop:5}}>{sub}</div>}
     </div>
   );
 }
 
-// แสดงบรรทัดเล็ก ๆ เป็นดอลลาร์ ($) ใต้ยอดบาทในตาราง — คืน null ถ้าไม่ได้เปิดใช้อัตราแลกเปลี่ยน
+// แสดงบรรทัดเป็นดอลลาร์ ($) ใต้ยอดบาทในตาราง — ขนาดราวครึ่งหนึ่งของบาท, ทศนิยม 2 ตำแหน่ง
+// คืน null ถ้าไม่ได้เปิดใช้อัตราแลกเปลี่ยน
 function usdLine(thb, rate) {
   if (!rate || rate <= 0 || typeof thb !== "number" || !isFinite(thb)) return null;
-  return <div style={{fontSize:10,color:T.green,fontWeight:600,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.15,marginTop:1}}>${fmt0(thb/rate)}</div>;
+  return <div style={{fontSize:12,color:T.green,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.2,marginTop:2}}>${fmt(thb/rate)}</div>;
 }
 
 // อัตราแลกเปลี่ยนของโปรเจกต์ที่ควรใช้แสดงผล (0 = ปิด/ไม่แสดง $)
@@ -2962,8 +2963,8 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
       {/* Stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
         <StatCard label="ราคาเดิมรวม (Tender Cost)" value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub="ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง" color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="เผื่อเศษ/สูญเสีย 3%" value={"฿"+fmt0(adj3)} sub="ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)" color={T.amber} icon="⚙️" accent={T.amberBg}/>
-        <StatCard label="รวมเผื่อ 3% (อ้างอิง)" value={"฿"+fmt0(total)} sub="ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label="เผื่อเศษ/สูญเสีย 3%" value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub="ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)" color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label="รวมเผื่อ 3% (อ้างอิง)" value={"฿"+fmt0(total)} thb={total} rate={usdRate} sub="ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม" color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       {/* Filters + Add row + Save */}
@@ -3470,7 +3471,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6,flexWrap:"wrap",gap:6}}>
           <span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>📈 แนวโน้มต้นทุนสะสม</span>
-          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b></span>
+          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
         </div>
         <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
           <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.blue,display:"inline-block"}}/>ยอดก่อนหน้า (สะสม)</span>
@@ -4036,7 +4037,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
             <div><span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>{supplier.name||"—"}</span>
               {supplier.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{supplier.poNumber}</span>}</div>
-            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}{usdRate>0 && <span style={{color:T.green,fontWeight:600,fontSize:11,marginLeft:6}}>≈ ${fmt0(poTotal(po)/usdRate)}</span>}</span>
+            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}{usdRate>0 && <span style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(poTotal(po)/usdRate)}</span>}</span>
           </div>
         </div>
 
@@ -4373,6 +4374,20 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   return (
     <Shell role="procurement" color={T.amber} project={project} onBack={onBack} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
+        {view!=="add" && (
+          <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
+            {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"]].map(([id,label])=>(
+              <button key={id} onClick={()=>setTab(id)}
+                style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                {label}
+              </button>
+            ))}
+            <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+            <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.amber,color:T.amber}}>
+              ⬇️ Export Excel
+            </button>
+          </div>
+        )}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
           <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
           <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
@@ -4394,21 +4409,6 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               <div style={{fontSize:11.5,color:"#b91c1c",marginTop:1}}>คลิกเพื่อดูรายละเอียดทั้งหมด</div>
             </div>
             <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>ดูรายการ →</span>
-          </div>
-        )}
-
-        {view!=="add" && (
-          <div style={{display:"flex",gap:8,marginBottom:16,alignItems:"center"}}>
-            {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"]].map(([id,label])=>(
-              <button key={id} onClick={()=>setTab(id)}
-                style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-                {label}
-              </button>
-            ))}
-            <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
-            <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.amber,color:T.amber}}>
-              ⬇️ Export Excel
-            </button>
           </div>
         )}
 
@@ -4598,7 +4598,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                         <span style={{flex:1}}/>
                         <span style={{color:T.textMuted,fontSize:11}}>{rows.length} รายการ</span>
-                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span style={{color:T.green,fontWeight:600,fontSize:11,marginLeft:6}}>≈ ${fmt0(groupTotal/usdRate)}</span>}</span>
+                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
                       </div>
                       {!isCollapsed && (
                         <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
@@ -4669,7 +4669,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                 })}
                 <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
                   <span>{filtered.length} รายการทั้งหมด</span>
-                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span style={{color:T.green,fontWeight:600,marginLeft:6}}>≈ ${fmt0(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
+                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
                 </div>
               </div>
             )}
@@ -5116,11 +5116,13 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
             <div style={{background:T.redBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
               <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>ครบกำหนดเดือนนี้ · {monthShortLabel(thisMonthKey)}</div>
               <div style={{fontSize:18,fontWeight:800,color:T.red,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueThisMonth)}</div>
+              {usdLine(dueThisMonth, usdRate)}
             </div>
             {/* เดือนหน้า */}
             <div style={{background:T.amberBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
               <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เตรียมเดือนหน้า · {monthShortLabel(nextMonthKey)}</div>
               <div style={{fontSize:18,fontWeight:800,color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueNextMonth)}</div>
+              {usdLine(dueNextMonth, usdRate)}
             </div>
             <div style={{flex:1}}/>
             <span style={{fontSize:12,color:T.amber,fontWeight:700,whiteSpace:"nowrap"}}>ดูแผนจ่าย →</span>
