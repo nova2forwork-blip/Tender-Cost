@@ -2448,6 +2448,44 @@ function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
   );
 }
 
+// แสดงบรรทัดเล็ก ๆ เป็นดอลลาร์ ($) ใต้ยอดบาทในตาราง — คืน null ถ้าไม่ได้เปิดใช้อัตราแลกเปลี่ยน
+function usdLine(thb, rate) {
+  if (!rate || rate <= 0 || typeof thb !== "number" || !isFinite(thb)) return null;
+  return <div style={{fontSize:10,color:T.green,fontWeight:600,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.15,marginTop:1}}>${fmt0(thb/rate)}</div>;
+}
+
+// อัตราแลกเปลี่ยนของโปรเจกต์ที่ควรใช้แสดงผล (0 = ปิด/ไม่แสดง $)
+function effRate(project) {
+  return (project?.showUsd !== false) ? (parseFloat(project?.usdRate) || 0) : 0;
+}
+
+// ตัวควบคุมค่าเงิน: สลับเปิด-ปิดการแสดง $ + แก้ไขอัตราแลกเปลี่ยนได้ (วางข้างปุ่ม Export)
+function CurrencyControl({ project, updateProject }) {
+  const on = project?.showUsd !== false;   // ค่าเริ่มต้น: เปิด
+  const [txt, setTxt] = useState(project?.usdRate ?? "");
+  useEffect(() => { setTxt(project?.usdRate ?? ""); }, [project?.usdRate]);
+  const commitRate = () => {
+    const v = String(txt).trim();
+    if (v !== String(project?.usdRate ?? "")) updateProject({ usdRate: v });
+  };
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",border:`1px solid ${T.cardBorder}`,borderRadius:10,background:T.card}}>
+      <button onClick={()=>updateProject({ showUsd: !on })} title="เปิด/ปิดการแสดงเป็นดอลลาร์ ($)"
+        style={{display:"flex",alignItems:"center",gap:6,border:"none",background:"transparent",cursor:"pointer",padding:0}}>
+        <span style={{width:34,height:18,borderRadius:99,background:on?T.green:"#cbd5e1",position:"relative",transition:"all .15s",display:"inline-block",flexShrink:0}}>
+          <span style={{position:"absolute",top:2,left:on?18:2,width:14,height:14,borderRadius:99,background:"#fff",transition:"all .15s"}}/>
+        </span>
+        <span style={{fontSize:12,fontWeight:700,color:on?T.green:T.textMuted}}>USD</span>
+      </button>
+      <span style={{fontSize:11,color:T.textMuted,whiteSpace:"nowrap"}}>฿/$</span>
+      <input type="number" step="any" min="0" value={txt} placeholder="อัตรา"
+        onChange={e=>setTxt(e.target.value)} onBlur={commitRate}
+        onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); }}
+        style={{width:64,fontSize:12,padding:"4px 6px",border:`1px solid ${T.cardBorder}`,borderRadius:7,fontFamily:"'JetBrains Mono',monospace",textAlign:"right"}}/>
+    </div>
+  );
+}
+
 // ─── Home Screen ──────────────────────────────────────────────────────────────
 function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
   const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
@@ -2717,9 +2755,9 @@ function Shell({ role, color, project, onBack, children, syncedAt, syncing, sess
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
+function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
-  const usdRate = parseFloat(project?.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
 
   // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
   // and kept in sync with tenderCosts + every month's additions on delete.
@@ -2769,7 +2807,8 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
               {label}
             </button>
           ))}
-          <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.blue,color:T.blue}}>
+          <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+          <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.blue,color:T.blue}}>
             ⬇️ Export Excel
           </button>
         </div>
@@ -2787,7 +2826,7 @@ function QSView({ project, tenderCosts, saveTenders, additions, saveAdditions, e
 
 // ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
 function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
-  const usdRate = parseFloat(project?.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
@@ -3062,12 +3101,13 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                       {hasKids ? (
                         <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.blueLight,borderRadius:8,color:T.blue,fontWeight:700,fontSize:13}}>
                           {fmt(rowVal)}
+                          {usdLine(rowVal, usdRate)}
                         </div>
                       ) : editingUnlocked ? (
                         <MoneyInput value={draft[a.code]??""} onChange={v=>setDraft(d=>({...d,[a.code]:v}))}
                           style={{width:160,background:(parseFloat(draft[a.code])||0)>0?T.blueLight:T.bg}}/>
                       ) : (
-                        <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}</div>
+                        <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}{usdLine(rowVal, usdRate)}</div>
                       )}
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
@@ -3097,7 +3137,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                           <MoneyInput value={draft[k.code]??""} onChange={v=>setDraft(d=>({...d,[k.code]:v}))}
                             style={{width:160,fontSize:12,background:(parseFloat(draft[k.code])||0)>0?T.greenBg:T.bg}}/>
                         ) : (
-                          <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}</div>
+                          <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}{usdLine(parseFloat(draft[k.code])||0, usdRate)}</div>
                         )}
                       </td>
                       <td style={{padding:"6px 16px",textAlign:"center"}}>
@@ -3133,6 +3173,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
               <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,a)=>s+effectiveValue(a),0))}
+                {usdLine(filtered.reduce((s,a)=>s+effectiveValue(a),0), usdRate)}
               </td>
               <td/>
             </tr>
@@ -3145,7 +3186,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project }) {
-  const usdRate = parseFloat(project?.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const thisMonth = new Date().toISOString().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
@@ -3685,13 +3726,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         </button>
                       )}
                     </td>
-                    <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}</td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                     {isMultiCol ? (
                       hasKids ? (
                         <td colSpan={columns.length} style={{padding:"8px 16px",textAlign:"right"}}>
                           <div style={{width:"100%",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:700,fontSize:13}}>
                             {fmt(thisVal)}
+                            {usdLine(thisVal, usdRate)}
                           </div>
                         </td>
                       ) : columns.map(c=>{
@@ -3703,7 +3745,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                               <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
                                 style={{width:104,fontSize:12,background:cv!==0?T.amberBg:T.bg}}/>
                             ) : (
-                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:cv!==0?T.textPrimary:T.textMuted}}>{fmt(cv)}</div>
+                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:cv!==0?T.textPrimary:T.textMuted}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
                             )}
                           </td>
                         );
@@ -3713,17 +3755,18 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         {hasKids ? (
                           <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:700,fontSize:13}}>
                             {fmt(thisVal)}
+                            {usdLine(thisVal, usdRate)}
                           </div>
                         ) : editingUnlocked ? (
                           <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
                             style={{width:130,background:thisVal!==0?T.amberBg:T.bg}}/>
                         ) : (
-                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:thisVal!==0?T.textPrimary:T.textMuted}}>{fmt(thisVal)}</div>
+                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:thisVal!==0?T.textPrimary:T.textMuted}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
                         )}
                       </td>
                     )}
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
-                    <td style={{padding:"8px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cum)}</td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(cum)}{usdLine(cum, usdRate)}</td>
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
                       {r.isExtra && editingUnlocked && (
                         <button onClick={(e)=>{e.stopPropagation(); handleDeleteExtra(r.code);}} title="ลบรายการงานเพิ่ม"
@@ -3760,18 +3803,18 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             )
                           )}
                         </td>
-                        <td style={{padding:"7px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12.5}}>{fmt(kCumBefore)}</td>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12.5}}>{fmt(kCumBefore)}{usdLine(kCumBefore, usdRate)}</td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                         <td style={{padding:"7px 16px",textAlign:"right"}}>
                           {editingUnlocked ? (
                             <MoneyInput value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
                               style={{width:130,fontSize:12.5,background:kThisVal!==0?T.greenBg:T.bg}}/>
                           ) : (
-                            <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12.5,color:kThisVal!==0?T.textPrimary:T.textMuted}}>{fmt(kThisVal)}</div>
+                            <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:12.5,color:kThisVal!==0?T.textPrimary:T.textMuted}}>{fmt(kThisVal)}{usdLine(kThisVal, usdRate)}</div>
                           )}
                         </td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
-                        <td style={{padding:"7px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:12.5}}>{fmt(kCum)}</td>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:12.5}}>{fmt(kCum)}{usdLine(kCum, usdRate)}</td>
                         <td style={{padding:"7px 16px",textAlign:"center"}}>
                           {editingUnlocked && (
                             <button onClick={()=>handleDeleteExtra(k.code)} title="ลบรายการย่อยนี้"
@@ -3810,23 +3853,27 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{filtered.length} รายการ</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
+                {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r),0), usdRate)}
               </td>
               <td/>
               {isMultiCol
-                ? columns.map(c => (
+                ? columns.map(c => { const ct = filtered.reduce((s,r)=> s + (parseFloat(draftAdd[`${r.code}:${c.id}`])||0), 0); return (
                     <td key={c.id} style={{padding:"12px 12px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:12.5,whiteSpace:"nowrap"}}>
-                      {fmt(filtered.reduce((s,r)=> s + (parseFloat(draftAdd[`${r.code}:${c.id}`])||0), 0))}
+                      {fmt(ct)}
+                      {usdLine(ct, usdRate)}
                     </td>
-                  ))
+                  ); })
                 : (
                     <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>
                       {fmt(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0))}
+                      {usdLine(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0), usdRate)}
                     </td>
                   )
               }
               <td/>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0))}
+                {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0), usdRate)}
               </td>
               <td/>
             </tr>
@@ -3881,7 +3928,7 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
 // Read-only detail view opened by clicking any PO row. Lets the user confirm
 // exactly what was entered without hunting through a wide table, and offers
 // Edit / Delete from the same place.
-function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session }) {
+function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
   // กด Esc = ปิด/ยกเลิกหน้ารายละเอียด
@@ -3989,7 +4036,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
             <div><span style={{fontSize:13,fontWeight:700,color:T.textPrimary}}>{supplier.name||"—"}</span>
               {supplier.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{supplier.poNumber}</span>}</div>
-            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}</span>
+            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{fmt(poTotal(po))}{usdRate>0 && <span style={{color:T.green,fontWeight:600,fontSize:11,marginLeft:6}}>≈ ${fmt0(poTotal(po)/usdRate)}</span>}</span>
           </div>
         </div>
 
@@ -4152,8 +4199,8 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
-  const usdRate = parseFloat(project.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
+function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
@@ -4358,7 +4405,8 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 {label}
               </button>
             ))}
-            <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.amber,color:T.amber}}>
+            <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+            <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.amber,color:T.amber}}>
               ⬇️ Export Excel
             </button>
           </div>
@@ -4504,7 +4552,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
           </div>
         ) : tab==="tracking" ? (
           <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={()=>setView("add")}
-            onStatusChange={changeStatus} session={session}
+            onStatusChange={changeStatus} session={session} usdRate={usdRate}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : (
           <>
@@ -4550,7 +4598,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                         <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                         <span style={{flex:1}}/>
                         <span style={{color:T.textMuted,fontSize:11}}>{rows.length} รายการ</span>
-                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}</span>
+                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span style={{color:T.green,fontWeight:600,fontSize:11,marginLeft:6}}>≈ ${fmt0(groupTotal/usdRate)}</span>}</span>
                       </div>
                       {!isCollapsed && (
                         <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
@@ -4578,6 +4626,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                                 <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
                                 <td style={{padding:"10px 16px",textAlign:"right"}}>
                                   <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+                                  {usdLine(parseFloat(item.amount)||0, usdRate)}
                                   {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>จาก {poItems(p).length} รหัส · รวม {fmt(poTotal(p))}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
@@ -4620,14 +4669,14 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                 })}
                 <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
                   <span>{filtered.length} รายการทั้งหมด</span>
-                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}</span>
+                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span style={{color:T.green,fontWeight:600,marginLeft:6}}>≈ ${fmt0(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
                 </div>
               </div>
             )}
           </>
         )}
       </div>
-      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} />
+      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
     </Shell>
   );
 }
@@ -4635,7 +4684,7 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
 // ─── Procurement: Incoming / Payment Tracking tab ─────────────────────────────
 // Groups every PO by its Account Code so the team can see, at a glance and per
 // cost line, which deliveries and payments are on track vs. overdue.
-function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session }) {
+function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0 }) {
   const [search, setSearch] = useState("");
   // Which Account-Code groups are collapsed — lets a busy board with many
   // PO rows be tidied away group by group instead of scrolling forever.
@@ -4788,6 +4837,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                           <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
                           <td style={{padding:"9px 16px",textAlign:"right"}}>
                             <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+                            {usdLine(parseFloat(item.amount)||0, usdRate)}
                             {splitAcrossCodes && <div style={{fontSize:10,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
                           </td>
                           <td style={{padding:"9px 16px",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
@@ -4838,8 +4888,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
-  const usdRate = parseFloat(project.usdRate)||0;  // อัตราแลกเปลี่ยน บาท/USD (ต่อโปรเจกต์)
+function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [view, setView] = useState("dashboard");
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
@@ -5039,7 +5089,8 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
             <button key={v} onClick={()=>setView(v)} title={tip}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
-          <button onClick={onExport} className="btn-ghost" style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
+          <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+          <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
             ⬇️ Export Excel
           </button>
         </div>
@@ -5175,10 +5226,11 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                       <td style={{padding:"10px 16px"}}>
                         <span style={{background:T.blueLight,color:T.blue,fontSize:10,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
                       </td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}</td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?700:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.budget<=0&&a.committed>0?T.textMuted:variance<0?T.red:T.textSecondary,fontWeight:a.budget<=0&&a.committed>0?500:variance<0?700:500}}>
                         {a.budget<=0&&a.committed>0 ? "ไม่มีงบ" : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
+                        {(a.budget>0||a.committed>0)&&!(a.budget<=0&&a.committed>0)&&usdLine(Math.abs(variance), usdRate)}
                       </td>
                     </tr>
                   );
@@ -5187,13 +5239,14 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
               <tfoot>
                 <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
                   <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:12}}>{accountData.length} รายการ</td>
-                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}</td>
-                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.amber,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}</td>
+                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}{usdLine(accountData.reduce((s,a)=>s+a.budget,0), usdRate)}</td>
+                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.amber,fontWeight:700,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}{usdLine(accountData.reduce((s,a)=>s+a.committed,0), usdRate)}</td>
                   {(() => {
                     const totalVariance = accountData.reduce((s,a)=>s+(a.budget-a.committed),0);
                     return (
                       <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:totalVariance<0?T.red:T.textSecondary,fontWeight:700,fontSize:14}}>
                         {totalVariance<0?"-":""}{fmt(Math.abs(totalVariance))}
+                        {usdLine(Math.abs(totalVariance), usdRate)}
                       </td>
                     );
                   })()}
@@ -5275,14 +5328,17 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                           <div style={{minWidth:96}}>
                             <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>มูลค่า PO</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
+                            {a.committed>0&&usdLine(a.committed, usdRate)}
                           </div>
                           <div style={{minWidth:96}}>
                             <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>จ่ายแล้ว</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.green}}>{a.paid>0?fmt(a.paid):"—"}</div>
+                            {a.paid>0&&usdLine(a.paid, usdRate)}
                           </div>
                           <div style={{minWidth:96}}>
                             <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>ต้องเก็บไว้จ่าย</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:a.toReserve>0?T.amber:T.green}}>{a.committed>0?fmt(a.toReserve):"—"}</div>
+                            {a.committed>0&&usdLine(a.toReserve, usdRate)}
                           </div>
                         </div>
                         {/* งบประมาณ / ส่วนต่าง (ข้อมูลงบ ไว้ท้ายสุด) */}
@@ -5312,7 +5368,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                                   <td style={{padding:"9px 16px"}}><DateCell value={p.date}/></td>
                                   <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
                                   <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{poNumbersLabel(p)}</td>
-                                  <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}</td>
+                                  <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}{usdLine(parseFloat(item.amount)||0, usdRate)}</td>
                                   <td style={{padding:"9px 16px"}}><DeliveryDates po={p}/></td>
                                   <td style={{padding:"9px 16px"}}><DateCell value={poNextDueDate(p)} lateTint={false}/></td>
                                   <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
@@ -5365,18 +5421,22 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                         <div style={{textAlign:"right",minWidth:88}}>
                           <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เงินสด</div>
                           <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.green}}>{m.cash>0?fmt(m.cash):"—"}</div>
+                          {m.cash>0&&usdLine(m.cash, usdRate)}
                         </div>
                         <div style={{textAlign:"right",minWidth:88}}>
                           <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เครดิต</div>
                           <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{m.credit>0?fmt(m.credit):"—"}</div>
+                          {m.credit>0&&usdLine(m.credit, usdRate)}
                         </div>
                         <div style={{textAlign:"right",minWidth:100}}>
                           <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>รวมต้องจ่าย</div>
                           <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:T.textPrimary}}>{fmt(m.sum)}</div>
+                          {usdLine(m.sum, usdRate)}
                         </div>
                         <div style={{textAlign:"right",minWidth:100}}>
                           <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>คงเหลือ</div>
                           <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:m.remain>0?T.amber:T.green}}>{fmt(m.remain)}</div>
+                          {usdLine(m.remain, usdRate)}
                         </div>
                       </div>
                       {!isCollapsed && (
@@ -5402,7 +5462,7 @@ function AccountingView({ project, tenderCosts, additions, poEntries, onBack, on
                                   <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{l.incoming||"—"}</span>
                                   {l.incomingType && <span style={{marginLeft:5,fontSize:10,color:T.textMuted}}>({l.incomingType})</span>}
                                 </td>
-                                <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(l.amount)}</td>
+                                <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(l.amount)}{usdLine(l.amount, usdRate)}</td>
                                 <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[l.status]} clr={PAYMENT_CLR[l.status]} bg={PAYMENT_BG[l.status]}/></td>
                               </tr>
                             ))}
