@@ -4374,17 +4374,21 @@ function ProcurementView({ project, tenderCosts, additions, poEntries, savePO, o
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
                         <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>% ของยอดสั่ง (กรอกเอง)</span>
-                        <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)}
-                          className="input-base" style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}/>
+                        <div style={{position:"relative",display:"flex",alignItems:"center"}}>
+                          <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)}
+                            className="input-base" style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",flex:1,paddingRight:26}}/>
+                          <span style={{position:"absolute",right:11,fontSize:13,color:(it.pct??"")!==""?T.textPrimary:T.textMuted,fontWeight:600,pointerEvents:"none"}}>%</span>
+                        </div>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
                         <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>แผนของเข้า (งวดแรก)</span>
                         <input type="date" value={it.rounds?.[0]?.planDate||""} onChange={e=>updateItemPlan(it.id,"planDate",e.target.value)} className="input-base"/>
                       </label>
                     </div>
-                    {it.code && net>0 && amt>0 && (
+                    {it.code && ((it.pct??"")!=="" || amt>0) && (
                       <div style={{marginTop:10,fontSize:11,color:T.textSecondary}}>
-                        สั่งสะสมกับ PO นี้รวม <b style={{color:cumPct>100?T.red:T.textPrimary}}>{cumPct}%</b> ของยอดสั่งสุทธิ · <span style={{color:T.textMuted}}>= {budget>0?Math.round(amt/budget*100):0}% ของงบรวม</span>
+                        % ของยอดสั่ง PO นี้: <b style={{color:(parseFloat(it.pct)||0)>100?T.red:T.textPrimary,fontSize:12}}>{(it.pct??"")!=="" ? `${it.pct}%` : "—"}</b> <span style={{color:T.textMuted}}>(ที่กรอกเอง)</span>
+                        {amt>0 && <span style={{color:T.textMuted}}> · ยอดจริง {fmt(amt)} = {budget>0?Math.round(amt/budget*100):0}% ของงบรวม</span>}
                       </div>
                     )}
                   </div>
