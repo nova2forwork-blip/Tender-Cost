@@ -1621,7 +1621,7 @@ export default function App() {
   const [additions,   setAdditions]  = useState({});
   const [extraItems,  setExtraItems] = useState([]);
   const [hiddenAccounts, setHiddenAccounts] = useState([]); // codes of fixed Acc. Codes QS has removed for this project
-  const [incomingPlan, setIncomingPlan] = useState({}); // แผนของเข้าทั้งโปรเจค (จัดซื้อวางแผนก่อนออก PO): { code: { "YYYY-MM": amount } }
+  const [incomingPlan, setIncomingPlan] = useState([]); // แผนของเข้าทั้งโปรเจค (จัดซื้อวางแผนก่อนออก PO): [{ id, date, items:[{id,code,amount}] }]
   const [poEntries,   setPO]    = useState([]);
   const [loaded,   setLoaded]   = useState(false);
   const [newProjModal, setNewProjModal] = useState(false);
@@ -1671,7 +1671,7 @@ export default function App() {
     setAdditions(ad || {});
     setExtraItems(ex || []);
     setHiddenAccounts(hid || []);
-    setIncomingPlan(inp || {});
+    setIncomingPlan(Array.isArray(inp) ? inp : []);
   }, []);
 
   const fetchProjects = useCallback(async () => {
@@ -4426,88 +4426,104 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 }
 
 // ─── จัดซื้อ: แผนของเข้าทั้งโปรเจค (วางแผนก่อนออก PO) ───────────────────────────
-//  กริด Acc. Code × เดือน ให้จัดซื้อกรอกยอดที่คาดว่าของจะเข้าต่อเดือน ล่วงหน้าทั้ง
-//  โปรเจค แล้วค่อยไปอัปเดต PO ซื้อจริงทีหลัง. ข้อมูลนี้ไปโชว์เป็น "Incoming Plan"
-//  ในตารางรวมของบัญชี (เทียบกับ Actual Received ที่มาจากการรับจริงใน PO).
-function IncomingPlanTab({ incomingPlan, saveIncomingPlan, extraItems, hiddenAccounts }) {
+//  รายการ "แผนของเข้า" — แต่ละแผน = วันที่แผนของเข้า + หลายบรรทัด (Acc code + ยอด).
+//  ยังไม่ใช่ PO จริง (ยังไม่รับของ). กด "สร้าง PO จริง" เพื่อเปิดฟอร์ม PO ที่เติม
+//  ข้อมูลจากแผนไว้ให้ — พอบันทึก PO แล้วแผนจะถูกย้ายออก. ข้อมูลนี้โชว์เป็น Incoming
+//  Plan (สีแดง) ในตารางรวมของบัญชี.
+function IncomingPlanTab({ incomingPlan, saveIncomingPlan, extraItems, hiddenAccounts, onConvert }) {
+  const plans = Array.isArray(incomingPlan) ? incomingPlan : [];
   const accounts = exportAccountList(extraItems, hiddenAccounts);
-  const dataMonths = [...new Set(Object.values(incomingPlan || {}).flatMap(m => Object.keys(m || {})))];
-  const [months, setMonths] = useState(() => [...new Set(dataMonths)].sort());
-  const [newMonth, setNewMonth] = useState("");
-  const displayMonths = [...new Set([...months, ...dataMonths])].sort();
-  const lbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
+  const nameOf = (code) => accounts.find(a => a.code === code)?.name || "";
+  const [modal, setModal] = useState(null); // { id?, date, items:[{id,code,amount}] } | null
 
-  const setCell = (code, mk, val) => {
-    const next = { ...(incomingPlan || {}) };
-    const m = { ...(next[code] || {}) };
-    const num = parseFloat(val) || 0;
-    if (num > 0) m[mk] = num; else delete m[mk];
-    if (Object.keys(m).length) next[code] = m; else delete next[code];
-    saveIncomingPlan(next);
+  const blankLine = () => ({ id: uid(), code: "", amount: "" });
+  const openNew = () => setModal({ date: "", items: [blankLine()] });
+  const openEdit = (pl) => setModal({ id: pl.id, date: pl.date || "", items: (pl.items || []).map(it => ({ id: it.id || uid(), code: it.code, amount: it.amount })) });
+  const planTotal = (pl) => (pl.items || []).reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
+
+  const saveModal = () => {
+    if (!modal.date) { alert("เลือกวันที่แผนของเข้าก่อน"); return; }
+    const items = (modal.items || []).filter(it => it.code && (parseFloat(it.amount) || 0) > 0).map(it => ({ id: it.id || uid(), code: it.code, amount: it.amount }));
+    if (!items.length) { alert("กรอก Acc code และยอดอย่างน้อย 1 บรรทัด"); return; }
+    const entry = { id: modal.id || uid(), date: modal.date, items };
+    saveIncomingPlan(modal.id ? plans.map(pl => pl.id === modal.id ? entry : pl) : [...plans, entry]);
+    setModal(null);
   };
-  const addMonth = () => { if (!newMonth) return; setMonths(ms => [...new Set([...ms, newMonth])].sort()); setNewMonth(""); };
-  const removeMonth = (mk) => {
-    if (!window.confirm(`ลบคอลัมน์เดือน ${lbl(mk)} ? (ยอดแผนของเข้าทุก Acc code ในเดือนนี้จะถูกลบ)`)) return;
-    const next = {};
-    Object.entries(incomingPlan || {}).forEach(([c, mm]) => { const o = { ...mm }; delete o[mk]; if (Object.keys(o).length) next[c] = o; });
-    saveIncomingPlan(next);
-    setMonths(ms => ms.filter(x => x !== mk));
-  };
-  const colTot = (mk) => accounts.reduce((s, a) => s + (parseFloat(incomingPlan?.[a.code]?.[mk]) || 0), 0);
-  const rowTot = (code) => displayMonths.reduce((s, mk) => s + (parseFloat(incomingPlan?.[code]?.[mk]) || 0), 0);
-  const grand = accounts.reduce((s, a) => s + rowTot(a.code), 0);
-  const cell = { border: `1px solid ${T.cardBorder}`, padding: "4px 6px", fontSize: 12, whiteSpace: "nowrap" };
+  const removePlan = (id) => { if (window.confirm("ลบแผนของเข้านี้?")) saveIncomingPlan(plans.filter(pl => pl.id !== id)); };
+  const convert = (pl) => { if (window.confirm("สร้าง PO จริงจากแผนนี้?\n\nฟอร์ม PO จะเปิดพร้อมข้อมูลจากแผน — เมื่อบันทึก PO แล้ว แผนนี้จะถูกย้ายออก")) onConvert?.(pl); };
+
+  const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
+  const sorted = [...plans].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const setLine = (i, k, v) => setModal(m => ({ ...m, items: m.items.map((it, idx) => idx === i ? { ...it, [k]: v } : it) }));
+  const addLine = () => setModal(m => ({ ...m, items: [...m.items, blankLine()] }));
+  const delLine = (i) => setModal(m => ({ ...m, items: m.items.length > 1 ? m.items.filter((_, idx) => idx !== i) : m.items }));
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-        <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 วางแผนของเข้าทั้งโปรเจค — กรอกยอดที่คาดว่าจะเข้าต่อ Acc code ต่อเดือน (ทำก่อนออก PO ได้เลย)</div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
-          <input type="month" value={newMonth} onChange={e => setNewMonth(e.target.value)} className="input-base" style={{ padding: "7px 10px" }} />
-          <button onClick={addMonth} className="btn-primary" style={{ background: T.amber }}>+ เพิ่มเดือน</button>
-        </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 แผนของเข้าทั้งโปรเจค — วางแผนล่วงหน้าก่อนออก PO · พอของเข้าจริงกด “→ สร้าง PO จริง”</div>
+        <button onClick={openNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
       </div>
-      {displayMonths.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "48px 0", color: T.textMuted }}>ยังไม่มีเดือน — กด “+ เพิ่มเดือน” เพื่อเริ่มวางแผน</div>
+
+      {sorted.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
+          <div style={{ fontSize: 30, marginBottom: 10 }}>📅</div>ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม
+        </div>
       ) : (
-        <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
-          <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
-            <thead>
-              <tr>
-                <th style={{ ...cell, background: "#f1f5f9", textAlign: "left", minWidth: 70 }}>Acc. Code</th>
-                <th style={{ ...cell, background: "#f1f5f9", textAlign: "left", minWidth: 190 }}>Acc. Name</th>
-                {displayMonths.map(mk => (
-                  <th key={mk} style={{ ...cell, background: "#fdf1e2", textAlign: "center", minWidth: 116 }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>{lbl(mk)}
-                      <span onClick={() => removeMonth(mk)} title="ลบเดือนนี้" style={{ cursor: "pointer", color: T.textMuted, fontSize: 11 }}>✕</span>
-                    </span>
-                  </th>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {sorted.map(pl => (
+            <div key={pl.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 18px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+                <span style={{ background: T.amberBg, color: T.amber, fontWeight: 700, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 ของเข้า {lbl(pl.date)}</span>
+                <span style={{ fontSize: 12, color: T.textMuted }}>{(pl.items || []).length} รายการ</span>
+                <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(planTotal(pl))}</span>
+                <button onClick={() => convert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ สร้าง PO จริง</button>
+                <button onClick={() => openEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
+                <button onClick={() => removePlan(pl.id)} title="ลบแผน" className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px", color: T.red, borderColor: T.red }}>🗑</button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {(pl.items || []).map(it => (
+                  <span key={it.id} style={{ background: "#f8fafc", border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "5px 10px", fontSize: 12 }}>
+                    <b style={{ fontFamily: "'JetBrains Mono',monospace", color: T.blue }}>{it.code}</b> {nameOf(it.code)} · <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>฿{fmt(parseFloat(it.amount) || 0)}</b>
+                  </span>
                 ))}
-                <th style={{ ...cell, background: "#fbe9d4", textAlign: "center", fontWeight: 800, minWidth: 110 }}>TOTAL</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map(a => (
-                <tr key={a.code}>
-                  <td style={{ ...cell, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{a.code}</td>
-                  <td style={cell}>{a.name}</td>
-                  {displayMonths.map(mk => (
-                    <td key={mk} style={{ ...cell, padding: 2 }}>
-                      <MoneyInput value={incomingPlan?.[a.code]?.[mk] ?? ""} onChange={v => setCell(a.code, mk, v)} style={{ fontSize: 12, padding: "5px 7px" }} />
-                    </td>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {modal && (
+        <div onClick={() => setModal(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 300, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflow: "auto" }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: T.card, borderRadius: 16, width: "min(560px,100%)", overflow: "hidden", boxShadow: "0 24px 60px rgba(15,23,42,0.3)" }}>
+            <div style={{ background: "linear-gradient(135deg,#78350f,#d97706)", padding: "16px 22px", color: "#fff", fontWeight: 700, fontSize: 16 }}>{modal.id ? "แก้ไขแผนของเข้า" : "เพิ่มแผนของเข้า"}</div>
+            <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 16 }}>
+              <label style={{ fontSize: 12, color: T.textSecondary, display: "flex", flexDirection: "column", gap: 5 }}>
+                วันที่แผนของเข้า
+                <input type="date" value={modal.date} onChange={e => setModal(m => ({ ...m, date: e.target.value }))} className="input-base" style={{ padding: "8px 10px" }} />
+              </label>
+              <div>
+                <div style={{ fontSize: 12, color: T.textSecondary, fontWeight: 600, marginBottom: 6 }}>รายการ (Acc code + ยอด)</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {modal.items.map((it, i) => (
+                    <div key={it.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <select value={it.code} onChange={e => setLine(i, "code", e.target.value)} className="input-base" style={{ flex: 1, padding: "7px 8px" }}>
+                        <option value="">— เลือก Acc code —</option>
+                        {accounts.map(a => <option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
+                      </select>
+                      <div style={{ width: 140 }}><MoneyInput value={it.amount} onChange={v => setLine(i, "amount", v)} style={{ padding: "7px 8px" }} /></div>
+                      <button onClick={() => delLine(i)} className="btn-ghost" style={{ padding: "6px 9px", color: T.red }}>✕</button>
+                    </div>
                   ))}
-                  <td style={{ ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, background: "#fff7ee", color: rowTot(a.code) ? T.textPrimary : T.textMuted }}>{rowTot(a.code) ? fmt(rowTot(a.code)) : "-"}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td style={{ ...cell, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
-                {displayMonths.map(mk => (<td key={mk} style={{ ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, background: "#fbe9d4" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}</td>))}
-                <td style={{ ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 800, background: "#fbe9d4" }}>{grand ? fmt(grand) : "-"}</td>
-              </tr>
-            </tfoot>
-          </table>
+                </div>
+                <button onClick={addLine} className="btn-ghost" style={{ marginTop: 8, fontSize: 12 }}>+ เพิ่มบรรทัด</button>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 22px", borderTop: `1px solid ${T.cardBorder}` }}>
+              <button onClick={() => setModal(null)} className="btn-ghost">ยกเลิก</button>
+              <button onClick={saveModal} className="btn-primary" style={{ background: T.amber }}>บันทึกแผน</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -4536,6 +4552,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState(null);
   const [collapsed, setCollapsed] = useState({});
+  const [convertPlanId, setConvertPlanId] = useState(null); // แผนของเข้าที่กำลังแปลงเป็น PO (จะถูกย้ายออกเมื่อบันทึก PO)
   // อยู่ในโหมดแก้ไขเมื่อเปิดฟอร์มเพิ่ม/แก้ PO หรือเปิดหน้ารายละเอียด (บันทึกของเข้า/แบ่งงวด)
   useEffect(() => { setEditMode?.(view==="add" || detailId!=null); return () => setEditMode?.(false); }, [view, detailId, setEditMode]);
 
@@ -4616,6 +4633,8 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const withLog = { ...payload, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
 
     savePO(editId ? poEntries.map(p=>p.id===editId?{...withLog,id:editId}:p) : [...poEntries,{...withLog,id:uid()}]);
+    // ถ้าบันทึกจากการ "แปลงแผน" → ย้ายแผนต้นทางออก (ไม่ให้นับซ้ำกับ PO จริง)
+    if (convertPlanId) { saveIncomingPlan((Array.isArray(incomingPlan)?incomingPlan:[]).filter(pl=>pl.id!==convertPlanId)); setConvertPlanId(null); }
     setEditId(null);
     setForm(emptyForm());
     setView("browse");
@@ -4661,7 +4680,20 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
     if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
   };
-  const closeForm = () => { setView("browse"); setEditId(null); setForm(emptyForm()); };
+  const closeForm = () => { setView("browse"); setEditId(null); setConvertPlanId(null); setForm(emptyForm()); };
+  // แปลง "แผนของเข้า" → เปิดฟอร์ม PO พร้อมข้อมูลจากแผน (วันแผน = แผนของเข้างวดแรก)
+  // เมื่อบันทึก PO สำเร็จ แผนต้นทางจะถูกย้ายออก (กันนับซ้ำ)
+  const startConvert = (pl) => {
+    const items = (pl.items || []).filter(it => it.code).map(it => ({
+      id: uid(), code: it.code, store: "", amount: it.amount || "",
+      rounds: [{ id: uid(), planDate: pl.date || "", planAmount: it.amount || "", actualAmount: "", actualDate: "" }],
+    }));
+    setEditId(null);
+    setConvertPlanId(pl.id);
+    setForm({ ...emptyForm(), date: todayStr(), notes: "แปลงจากแผนของเข้า", items: items.length ? items : emptyForm().items });
+    setDetailId(null);
+    setView("add");
+  };
   // ปุ่ม "กลับ" — ย้อนทีละชั้น: ฟอร์ม → ปิดฟอร์ม, รายละเอียด → ปิด, สลับแท็บ → ย้อนแท็บ,
   // สุดทางแล้วค่อยออกไปหน้าก่อนหน้า (เลือกโครงการ/เลือกโรล)
   const backNav = () => {
@@ -4888,7 +4920,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
           <IncomingPlanTab incomingPlan={incomingPlan} saveIncomingPlan={saveIncomingPlan}
-            extraItems={extraItems} hiddenAccounts={hiddenAccounts} />
+            extraItems={extraItems} hiddenAccounts={hiddenAccounts} onConvert={startConvert} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -5227,15 +5259,17 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 //  ด้วยสรุป PO: Total PO (ยอดผูกพัน) และ PO Balance (Total PO − รับจริง).
 //  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
 const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = {} }) {
+function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [] }) {
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   const combined = buildCombinedBudget(tenderCosts, additions);
   const committedByCode = {}, stockByCode = {};
   const actual = {}, payplan = {};
   const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
   const incoming = {};
-  Object.entries(incomingPlan || {}).forEach(([code, months]) => {
-    Object.entries(months || {}).forEach(([mk, v]) => bump(incoming, code, mk, parseFloat(v) || 0));
+  // แผนของเข้า = รายการแผน [{ date, items:[{code,amount}] }] → บัคเก็ตตามเดือนของ date
+  (Array.isArray(incomingPlan) ? incomingPlan : []).forEach(pl => {
+    const mk = (pl.date || "").slice(0, 7);
+    (pl.items || []).forEach(it => bump(incoming, it.code, mk, parseFloat(it.amount) || 0));
   });
   poEntries.forEach(p => {
     poItems(p).forEach(it => {
@@ -5362,7 +5396,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], incomingPlan={} }) {
+function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], incomingPlan=[] }) {
   // บัญชี = อ่านอย่างเดียว (RLS ไม่ให้เขียน tcs-projects) → ปุ่มสกุลเงินจึงเป็นค่า
   // "ดูเฉพาะเครื่องนี้" ไม่บันทึกกลับไปที่โครงการร่วม กันไม่ให้บัญชีแก้ข้อมูลโครงการ
   const [curOverride, setCurOverride] = useState({});
