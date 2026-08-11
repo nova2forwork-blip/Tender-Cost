@@ -4952,6 +4952,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         ) : tab==="tracking" ? (
           <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={()=>setView("add")}
             onStatusChange={changeStatus} session={session} usdRate={usdRate}
+            tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
           <IncomingPlanTab incomingPlan={incomingPlan} saveIncomingPlan={saveIncomingPlan}
@@ -5085,7 +5086,8 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 // ─── Procurement: Incoming / Payment Tracking tab ─────────────────────────────
 // Groups every PO by its Account Code so the team can see, at a glance and per
 // cost line, which deliveries and payments are on track vs. overdue.
-function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0 }) {
+function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[] }) {
+  const trkBudget = buildCombinedBudget(tenderCosts, additions);
   const [search, setSearch] = useState("");
   // Which Account-Code groups are collapsed — lets a busy board with many
   // PO rows be tidied away group by group instead of scrolling forever.
@@ -5152,7 +5154,11 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
               <DateCell value={d.plan} lateTint={st==="late"}/>
               <span style={{color:T.textMuted,fontSize:11}}>→</span>
               <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:400}}>{d.actual||"รอ"}</span>
-              {d.amount && <span style={{fontSize:10,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>({fmt(d.amount)})</span>}
+              {(() => {
+                const rec = parseFloat(d.actualAmount)||0, pl = parseFloat(d.planAmount)||0, amt = rec || pl;
+                if (!amt) return <span style={{fontSize:10,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>(—)</span>;
+                return <span style={{fontSize:10,color:rec?T.green:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:rec?700:400}}>({fmt(amt)})</span>;
+              })()}
             </div>
           );
         })}
@@ -5201,6 +5207,11 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
             const rows = groups[code];
             const lateCount = rows.filter(({po:p})=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
             const isCollapsed = collapsed.has(code);
+            // งบ + ยอดที่ต้องสั่งเพิ่ม (งบ − ของใน store − PO ที่สั่งแล้วของ code นี้)
+            const grpBudget = parseFloat(trkBudget[code]) || 0;
+            const grpCommitted = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
+            const grpStock = rows.reduce((s,{item})=>s+(parseFloat(item.store)||0),0);
+            const grpToOrder = grpBudget - grpStock - grpCommitted;
             return (
               <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
                 <div onClick={()=>toggleGroup(code)}
@@ -5209,6 +5220,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                   <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{code}</span>
                   <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                   <span style={{flex:1}}/>
+                  <span style={{fontSize:11,color:T.textMuted}}>งบ <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
+                  <span style={{fontSize:11,color:T.textMuted}}>ต้องสั่งเพิ่ม <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
                   <span style={{color:T.textMuted,fontSize:11}}>{rows.length} PO</span>
                   {lateCount>0 && <Badge text={`⚠️ ${lateCount} ล่าช้า`} clr={T.red} bg={T.redBg}/>}
                 </div>
