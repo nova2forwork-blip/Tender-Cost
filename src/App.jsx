@@ -1621,6 +1621,7 @@ export default function App() {
   const [additions,   setAdditions]  = useState({});
   const [extraItems,  setExtraItems] = useState([]);
   const [hiddenAccounts, setHiddenAccounts] = useState([]); // codes of fixed Acc. Codes QS has removed for this project
+  const [incomingPlan, setIncomingPlan] = useState({}); // แผนของเข้าทั้งโปรเจค (จัดซื้อวางแผนก่อนออก PO): { code: { "YYYY-MM": amount } }
   const [poEntries,   setPO]    = useState([]);
   const [loaded,   setLoaded]   = useState(false);
   const [newProjModal, setNewProjModal] = useState(false);
@@ -1664,11 +1665,13 @@ export default function App() {
     const ad = await sg(`tcs-additions-${id}`);
     const ex = await sg(`tcs-extra-${id}`);
     const hid = await sg(`tcs-hidden-${id}`);
+    const inp = await sg(`tcs-inplan-${id}`);
     setTCosts(t || {});
     setPO(po || []);
     setAdditions(ad || {});
     setExtraItems(ex || []);
     setHiddenAccounts(hid || []);
+    setIncomingPlan(inp || {});
   }, []);
 
   const fetchProjects = useCallback(async () => {
@@ -1701,7 +1704,7 @@ export default function App() {
         setSyncing(true);
         try {
           if (key === "tcs-projects") await fetchProjects();
-          else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}`)) await fetchProjectData(activeId);
+          else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}` || key === `tcs-inplan-${activeId}`)) await fetchProjectData(activeId);
           setSyncedAt(new Date());
         } catch (e) {
           console.warn("sync realtime ล้มเหลว:", e);
@@ -1735,6 +1738,7 @@ export default function App() {
     [`tcs-po-${activeId}`]: poEntries,
     [`tcs-extra-${activeId}`]: extraItems,
     [`tcs-hidden-${activeId}`]: hiddenAccounts,
+    [`tcs-inplan-${activeId}`]: incomingPlan,
   };
   const syncUndo = () => setUndoInfo({
     u: undoRef.current.length, r: redoRef.current.length,
@@ -1938,6 +1942,7 @@ export default function App() {
   const saveAdditions= useCallback((a)    => commit(`tcs-additions-${activeId}`, a, additions, setAdditions, "ยอดเพิ่มรายเดือน"), [commit, activeId, additions]);
   const saveExtraItems=useCallback((ex)   => commit(`tcs-extra-${activeId}`, ex, extraItems, setExtraItems, "รายการ/แถว"), [commit, activeId, extraItems]);
   const saveHiddenAccounts=useCallback((h)=> commit(`tcs-hidden-${activeId}`, h, hiddenAccounts, setHiddenAccounts, "การซ่อนหมวด"), [commit, activeId, hiddenAccounts]);
+  const saveIncomingPlan=useCallback((v)=> commit(`tcs-inplan-${activeId}`, v, incomingPlan, setIncomingPlan, "แผนของเข้า"), [commit, activeId, incomingPlan]);
   const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, "PO / จัดซื้อ"), [commit, activeId, poEntries]);
 
   const openProject = (id) => {
@@ -1962,7 +1967,7 @@ export default function App() {
     // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
     const next = projects.filter(p => p.id !== id);
     setProjects(next); ss("tcs-projects", next).then(()=>setSyncedAt(new Date()));
-    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`);
+    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`); await sd(`tcs-inplan-${id}`);
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
@@ -1993,6 +1998,7 @@ export default function App() {
 
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
     additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
+    incomingPlan, saveIncomingPlan,
     updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
     onHome: () => setScreen("home"),   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
     syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
@@ -4419,8 +4425,97 @@ function StatusPicker({ status, onChange, compact, disabled }) {
   );
 }
 
+// ─── จัดซื้อ: แผนของเข้าทั้งโปรเจค (วางแผนก่อนออก PO) ───────────────────────────
+//  กริด Acc. Code × เดือน ให้จัดซื้อกรอกยอดที่คาดว่าของจะเข้าต่อเดือน ล่วงหน้าทั้ง
+//  โปรเจค แล้วค่อยไปอัปเดต PO ซื้อจริงทีหลัง. ข้อมูลนี้ไปโชว์เป็น "Incoming Plan"
+//  ในตารางรวมของบัญชี (เทียบกับ Actual Received ที่มาจากการรับจริงใน PO).
+function IncomingPlanTab({ incomingPlan, saveIncomingPlan, extraItems, hiddenAccounts }) {
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const dataMonths = [...new Set(Object.values(incomingPlan || {}).flatMap(m => Object.keys(m || {})))];
+  const [months, setMonths] = useState(() => [...new Set(dataMonths)].sort());
+  const [newMonth, setNewMonth] = useState("");
+  const displayMonths = [...new Set([...months, ...dataMonths])].sort();
+  const lbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
+
+  const setCell = (code, mk, val) => {
+    const next = { ...(incomingPlan || {}) };
+    const m = { ...(next[code] || {}) };
+    const num = parseFloat(val) || 0;
+    if (num > 0) m[mk] = num; else delete m[mk];
+    if (Object.keys(m).length) next[code] = m; else delete next[code];
+    saveIncomingPlan(next);
+  };
+  const addMonth = () => { if (!newMonth) return; setMonths(ms => [...new Set([...ms, newMonth])].sort()); setNewMonth(""); };
+  const removeMonth = (mk) => {
+    if (!window.confirm(`ลบคอลัมน์เดือน ${lbl(mk)} ? (ยอดแผนของเข้าทุก Acc code ในเดือนนี้จะถูกลบ)`)) return;
+    const next = {};
+    Object.entries(incomingPlan || {}).forEach(([c, mm]) => { const o = { ...mm }; delete o[mk]; if (Object.keys(o).length) next[c] = o; });
+    saveIncomingPlan(next);
+    setMonths(ms => ms.filter(x => x !== mk));
+  };
+  const colTot = (mk) => accounts.reduce((s, a) => s + (parseFloat(incomingPlan?.[a.code]?.[mk]) || 0), 0);
+  const rowTot = (code) => displayMonths.reduce((s, mk) => s + (parseFloat(incomingPlan?.[code]?.[mk]) || 0), 0);
+  const grand = accounts.reduce((s, a) => s + rowTot(a.code), 0);
+  const cell = { border: `1px solid ${T.cardBorder}`, padding: "4px 6px", fontSize: 12, whiteSpace: "nowrap" };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 วางแผนของเข้าทั้งโปรเจค — กรอกยอดที่คาดว่าจะเข้าต่อ Acc code ต่อเดือน (ทำก่อนออก PO ได้เลย)</div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="month" value={newMonth} onChange={e => setNewMonth(e.target.value)} className="input-base" style={{ padding: "7px 10px" }} />
+          <button onClick={addMonth} className="btn-primary" style={{ background: T.amber }}>+ เพิ่มเดือน</button>
+        </div>
+      </div>
+      {displayMonths.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "48px 0", color: T.textMuted }}>ยังไม่มีเดือน — กด “+ เพิ่มเดือน” เพื่อเริ่มวางแผน</div>
+      ) : (
+        <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+          <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ ...cell, background: "#f1f5f9", textAlign: "left", minWidth: 70 }}>Acc. Code</th>
+                <th style={{ ...cell, background: "#f1f5f9", textAlign: "left", minWidth: 190 }}>Acc. Name</th>
+                {displayMonths.map(mk => (
+                  <th key={mk} style={{ ...cell, background: "#fdf1e2", textAlign: "center", minWidth: 116 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>{lbl(mk)}
+                      <span onClick={() => removeMonth(mk)} title="ลบเดือนนี้" style={{ cursor: "pointer", color: T.textMuted, fontSize: 11 }}>✕</span>
+                    </span>
+                  </th>
+                ))}
+                <th style={{ ...cell, background: "#fbe9d4", textAlign: "center", fontWeight: 800, minWidth: 110 }}>TOTAL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.map(a => (
+                <tr key={a.code}>
+                  <td style={{ ...cell, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{a.code}</td>
+                  <td style={cell}>{a.name}</td>
+                  {displayMonths.map(mk => (
+                    <td key={mk} style={{ ...cell, padding: 2 }}>
+                      <MoneyInput value={incomingPlan?.[a.code]?.[mk] ?? ""} onChange={v => setCell(a.code, mk, v)} style={{ fontSize: 12, padding: "5px 7px" }} />
+                    </td>
+                  ))}
+                  <td style={{ ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, background: "#fff7ee", color: rowTot(a.code) ? T.textPrimary : T.textMuted }}>{rowTot(a.code) ? fmt(rowTot(a.code)) : "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td style={{ ...cell, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
+                {displayMonths.map(mk => (<td key={mk} style={{ ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, background: "#fbe9d4" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}</td>))}
+                <td style={{ ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 800, background: "#fbe9d4" }}>{grand ? fmt(grand) : "-"}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode }) {
+function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode, incomingPlan={}, saveIncomingPlan }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [tabHist, setTabHist] = useState([]);   // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
@@ -4607,7 +4702,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
-            {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"]].map(([id,label])=>(
+            {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"],["inplan","📅 แผนของเข้า"]].map(([id,label])=>(
               <button key={id} onClick={()=>goTab(id)}
                 style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
                 {label}
@@ -4791,6 +4886,9 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={()=>setView("add")}
             onStatusChange={changeStatus} session={session} usdRate={usdRate}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
+        ) : tab==="inplan" ? (
+          <IncomingPlanTab incomingPlan={incomingPlan} saveIncomingPlan={saveIncomingPlan}
+            extraItems={extraItems} hiddenAccounts={hiddenAccounts} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -5122,95 +5220,100 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   );
 }
 
-// ─── Accounting: ตารางรวมรายเดือน (Cost + Incoming / Actual / Payment) ──────────
-//  ต่อ Acc. Code: Updated Tender Cost (งบ), Balance Pending PO (งบ − ผูกพัน),
-//  Stock (ของที่รับแล้ว), Balance Cost (Balance Pending PO − Stock) แล้วตามด้วย 3
-//  กลุ่มเดือน — Incoming Plan (วันแผนรับของ), Actual Received (วันรับจริง),
-//  Payment Plan (วันครบกำหนดจ่าย) — โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
+// ─── Accounting: ตารางรวมรายเดือน (ต้นทุน + Incoming/Received + Payment) ─────────
+//  ต่อ Acc. Code: Updated Tender Cost (งบ), รวม PO (ผูกพัน), Balance Pending PO
+//  (งบ − PO), บาลานซ์ PO (รวม PO − รับจริง), Stock (มีใน store), Balance Cost
+//  (Balance Pending PO − Stock). แล้วตามด้วย 2 กลุ่มเดือน:
+//   • Incoming / Received — รวมแผนของเข้ากับรับจริงในช่องเดียว: รับจริง = ดำ,
+//     ยังเป็นแผน = แดง (ยึดของจริงเป็นหลักเมื่อมีทั้งคู่)
+//   • Payment Plan — ยอดตามวันครบกำหนดจ่าย
+//  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
 const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts }) {
+function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = {} }) {
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   const combined = buildCombinedBudget(tenderCosts, additions);
   const committedByCode = {}, stockByCode = {};
-  const incoming = {}, actual = {}, payplan = {};
+  const actual = {}, payplan = {};
   const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
+  const incoming = {};
+  Object.entries(incomingPlan || {}).forEach(([code, months]) => {
+    Object.entries(months || {}).forEach(([mk, v]) => bump(incoming, code, mk, parseFloat(v) || 0));
+  });
   poEntries.forEach(p => {
     poItems(p).forEach(it => {
       const code = it.code;
       committedByCode[code] = (committedByCode[code] || 0) + (parseFloat(it.amount) || 0);
+      stockByCode[code] = (stockByCode[code] || 0) + (parseFloat(it.store) || 0);
       (it.rounds || []).forEach(r => {
-        const planAmt = parseFloat(r.planAmount) || 0;
-        if (r.planDate && planAmt) bump(incoming, code, r.planDate.slice(0, 7), planAmt);
-        if (roundReceived(r)) {
-          const amt = parseFloat(r.actualAmount) || 0;
-          bump(actual, code, r.actualDate.slice(0, 7), amt);
-          stockByCode[code] = (stockByCode[code] || 0) + amt;
-        }
+        if (roundReceived(r)) bump(actual, code, r.actualDate.slice(0, 7), parseFloat(r.actualAmount) || 0);
       });
     });
     poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount || 0));
   });
   const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m => Object.keys(m)))].sort();
-  const inM = monthsOf(incoming), acM = monthsOf(actual), payM = monthsOf(payplan);
+  const mgM = [...new Set([...monthsOf(incoming), ...monthsOf(actual)])].sort(); // แผน ∪ รับจริง
+  const payM = monthsOf(payplan);
   const lbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
   const money = (n) => !n ? "-" : (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n));
 
   const rows = accounts.map(a => {
     const budget = parseFloat(combined[a.code]) || 0;
     const committed = committedByCode[a.code] || 0;
-    const balPO = budget - committed;
+    const balPO = budget - committed;                                   // Balance Pending PO
+    const received = mgM.reduce((s, mk) => s + (actual[a.code]?.[mk] || 0), 0);
+    const balPOout = committed - received;                              // บาลานซ์ PO (สั่งแล้วยังไม่เข้า)
     const stock = stockByCode[a.code] || 0;
     const balCost = balPO - stock;
-    const inRow = inM.map(mk => incoming[a.code]?.[mk] || 0);
-    const acRow = acM.map(mk => actual[a.code]?.[mk] || 0);
+    const mgRow = mgM.map(mk => { const av = actual[a.code]?.[mk] || 0; const pv = incoming[a.code]?.[mk] || 0; const eff = av > 0 ? av : pv; return { eff, real: av > 0 }; });
     const pyRow = payM.map(mk => payplan[a.code]?.[mk] || 0);
-    const sum = (arr) => arr.reduce((s, x) => s + x, 0);
-    return { a, budget, committed, balPO, stock, balCost, inRow, acRow, pyRow, inTot: sum(inRow), acTot: sum(acRow), pyTot: sum(pyRow) };
-  }).filter(r => r.budget || r.committed || r.stock || r.inTot || r.acTot || r.pyTot);
+    const mgTot = mgRow.reduce((s, c) => s + c.eff, 0);
+    const pyTot = pyRow.reduce((s, x) => s + x, 0);
+    return { a, budget, committed, balPO, balPOout, stock, balCost, received, mgRow, pyRow, mgTot, pyTot };
+  }).filter(r => r.budget || r.committed || r.stock || r.mgTot || r.pyTot);
 
-  const colSum = (pick, i) => rows.reduce((s, r) => s + (pick(r)[i] || 0), 0);
+  const mgColSum = (i) => rows.reduce((s, r) => s + (r.mgRow[i]?.eff || 0), 0);
+  const pyColSum = (i) => rows.reduce((s, r) => s + (r.pyRow[i] || 0), 0);
   const totOf = (pick) => rows.reduce((s, r) => s + pick(r), 0);
 
-  // styles
-  const bCost = "#f4e9ef", bIn = "#eaf4ea", bAc = "#e8eff9", bPy = "#fdf1e2";
+  const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2";
   const cell = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize: 11.5, whiteSpace: "nowrap" };
   const num  = { ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
   const hCell = (bg) => ({ ...cell, background: bg, fontWeight: 700, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
-  const numCell = (v, extraBg) => (
-    <td style={{ ...num, background: extraBg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 400 }}>{money(v)}</td>
+  const numCell = (v, bg) => (
+    <td style={{ ...num, background: bg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 400 }}>{money(v)}</td>
+  );
+  const mgCell = (c, bg) => (
+    <td style={{ ...num, background: bg, color: c.eff === 0 ? T.textMuted : (c.real ? T.textPrimary : T.red), fontWeight: c.eff ? (c.real ? 600 : 500) : 400 }}>{c.eff ? money(c.eff) : "-"}</td>
   );
 
   return (
     <div>
-      <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 12 }}>
-        โชว์เฉพาะเดือนที่มีข้อมูล · รวมยอดต่อ Acc. Code ต่อเดือน · Stock = ของที่รับแล้ว · Balance Cost = Balance Pending PO − Stock
+      <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 8 }}>
+        โชว์เฉพาะเดือนที่มีข้อมูล · รวมยอดต่อ Acc. Code ต่อเดือน · รวม PO = ยอดผูกพัน · บาลานซ์ PO = รวม PO − รับจริง · Stock = มีใน store · Balance Cost = Balance Pending PO − Stock
+      </div>
+      <div style={{ display: "flex", gap: 18, marginBottom: 12, fontSize: 12 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับจริง</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = ยังเป็นแผน (ของเข้า)</span>
       </div>
       <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
         <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
           <thead>
-            {/* กลุ่ม */}
             <tr>
-              <th style={hCell("#f8fafc")} colSpan={2}></th>
-              <th style={hCell(bCost)}>A</th>
-              <th style={hCell(bCost)}>A-B</th>
-              <th style={hCell(bCost)}></th>
-              <th style={hCell(bCost)}></th>
-              <th style={hCell(bIn)} colSpan={inM.length + 1}>Incoming Plan</th>
-              <th style={hCell(bAc)} colSpan={acM.length + 1}>Actual Received</th>
+              <th style={hCell("#f8fafc")} colSpan={8}></th>
+              <th style={hCell(bMg)} colSpan={mgM.length + 1}>Incoming / Received</th>
               <th style={hCell(bPy)} colSpan={payM.length + 1}>Payment Plan</th>
             </tr>
-            {/* หัวคอลัมน์ */}
             <tr>
               <th style={{ ...hCell("#f1f5f9"), textAlign: "left", minWidth: 70 }}>Acc. Code</th>
               <th style={{ ...hCell("#f1f5f9"), textAlign: "left", minWidth: 190 }}>Acc. Name</th>
-              <th style={{ ...hCell(bCost), minWidth: 130 }}>Updated Tender Cost</th>
-              <th style={{ ...hCell(bCost), minWidth: 120 }}>Balance Pending PO</th>
+              <th style={{ ...hCell(bCost), minWidth: 120 }}>Updated Tender Cost</th>
+              <th style={{ ...hCell(bCost), minWidth: 100 }}>รวม PO</th>
+              <th style={{ ...hCell(bCost), minWidth: 110 }}>Balance Pending PO</th>
+              <th style={{ ...hCell(bCost), minWidth: 100 }}>บาลานซ์ PO</th>
               <th style={{ ...hCell(bCost), minWidth: 90 }}>Stock</th>
               <th style={{ ...hCell(bCost), minWidth: 100 }}>Balance Cost</th>
-              {inM.map(mk => <th key={"i" + mk} style={hCell(bIn)}>{lbl(mk)}</th>)}
-              <th style={{ ...hCell(bIn), fontWeight: 800 }}>TOTAL</th>
-              {acM.map(mk => <th key={"a" + mk} style={hCell(bAc)}>{lbl(mk)}</th>)}
-              <th style={{ ...hCell(bAc), fontWeight: 800 }}>TOTAL</th>
+              {mgM.map(mk => <th key={"m" + mk} style={hCell(bMg)}>{lbl(mk)}</th>)}
+              <th style={{ ...hCell(bMg), fontWeight: 800 }}>TOTAL</th>
               {payM.map(mk => <th key={"p" + mk} style={hCell(bPy)}>{lbl(mk)}</th>)}
               <th style={{ ...hCell(bPy), fontWeight: 800 }}>TOTAL</th>
             </tr>
@@ -5219,21 +5322,21 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
             {rows.map(r => (
               <tr key={r.a.code}>
                 <td style={{ ...cell, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{r.a.code}</td>
-                <td style={{ ...cell }}>{r.a.name}</td>
+                <td style={cell}>{r.a.name}</td>
                 {numCell(r.budget, bCost)}
+                {numCell(r.committed, bCost)}
                 {numCell(r.balPO, bCost)}
+                {numCell(r.balPOout, bCost)}
                 {numCell(r.stock, bCost)}
                 {numCell(r.balCost, bCost)}
-                {r.inRow.map((v, i) => <Fragment key={"i" + i}>{numCell(v, bIn)}</Fragment>)}
-                <td style={{ ...num, background: bIn, fontWeight: 700, color: r.inTot < 0 ? T.red : T.textPrimary }}>{money(r.inTot)}</td>
-                {r.acRow.map((v, i) => <Fragment key={"a" + i}>{numCell(v, bAc)}</Fragment>)}
-                <td style={{ ...num, background: bAc, fontWeight: 700, color: r.acTot < 0 ? T.red : T.textPrimary }}>{money(r.acTot)}</td>
+                {r.mgRow.map((c, i) => <Fragment key={"m" + i}>{mgCell(c, bMg)}</Fragment>)}
+                <td style={{ ...num, background: bMg, fontWeight: 700, color: T.textPrimary }}>{money(r.mgTot)}</td>
                 {r.pyRow.map((v, i) => <Fragment key={"p" + i}>{numCell(v, bPy)}</Fragment>)}
                 <td style={{ ...num, background: bPy, fontWeight: 700, color: r.pyTot < 0 ? T.red : T.textPrimary }}>{money(r.pyTot)}</td>
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={6 + inM.length + acM.length + payM.length + 3}>— ยังไม่มีข้อมูล —</td></tr>
+              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={8 + mgM.length + payM.length + 2}>— ยังไม่มีข้อมูล —</td></tr>
             )}
           </tbody>
           {rows.length > 0 && (
@@ -5241,14 +5344,14 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
               <tr>
                 <td style={{ ...cell, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.budget))}</td>
+                <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.committed))}</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balPO) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPO))}</td>
+                <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balPOout) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPOout))}</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.stock))}</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balCost) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balCost))}</td>
-                {inM.map((mk, i) => <td key={"ti" + mk} style={{ ...num, fontWeight: 700, background: "#e3efe3" }}>{money(colSum(r => r.inRow, i))}</td>)}
-                <td style={{ ...num, fontWeight: 800, background: "#e3efe3" }}>{money(totOf(r => r.inTot))}</td>
-                {acM.map((mk, i) => <td key={"ta" + mk} style={{ ...num, fontWeight: 700, background: "#e0eaf6" }}>{money(colSum(r => r.acRow, i))}</td>)}
-                <td style={{ ...num, fontWeight: 800, background: "#e0eaf6" }}>{money(totOf(r => r.acTot))}</td>
-                {payM.map((mk, i) => <td key={"tp" + mk} style={{ ...num, fontWeight: 700, background: "#fbe9d4" }}>{money(colSum(r => r.pyRow, i))}</td>)}
+                {mgM.map((mk, i) => <td key={"tm" + mk} style={{ ...num, fontWeight: 700, background: "#e6ede6" }}>{money(mgColSum(i))}</td>)}
+                <td style={{ ...num, fontWeight: 800, background: "#e6ede6" }}>{money(totOf(r => r.mgTot))}</td>
+                {payM.map((mk, i) => <td key={"tp" + mk} style={{ ...num, fontWeight: 700, background: "#fbe9d4" }}>{money(pyColSum(i))}</td>)}
                 <td style={{ ...num, fontWeight: 800, background: "#fbe9d4" }}>{money(totOf(r => r.pyTot))}</td>
               </tr>
             </tfoot>
@@ -5260,7 +5363,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[] }) {
+function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], incomingPlan={} }) {
   // บัญชี = อ่านอย่างเดียว (RLS ไม่ให้เขียน tcs-projects) → ปุ่มสกุลเงินจึงเป็นค่า
   // "ดูเฉพาะเครื่องนี้" ไม่บันทึกกลับไปที่โครงการร่วม กันไม่ให้บัญชีแก้ข้อมูลโครงการ
   const [curOverride, setCurOverride] = useState({});
@@ -5774,7 +5877,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
             )}
           </div>
         ) : view==="matrix" ? (
-          <AccountingMatrixTab tenderCosts={tenderCosts} additions={additions} poEntries={poEntries} extraItems={extraItems} hiddenAccounts={hiddenAccounts} />
+          <AccountingMatrixTab tenderCosts={tenderCosts} additions={additions} poEntries={poEntries} extraItems={extraItems} hiddenAccounts={hiddenAccounts} incomingPlan={incomingPlan} />
         ) : (
           <div>
             {/* สรุปยอดที่ต้องเตรียมจ่าย */}
