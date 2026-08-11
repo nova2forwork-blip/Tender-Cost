@@ -5220,13 +5220,11 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   );
 }
 
-// ─── Accounting: ตารางรวมรายเดือน (ต้นทุน + Incoming/Received + Payment) ─────────
-//  ต่อ Acc. Code: Updated Tender Cost (งบ), รวม PO (ผูกพัน), Balance Pending PO
-//  (งบ − PO), บาลานซ์ PO (รวม PO − รับจริง), Stock (มีใน store), Balance Cost
-//  (Balance Pending PO − Stock). แล้วตามด้วย 2 กลุ่มเดือน:
-//   • Incoming / Received — รวมแผนของเข้ากับรับจริงในช่องเดียว: รับจริง = ดำ,
-//     ยังเป็นแผน = แดง (ยึดของจริงเป็นหลักเมื่อมีทั้งคู่)
-//   • Payment Plan — ยอดตามวันครบกำหนดจ่าย
+// ─── Accounting: ตารางรวมรายเดือน (ต้นทุน + Incoming/Received + Payment + PO) ────
+//  ต่อ Acc. Code: Tender Cost (งบ), Balance Pending PO (งบ − PO), Stock (มีใน
+//  store), Balance Cost (Balance Pending PO − Stock). ตามด้วย 2 กลุ่มเดือน —
+//  Incoming/Received (รับจริง=ดำ, ยังเป็นแผน=แดง) และ Payment Plan — แล้วปิดท้าย
+//  ด้วยสรุป PO: Total PO (ยอดผูกพัน) และ PO Balance (Total PO − รับจริง).
 //  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
 const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = {} }) {
@@ -5258,10 +5256,10 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
 
   const rows = accounts.map(a => {
     const budget = parseFloat(combined[a.code]) || 0;
-    const committed = committedByCode[a.code] || 0;
+    const committed = committedByCode[a.code] || 0;                     // Total PO
     const balPO = budget - committed;                                   // Balance Pending PO
     const received = mgM.reduce((s, mk) => s + (actual[a.code]?.[mk] || 0), 0);
-    const balPOout = committed - received;                              // บาลานซ์ PO (สั่งแล้วยังไม่เข้า)
+    const balPOout = committed - received;                              // PO Balance (สั่งแล้วยังไม่เข้า)
     const stock = stockByCode[a.code] || 0;
     const balCost = balPO - stock;
     const mgRow = mgM.map(mk => { const av = actual[a.code]?.[mk] || 0; const pv = incoming[a.code]?.[mk] || 0; const eff = av > 0 ? av : pv; return { eff, real: av > 0 }; });
@@ -5275,7 +5273,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const pyColSum = (i) => rows.reduce((s, r) => s + (r.pyRow[i] || 0), 0);
   const totOf = (pick) => rows.reduce((s, r) => s + pick(r), 0);
 
-  const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2";
+  const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2", bPO = "#eaeef5";
   const cell = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize: 11.5, whiteSpace: "nowrap" };
   const num  = { ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
   const hCell = (bg) => ({ ...cell, background: bg, fontWeight: 700, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
@@ -5289,7 +5287,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   return (
     <div>
       <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 8 }}>
-        โชว์เฉพาะเดือนที่มีข้อมูล · รวมยอดต่อ Acc. Code ต่อเดือน · รวม PO = ยอดผูกพัน · บาลานซ์ PO = รวม PO − รับจริง · Stock = มีใน store · Balance Cost = Balance Pending PO − Stock
+        โชว์เฉพาะเดือนที่มีข้อมูล · รวมยอดต่อ Acc. Code ต่อเดือน · Stock = มีใน store · Balance Cost = Balance Pending PO − Stock · Total PO = ยอดผูกพัน · PO Balance = Total PO − รับจริง
       </div>
       <div style={{ display: "flex", gap: 18, marginBottom: 12, fontSize: 12 }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับจริง</span>
@@ -5299,23 +5297,24 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
         <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
           <thead>
             <tr>
-              <th style={hCell("#f8fafc")} colSpan={8}></th>
+              <th style={hCell("#f8fafc")} colSpan={6}></th>
               <th style={hCell(bMg)} colSpan={mgM.length + 1}>Incoming / Received</th>
               <th style={hCell(bPy)} colSpan={payM.length + 1}>Payment Plan</th>
+              <th style={hCell(bPO)} colSpan={2}>สรุป PO</th>
             </tr>
             <tr>
               <th style={{ ...hCell("#f1f5f9"), textAlign: "left", minWidth: 70 }}>Acc. Code</th>
               <th style={{ ...hCell("#f1f5f9"), textAlign: "left", minWidth: 190 }}>Acc. Name</th>
-              <th style={{ ...hCell(bCost), minWidth: 120 }}>Updated Tender Cost</th>
-              <th style={{ ...hCell(bCost), minWidth: 100 }}>รวม PO</th>
+              <th style={{ ...hCell(bCost), minWidth: 120 }}>Tender Cost</th>
               <th style={{ ...hCell(bCost), minWidth: 110 }}>Balance Pending PO</th>
-              <th style={{ ...hCell(bCost), minWidth: 100 }}>บาลานซ์ PO</th>
               <th style={{ ...hCell(bCost), minWidth: 90 }}>Stock</th>
               <th style={{ ...hCell(bCost), minWidth: 100 }}>Balance Cost</th>
               {mgM.map(mk => <th key={"m" + mk} style={hCell(bMg)}>{lbl(mk)}</th>)}
               <th style={{ ...hCell(bMg), fontWeight: 800 }}>TOTAL</th>
               {payM.map(mk => <th key={"p" + mk} style={hCell(bPy)}>{lbl(mk)}</th>)}
               <th style={{ ...hCell(bPy), fontWeight: 800 }}>TOTAL</th>
+              <th style={{ ...hCell(bPO), minWidth: 110 }}>Total PO</th>
+              <th style={{ ...hCell(bPO), minWidth: 110 }}>PO Balance</th>
             </tr>
           </thead>
           <tbody>
@@ -5324,19 +5323,19 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
                 <td style={{ ...cell, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{r.a.code}</td>
                 <td style={cell}>{r.a.name}</td>
                 {numCell(r.budget, bCost)}
-                {numCell(r.committed, bCost)}
                 {numCell(r.balPO, bCost)}
-                {numCell(r.balPOout, bCost)}
                 {numCell(r.stock, bCost)}
                 {numCell(r.balCost, bCost)}
                 {r.mgRow.map((c, i) => <Fragment key={"m" + i}>{mgCell(c, bMg)}</Fragment>)}
                 <td style={{ ...num, background: bMg, fontWeight: 700, color: T.textPrimary }}>{money(r.mgTot)}</td>
                 {r.pyRow.map((v, i) => <Fragment key={"p" + i}>{numCell(v, bPy)}</Fragment>)}
                 <td style={{ ...num, background: bPy, fontWeight: 700, color: r.pyTot < 0 ? T.red : T.textPrimary }}>{money(r.pyTot)}</td>
+                {numCell(r.committed, bPO)}
+                {numCell(r.balPOout, bPO)}
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={8 + mgM.length + payM.length + 2}>— ยังไม่มีข้อมูล —</td></tr>
+              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={mgM.length + payM.length + 10}>— ยังไม่มีข้อมูล —</td></tr>
             )}
           </tbody>
           {rows.length > 0 && (
@@ -5344,15 +5343,15 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
               <tr>
                 <td style={{ ...cell, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.budget))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.committed))}</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balPO) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPO))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balPOout) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPOout))}</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.stock))}</td>
                 <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balCost) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balCost))}</td>
                 {mgM.map((mk, i) => <td key={"tm" + mk} style={{ ...num, fontWeight: 700, background: "#e6ede6" }}>{money(mgColSum(i))}</td>)}
                 <td style={{ ...num, fontWeight: 800, background: "#e6ede6" }}>{money(totOf(r => r.mgTot))}</td>
                 {payM.map((mk, i) => <td key={"tp" + mk} style={{ ...num, fontWeight: 700, background: "#fbe9d4" }}>{money(pyColSum(i))}</td>)}
                 <td style={{ ...num, fontWeight: 800, background: "#fbe9d4" }}>{money(totOf(r => r.pyTot))}</td>
+                <td style={{ ...num, fontWeight: 800, background: "#e2e8f2" }}>{money(totOf(r => r.committed))}</td>
+                <td style={{ ...num, fontWeight: 800, background: "#e2e8f2", color: totOf(r => r.balPOout) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPOout))}</td>
               </tr>
             </tfoot>
           )}
