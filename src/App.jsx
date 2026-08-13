@@ -4456,48 +4456,64 @@ function IncomingPlanTab({ plans, poEntries = [], onNew, onEdit, onConvert, onDe
   const TYPE = { plan: { label: "แผน", clr: T.red, bg: T.redBg }, po: { label: "PO รอเข้า", clr: T.amber, bg: T.amberBg }, received: { label: "รับแล้ว", clr: T.green, bg: T.greenBg } };
   const tdS = { padding: "6px 10px", borderBottom: `1px solid ${T.cardBorder}`, fontSize: 12, whiteSpace: "nowrap" };
 
+  // เมทริกซ์ code × เดือน (รับจริง = ดำ, ยังเป็นแผน/PO รอเข้า = แดง) เหมือนหน้าบัญชี
+  const cellMap = {};
+  entries.forEach(e => {
+    const c = (cellMap[e.code] = cellMap[e.code] || {});
+    const cell = (c[e.mk] = c[e.mk] || { rec: 0, exp: 0 });
+    if (e.type === "received") cell.rec += e.amount; else cell.exp += e.amount;
+  });
+  const codes = Object.keys(cellMap).sort();
+  const effOf = (code, mk) => { const c = cellMap[code]?.[mk]; if (!c) return { v: 0, real: false }; return c.rec > 0 ? { v: c.rec, real: true } : { v: c.exp, real: false }; };
+  const rowTot = (code) => months.reduce((s, mk) => s + effOf(code, mk).v, 0);
+  const colTot = (mk) => codes.reduce((s, c) => s + effOf(c, mk).v, 0);
+  const grand = codes.reduce((s, c) => s + rowTot(c), 0);
+  const cM = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize: 11.5, whiteSpace: "nowrap" };
+  const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
+  const hM = (bg) => ({ ...cM, background: bg, fontWeight: 700, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
+
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-        <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 แผนของเข้าทั้งโปรเจค — ใช้ฟอร์มเดียวกับ PO (ติ๊ก “แผนของเข้า”) · พร้อมแล้วกด “→ ทำเป็น PO จริง”</div>
         <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
       </div>
 
-      {/* รายการของเข้ารายเดือน — แผน + PO จริง รวมกัน */}
+      {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 6 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
-          <div style={{ display: "flex", gap: 14, marginBottom: 10, fontSize: 11.5, color: T.textMuted, flexWrap: "wrap" }}>
-            {Object.values(TYPE).map(t => <span key={t.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: t.clr, display: "inline-block" }} />{t.label}</span>)}
+          <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับจริง</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = แผน / PO รอเข้า</span>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {months.map(mk => {
-              const rows = entries.filter(e => e.mk === mk).sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.code.localeCompare(b.code));
-              const total = rows.reduce((s, e) => s + e.amount, 0);
-              return (
-                <div key={mk} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 12, overflow: "hidden" }}>
-                  <div style={{ padding: "9px 14px", background: "#f8fafc", borderBottom: `1px solid ${T.cardBorder}`, display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontWeight: 700, color: T.textPrimary, fontSize: 13 }}>{monthLbl(mk)}</span>
-                    <span style={{ fontSize: 11, color: T.textMuted }}>{rows.length} รายการ</span>
-                    <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(total)}</span>
-                  </div>
-                  <div className="hscroll"><table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
-                    <tbody>
-                      {rows.map((e, i) => (
-                        <tr key={i}>
-                          <td style={{ ...tdS, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{e.code}</td>
-                          <td style={{ ...tdS, color: T.textSecondary }}>{nameOf(e.code)}</td>
-                          <td style={tdS}><span style={{ background: TYPE[e.type].bg, color: TYPE[e.type].clr, fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 12 }}>{TYPE[e.type].label}</span></td>
-                          <td style={{ ...tdS, color: T.textMuted, fontFamily: "'JetBrains Mono',monospace" }}>{e.date || "—"}</td>
-                          <td style={{ ...tdS, color: T.textMuted }}>{e.supplier || "—"}</td>
-                          <td style={{ ...tdS, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: TYPE[e.type].clr }}>฿{fmt(e.amount)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table></div>
-                </div>
-              );
-            })}
+          <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+            <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 70 }}>Acc. Code</th>
+                  <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 190 }}>Acc. Name</th>
+                  {months.map(mk => <th key={mk} style={hM("#eef3ee")}>{monthLbl(mk)}</th>)}
+                  <th style={{ ...hM("#eef3ee"), fontWeight: 800 }}>TOTAL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {codes.map(code => (
+                  <tr key={code}>
+                    <td style={{ ...cM, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
+                    <td style={{ ...cM, color: T.textSecondary }}>{nameOf(code)}</td>
+                    {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, color: e.v === 0 ? T.textMuted : (e.real ? T.textPrimary : T.red), fontWeight: e.v ? (e.real ? 600 : 500) : 400 }}>{e.v ? fmt(e.v) : "-"}</td>; })}
+                    <td style={{ ...nM, fontWeight: 700, background: "#f6faf6" }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td style={{ ...cM, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
+                  {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}</td>)}
+                  <td style={{ ...nM, fontWeight: 800, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}</td>
+                </tr>
+              </tfoot>
+            </table>
           </div>
         </div>
       )}
