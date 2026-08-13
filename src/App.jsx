@@ -4687,12 +4687,12 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const balPendingOf = (code) => budgetOf(code) - committedOf(code);                              // งบ − PO ที่สั่งแล้ว
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // ยอดที่เหลือต้องสั่ง
 
-  const cM = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize:11, whiteSpace: "nowrap" };
+  const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
   const hM = (bg) => ({ ...cM, background: bg, fontWeight: 650, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
   const bCost = "#f4e9ef";
   // ตรึงคอลัมน์แรก 2 ช่อง (รหัส/ชื่อบัญชี) ให้ไม่เลื่อนหายตอนดูเดือนไกล ๆ
-  const COL1_W = 70;
+  const COL1_W = 86;
   const stickyBody0 = { position: "sticky", left: 0, background: "#fff", zIndex: 1 };
   const stickyBody1 = { position: "sticky", left: COL1_W, background: "#fff", zIndex: 1 };
   const stickyHead0 = { left: 0, zIndex: 3 };
@@ -5724,11 +5724,11 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const totOf = (pick) => rows.reduce((s, r) => s + pick(r), 0);
 
   const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2", bPO = "#eaeef5";
-  const cell = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize:11, whiteSpace: "nowrap" };
+  const cell = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const num  = { ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
   const hCell = (bg) => ({ ...cell, background: bg, fontWeight: 650, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
   // ── ตรึงคอลัมน์แรก 2 ช่อง (รหัส/ชื่อบัญชี) ให้ไม่เลื่อนหายตอนดูเดือนไกล ๆ ──────
-  const COL1_W = 70;
+  const COL1_W = 86;
   const stickyBody0 = { position: "sticky", left: 0, background: "#fff", zIndex: 1 };
   const stickyBody1 = { position: "sticky", left: COL1_W, background: "#fff", zIndex: 1 };
   const stickyHead0 = { left: 0, zIndex: 3 };
