@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, ss, ssMerge, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
+import { supabase, sg, ss, sgOrThrow, ssOrThrow, ssMerge, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -106,19 +106,27 @@ async function migrateAccountCodes(renameMap) {
     }
     return out;
   };
-  const projects = (await sg("tcs-projects")) || [];
+  // ── ทำเป็น 2 เฟส กัน "ย้ายไม่ครบเงียบ ๆ" ──────────────────────────────────
+  //  เฟส 1: อ่านทุกคีย์ของทุกโครงการ + สร้าง payload ที่เปลี่ยนรหัสแล้วเก็บไว้ในหน่วยความจำ
+  //         ใช้ sgOrThrow — ถ้าอ่านพลาดแม้แต่คีย์เดียวจะ throw ทันที (ยังไม่เขียนอะไรเลย)
+  //  เฟส 2: เขียนทุก payload ด้วย ssOrThrow — ถ้าพลาดจะ throw ให้ผู้เรียกรู้และหยุด
+  //         ก่อนไปเขียน tcs-accounts ใหม่ (ไม่ปล่อยให้รหัสใหม่โผล่ทั้งที่ข้อมูลยังไม่ย้าย)
+  const projects = (await sgOrThrow("tcs-projects")) || [];
+  const writes = []; // { key, value }
   for (const proj of projects) {
     const id = proj?.id; if (!id) continue;
-    const t = await sg(`tcs-tenders-${id}`);   if (t && typeof t === "object") await ss(`tcs-tenders-${id}`, renObjKeys(t));
-    const ad = await sg(`tcs-additions-${id}`); if (ad && typeof ad === "object") {
+    const t = await sgOrThrow(`tcs-tenders-${id}`);   if (t && typeof t === "object") writes.push({ key:`tcs-tenders-${id}`, value: renObjKeys(t) });
+    const ad = await sgOrThrow(`tcs-additions-${id}`); if (ad && typeof ad === "object") {
       const nad = {}; for (const [m, mo] of Object.entries(ad)) nad[m] = (m.startsWith("$") || typeof mo !== "object") ? mo : renObjKeys(mo);
-      await ss(`tcs-additions-${id}`, nad);
+      writes.push({ key:`tcs-additions-${id}`, value: nad });
     }
-    const po = await sg(`tcs-po-${id}`);  if (Array.isArray(po))  await ss(`tcs-po-${id}`,  po.map(p => ({ ...p, items: (p.items || []).map(it => ({ ...it, code: ren(it.code) })) })));
-    const ex = await sg(`tcs-extra-${id}`); if (Array.isArray(ex)) await ss(`tcs-extra-${id}`, ex.map(e => ({ ...e, code: ren(e.code), ...(e.parentCode ? { parentCode: ren(e.parentCode) } : {}) })));
-    const hid = await sg(`tcs-hidden-${id}`); if (Array.isArray(hid)) await ss(`tcs-hidden-${id}`, hid.map(ren));
-    const inp = await sg(`tcs-inplan-${id}`); if (Array.isArray(inp)) await ss(`tcs-inplan-${id}`, inp.map(pl => ({ ...pl, items: (pl.items || []).map(it => ({ ...it, code: ren(it.code) })) })));
+    const po = await sgOrThrow(`tcs-po-${id}`);  if (Array.isArray(po))  writes.push({ key:`tcs-po-${id}`,  value: po.map(p => ({ ...p, items: (p.items || []).map(it => ({ ...it, code: ren(it.code) })) })) });
+    const ex = await sgOrThrow(`tcs-extra-${id}`); if (Array.isArray(ex)) writes.push({ key:`tcs-extra-${id}`, value: ex.map(e => ({ ...e, code: ren(e.code), ...(e.parentCode ? { parentCode: ren(e.parentCode) } : {}) })) });
+    const hid = await sgOrThrow(`tcs-hidden-${id}`); if (Array.isArray(hid)) writes.push({ key:`tcs-hidden-${id}`, value: hid.map(ren) });
+    const inp = await sgOrThrow(`tcs-inplan-${id}`); if (Array.isArray(inp)) writes.push({ key:`tcs-inplan-${id}`, value: inp.map(pl => ({ ...pl, items: (pl.items || []).map(it => ({ ...it, code: ren(it.code) })) })) });
   }
+  // เฟส 2: เขียนจริง (อ่านครบทุกอย่างแล้วเท่านั้นถึงเริ่มเขียน)
+  for (const w of writes) await ssOrThrow(w.key, w.value);
 }
 
 // ─── Incoming / Payment tracking status ────────────────────────────────────
@@ -129,6 +137,12 @@ const todayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 };
+
+// ─── กันข้อมูลหาย: ธง "มีการแก้ไขที่ยังไม่บันทึก" (โมดูลเดียวทั้งแอป) ───────────────
+// หน้าจอที่แก้แบบ draft (QS ราคาเดิม/รายเดือน) จะตั้งค่า .dirty ระหว่างพิมพ์ค้าง
+// แล้วปุ่มออกจากหน้า/สลับโครงการ/ล็อกเอาต์/รีเฟรชเบราว์เซอร์ จะถามยืนยันก่อนทิ้ง
+const UnsavedGuard = { dirty: false };
+const confirmLeaveIfDirty = () => !UnsavedGuard.dirty || window.confirm("มีการแก้ไขที่ยังไม่บันทึก — ออกจากหน้านี้โดยไม่บันทึกหรือไม่?");
 // "2026-07-02" + 30 -> "2026-08-01" — คำนวณด้วย UTC ล้วนทั้งไปและกลับ กัน bug timezone
 // (ของเดิม parse เป็น local แต่อ่านกลับเป็น UTC ทำให้ในไทยคลาดไป 1 วันและตกเดือนผิด)
 const addDays = (dateStr, days) => {
@@ -1683,9 +1697,18 @@ export default function App() {
 
   const handleLogin = (user) => { setSession(user); setSessionState(user); };
   const handleLogout = () => {
+    if (!confirmLeaveIfDirty()) return;
+    UnsavedGuard.dirty = false;
     clearSession(); setSessionState(null);
     setScreen("home"); setRole(null); setActiveId(null);
   };
+
+  // เตือนก่อนปิด/รีเฟรช/กดปุ่มย้อนของเบราว์เซอร์ ขณะยังมีการแก้ไขที่ไม่ได้บันทึก
+  useEffect(() => {
+    const onBeforeUnload = (e) => { if (UnsavedGuard.dirty) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
 
   // โหลด session ตอนเปิดแอป — รองรับ auth.js ได้ทั้งสองแบบ:
   //  • ตัวเดิม: getSession() เป็น synchronous (คืน object/null จาก localStorage)
@@ -1998,6 +2021,8 @@ export default function App() {
   const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, "PO / จัดซื้อ"), [commit, activeId, poEntries]);
 
   const openProject = (id) => {
+    if (!confirmLeaveIfDirty()) return;
+    UnsavedGuard.dirty = false;
     setActiveId(id);
     if (session?.role === "admin") { setRole(null); setScreen("roleSelect"); }
     else { setRole(session?.role); setScreen("app"); }
@@ -2018,7 +2043,12 @@ export default function App() {
     // ไม่เข้า quick-undo เพราะการลบโครงการลบคีย์ย่อยด้วย — กู้ทั้งโครงการทำผ่านหน้า
     // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
     const next = projects.filter(p => p.id !== id);
-    setProjects(next); ss("tcs-projects", next).then(()=>setSyncedAt(new Date()));
+    // ใช้ ssMerge (merge by id) แทน ss ธรรมดา — ตัดเฉพาะโครงการที่ลบออก โดยไม่ทับ
+    // โครงการที่คนอื่นเพิ่งเพิ่มพร้อมกัน และแจ้ง error ถ้าบันทึกไม่สำเร็จ
+    setProjects(next);
+    ssMerge("tcs-projects", projects, next)
+      .then(()=>setSyncedAt(new Date()))
+      .catch(e=>{ console.warn("ลบโครงการไม่สำเร็จ:", e); setSyncError("⚠ ลบโครงการไม่สำเร็จ — ตรวจเน็ตแล้วลองใหม่"); });
     await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`); await sd(`tcs-inplan-${id}`);
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
@@ -2051,8 +2081,9 @@ export default function App() {
   const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
     additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
     incomingPlan, saveIncomingPlan,
-    updateProject, onBack: () => setScreen(session.role === "admin" ? "roleSelect" : "home"),
-    onHome: () => setScreen("home"),   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
+    updateProject,
+    onBack: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen(session.role === "admin" ? "roleSelect" : "home"); },
+    onHome: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("home"); },   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
     syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
 
   return (
@@ -3077,8 +3108,8 @@ function Shell({ role, color, project, onBack, onHome, children, syncedAt, synci
 function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
   const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
-  const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
-  const backTab = () => { if (tabHist.length) { const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); } else onBack(); };
+  const goTab   = (id) => { if (id !== tab) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setTabHist(h => [...h, tab]); setTab(id); } };
+  const backTab = () => { if (tabHist.length) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); } else onBack(); };
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   // ปุ่ม "Export เดือนนี้" ของแท็บรายเดือน ถูกยกขึ้นมาไว้ข้างปุ่ม Export หลักด้านบน
   const monthlyExportRef = useRef(null);
@@ -3173,8 +3204,6 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
   const [showHidden, setShowHidden] = useState(false);
   const [forceEdit, setForceEdit] = useState(false); // user explicitly clicked "แก้ไข" to unlock an already-saved baseline
 
-  useEffect(() => setDraft({...tenderCosts}), [tenderCosts]);
-
   // The baseline counts as "saved" (and therefore locked, requiring "แก้ไข"
   // to unlock) once it carries the explicit $saved flag, or — for baselines
   // saved before this flag existed — once it already has any real value.
@@ -3182,6 +3211,19 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
   const baselineSaved = tenderCosts.$saved === true || hasData;
   const editingUnlocked = !baselineSaved || forceEdit;
   useEffect(() => { setEditMode?.(editingUnlocked); return () => setEditMode?.(false); }, [editingUnlocked, setEditMode]);
+
+  // ซิงก์ draft จากค่าที่บันทึกไว้ — แต่ "ห้าม" เขียนทับสิ่งที่กำลังพิมพ์ค้างระหว่างแก้ไข
+  // (เช่น realtime refetch ตอนคนอื่นเซฟ PO ในโครงการเดียวกัน) ยกเว้นตอนสลับโครงการ รีเซ็ตเสมอ
+  const prevProjRef = useRef(project?.id);
+  useEffect(() => {
+    const switched = prevProjRef.current !== project?.id;
+    prevProjRef.current = project?.id;
+    if (switched || !editingUnlocked) setDraft({ ...tenderCosts });
+  }, [tenderCosts, project?.id, editingUnlocked]);
+
+  // ตั้งธง "แก้ค้างยังไม่บันทึก" เมื่อ draft ต่างจากค่าที่บันทึกไว้ (ระหว่างโหมดแก้ไข)
+  const isDirty = editingUnlocked && JSON.stringify(draft) !== JSON.stringify(tenderCosts);
+  useEffect(() => { UnsavedGuard.dirty = isDirty; return () => { UnsavedGuard.dirty = false; }; }, [isDirty]);
 
   // ยกเลิกการแก้ไข: ทิ้งค่าที่พิมพ์ค้าง คืนกลับเป็นค่าที่บันทึกไว้ล่าสุด แล้วล็อกกลับ
   const canCancel = baselineSaved; // มีค่าที่บันทึกไว้ให้ย้อนกลับได้
@@ -3559,7 +3601,6 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const [newColName, setNewColName] = useState("");
   const [forceEdit, setForceEdit] = useState(false);    // user explicitly clicked "แก้ไข" to unlock an already-saved month
 
-  useEffect(() => { setDraftAdd({...(additions[month]||{})}); }, [month, additions]);
   useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
   useEffect(() => { setForceEdit(false); setAddColOpen(false); }, [month]); // switching months always re-locks until "แก้ไข" is clicked again
   // ผูกปุ่ม "Export เดือนนี้" ที่ยกไปไว้บนหัว (QSView) ให้ยิง export ของเดือนที่เลือกอยู่
@@ -3591,6 +3632,20 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const monthHasData = Object.entries(additions[month]||{}).some(([k,v]) => !k.startsWith("$") && parseFloat(v));
   const monthSaved = additions[month]?.$saved === true || monthHasData;
   const editingUnlocked = !monthSaved || forceEdit;
+
+  // ซิงก์ draftAdd จากค่าที่บันทึกไว้ — รีเซ็ตเสมอเมื่อ "สลับเดือน" แต่ "ห้าม" เขียนทับ
+  // สิ่งที่กำลังพิมพ์ค้างระหว่างแก้ไข (เช่น realtime refetch ตอนคนอื่นเซฟในโครงการเดียวกัน)
+  const prevMonthRef = useRef(month);
+  useEffect(() => {
+    const switched = prevMonthRef.current !== month;
+    prevMonthRef.current = month;
+    if (switched || !editingUnlocked) setDraftAdd({ ...(additions[month] || {}) });
+  }, [month, additions, editingUnlocked]);
+
+  // ตั้งธง "แก้ค้างยังไม่บันทึก" เมื่อ draftAdd ต่างจากค่าที่บันทึกไว้ของเดือนนี้
+  const isDirty = editingUnlocked && JSON.stringify(draftAdd) !== JSON.stringify(additions[month] || {});
+  useEffect(() => { UnsavedGuard.dirty = isDirty; return () => { UnsavedGuard.dirty = false; }; }, [isDirty]);
+
   const [monthEditMode, setMonthEditMode] = useState(false); // โหมดจัดการเดือน (เพิ่ม/ลบเดือน) แยกจากการแก้ค่าในตาราง
   // เลื่อนแถวชิปเดือนให้เดือนที่เลือกอยู่ในสายตาเสมอ (เช่นตอนคลิกแท่งกราฟ)
   const activeChipRef = useRef(null);
@@ -4573,7 +4628,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
   const planDates = (pl) => poRounds(pl).map(r => r.planDate).filter(Boolean).sort();
   const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
-  const monthLbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
+  const monthLbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
   const today = todayStr();
 
   // ── รวมรายการของเข้า แยกที่มา: จริง(รับแล้ว/PO) vs แผน — เดือนไหนมีทั้งคู่จะโชว์ 2 ค่า
@@ -5384,6 +5439,15 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   });
   const sortedCodes = Object.keys(groups).sort();
 
+  // committed/stock ต่อ code ต้องคิดจาก PO "ทั้งหมด" ไม่ใช่เฉพาะที่ผ่านตัวกรอง
+  // (ไม่งั้น "ต้องสั่งเพิ่ม" จะเพี้ยน/เกินจริงเมื่อเปิดฟิลเตอร์สถานะหรือเฉพาะล่าช้า)
+  const committedAll = {}, stockAll = {};
+  poEntries.forEach(p => poItems(p).forEach(it => {
+    if (!it.code) return;
+    committedAll[it.code] = (committedAll[it.code] || 0) + (parseFloat(it.amount) || 0);
+    stockAll[it.code]     = (stockAll[it.code]     || 0) + (parseFloat(it.store)  || 0);
+  }));
+
   const DateCell = ({ value, lateTint }) => (
     <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:value?(lateTint?T.red:T.textPrimary):T.textMuted,fontWeight:value&&lateTint?700:400}}>
       {value || "—"}
@@ -5468,9 +5532,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
             const lateCount = rows.filter(({po:p})=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
             const isCollapsed = collapsed.has(code);
             // งบ + ยอดที่ต้องสั่งเพิ่ม (งบ − ของใน store − PO ที่สั่งแล้วของ code นี้)
+            // ใช้ committed/stock จาก PO ทั้งหมด (committedAll/stockAll) ไม่ผูกกับตัวกรอง
             const grpBudget = parseFloat(trkBudget[code]) || 0;
-            const grpCommitted = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
-            const grpStock = rows.reduce((s,{item})=>s+(parseFloat(item.store)||0),0);
+            const grpCommitted = committedAll[code] || 0;
+            const grpStock = stockAll[code] || 0;
             const grpToOrder = grpBudget - grpStock - grpCommitted;
             return (
               <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
@@ -5571,14 +5636,17 @@ const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","
 function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [], usdRate = 0 }) {
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   const combined = buildCombinedBudget(tenderCosts, additions);
-  const committedByCode = {}, stockByCode = {};
+  const committedByCode = {}, stockByCode = {}, plannedByCode = {};
   const actual = {}, payplan = {};
   const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
   const incoming = {};
   // แผนของเข้า = อ็อบเจ็กต์รูปเดียวกับ PO → บัคเก็ตตามวันแผนรับของแต่ละงวด
   // (ไม่มีวันแผนก็ใช้วันในฟอร์ม) รวมยอดที่วางแผนไว้ต่อ Acc code ต่อเดือน
+  // และเก็บยอดแผนรวมต่อ Acc code (plannedByCode) ใช้คำนวณ Balance Cost ให้ตรงกับ
+  // หน้า "แผนของเข้า" ของจัดซื้อ (งบ − Stock − PO − แผน)
   (Array.isArray(incomingPlan) ? incomingPlan : []).forEach(pl => {
     poItems(pl).forEach(it => {
+      plannedByCode[it.code] = (plannedByCode[it.code] || 0) + (parseFloat(it.amount) || 0);
       (it.rounds || []).forEach(r => {
         const amt = parseFloat(r.planAmount) || 0;
         if (amt > 0) bump(incoming, it.code, (r.planDate || pl.date || "").slice(0, 7), amt);
@@ -5605,16 +5673,17 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m => Object.keys(m)))].sort();
   const mgM = [...new Set([...monthsOf(incoming), ...monthsOf(actual)])].sort(); // แผน ∪ รับจริง
   const payM = monthsOf(payplan);
-  const lbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
+  const lbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
   const money = (n) => !n ? "-" : (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n));
 
   const rows = accounts.map(a => {
     const budget = parseFloat(combined[a.code]) || 0;
     const committed = committedByCode[a.code] || 0;                     // Total PO (สั่งแล้ว)
     const stock = stockByCode[a.code] || 0;
-    const balPO = budget - committed;                                   // Balance Pending PO
-    const balCost = balPO - stock;                                      // Balance Cost
-    const balPOout = budget - stock - committed;                        // PO Balance = ยอดที่ยังต้องสั่งอีก (งบ − Stock − PO ที่สั่งแล้ว)
+    const planned = plannedByCode[a.code] || 0;                         // ยอดที่วางแผนจะเข้า (ยังไม่เป็น PO)
+    const balPO = budget - committed;                                   // Balance Pending PO (งบ − PO)
+    const balCost = budget - stock - committed - planned;               // Balance Cost = เหลือต้องสั่งจริง (งบ − Stock − PO − แผน) ตรงกับหน้าจัดซื้อ
+    const balPOout = budget - stock - committed;                        // PO Balance = งบ − Stock − PO ที่สั่งแล้ว (ยังไม่คิดแผน)
     const mgRow = mgM.map(mk => { const av = actual[a.code]?.[mk] || 0; const pv = incoming[a.code]?.[mk] || 0; const eff = av > 0 ? av : pv; return { eff, real: av > 0 }; });
     const pyRow = payM.map(mk => payplan[a.code]?.[mk] || 0);
     const mgTot = mgRow.reduce((s, c) => s + c.eff, 0);
@@ -5640,7 +5709,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   return (
     <div>
       <div style={{ fontSize:12, color: T.textMuted, marginBottom: 8 }}>
-        โชว์เฉพาะเดือนที่มีข้อมูล · Incoming = รับจริง(ดำ) + PO ที่สั่งแล้วยังไม่เข้า/แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = ยอดที่ยังต้องสั่งอีก (งบ − Stock − Total PO)
+        โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับจริง(ดำ) + PO ที่สั่งแล้วยังไม่เข้า/แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)
       </div>
       <div style={{ display: "flex", gap: 18, marginBottom: 12, fontSize: 12 }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับจริง</span>
@@ -5759,8 +5828,9 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   ];
   const tenderTotal   = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm     = poEntries.reduce((s,p)=>s+poTotal(p),0);
-  // จ่ายแล้ว = ยอดที่ตัดจ่ายอัตโนมัติจริง (งวดที่รับของแล้ว + ถึงกำหนดจ่าย) ให้ตรงกับไฟล์ Excel
-  const totalPaid     = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundReceived(r)&&roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0), 0);
+  // จ่ายแล้ว = ทุกงวดที่ถือว่าจ่ายแล้ว (สถานะ Paid = จ่ายทันที, หรือถึงกำหนดจ่าย)
+  // ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงกับหน้าจัดซื้อและไฟล์ Excel ทุกไฟล์
+  const totalPaid     = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0), 0);
   const paidPOCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
   const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
   const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
@@ -5807,10 +5877,10 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
       .sort((x, y) => (x.po.date || "").localeCompare(y.po.date || ""));
     const variance = a.budget - a.committed;
     const variancePct = a.budget > 0 ? (variance / a.budget) * 100 : (a.committed > 0 ? null : 0);
-    // จ่ายแล้วจริง (งวดที่รับของ + ถึงกำหนดจ่าย) และยอดที่ยังต้องเก็บเงินไว้รอจ่าย
-    // ของ Acc. Code นี้ — สิ่งที่บัญชีต้องรู้ว่าต้องกันเงินไว้เท่าไหร่
+    // จ่ายแล้ว (สถานะ Paid = จ่ายทันที, หรือถึงกำหนดจ่าย) และยอดที่ยังต้องเก็บเงินไว้รอจ่าย
+    // ของ Acc. Code นี้ — ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงทั้งแอปและ Excel
     const paid = poEntries.reduce((s,p)=> s + poItems(p).filter(it=>it.code===a.code)
-      .reduce((ss,it)=> ss + (it.rounds||[]).filter(r=>roundReceived(r)&&roundPaid(p,r))
+      .reduce((ss,it)=> ss + (it.rounds||[]).filter(r=>roundPaid(p,r))
         .reduce((s3,r)=> s3 + (parseFloat(r.actualAmount)||0), 0), 0), 0);
     const toReserve = Math.max(a.committed - paid, 0);
     return { ...a, rows, variance, variancePct, paid, toReserve };
