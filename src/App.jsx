@@ -324,7 +324,9 @@ const incomingStatus = (p) => {
   const items = poItems(p).filter(it => itemOrdered(it) > 0);
   const allReceived = items.length > 0 && items.every(it => itemReceived(it) >= itemOrdered(it) - 0.001);
   const anyReceived = rounds.some(roundReceived);
-  const anyLate  = rounds.some(r => !roundReceived(r) && r.planDate && r.planDate < todayStr());
+  // "ล่าช้า" เฉพาะงวดที่ยังไม่รับ และ "ยังไม่ได้ใส่วันรับ" และเลยวันแผนแล้ว
+  // (ถ้าใส่วันรับไว้ล่วงหน้า = นัดไว้แล้ว ยังไม่ถือว่าล่าช้าจนกว่าจะเลยวันรับ)
+  const anyLate  = rounds.some(r => !roundReceived(r) && !r.actualDate && r.planDate && r.planDate < todayStr());
   if (allReceived) return "received";
   if (anyLate) return "late";
   if (anyReceived) return "partial";
@@ -4429,48 +4431,63 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 //  แผน = อ็อบเจ็กต์รูปเดียวกับ PO (isPlan:true) สร้าง/แก้ผ่านฟอร์ม PO โดยติ๊ก
 //  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
 //  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
-function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, onNew, onEdit, onConvert, onDelete }) {
+function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {}, additions = {}, extraItems = [], hiddenAccounts = [], onNew, onEdit, onConvert, onDelete }) {
   const list = Array.isArray(plans) ? plans : [];
+  const pos = Array.isArray(poEntries) ? poEntries : [];
+  const acctList = exportAccountList(extraItems, hiddenAccounts);
+  const nameOf = (code) => acctList.find(a => a.code === code)?.name || ACCOUNTS.find(a => a.code === code)?.name || "";
   const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
-  const nameOf = (code) => ACCOUNTS.find(a => a.code === code)?.name || "";
   const planDates = (pl) => poRounds(pl).map(r => r.planDate).filter(Boolean).sort();
   const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
   const monthLbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
+  const today = todayStr();
 
-  // ── รวม "รายการของเข้ารายเดือน" ทั้งแผน + PO จริง ─────────────────────────────
+  // ── รวมรายการของเข้า (แผน + PO จริง) พร้อมสถานะ: received / late / pending ─────
   const entries = [];
+  const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
   list.forEach(pl => poItems(pl).forEach(it => (it.rounds || []).forEach(r => {
     const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-    entries.push({ mk: (r.planDate || pl.date || "").slice(0, 7), date: r.planDate || pl.date || "", code: it.code, amount: amt, type: "plan", supplier: pl.supplier?.name || "" });
+    entries.push({ code: it.code, mk: (r.planDate || pl.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "pending" });
   })));
-  (Array.isArray(poEntries) ? poEntries : []).forEach(p => poItems(p).forEach(it => (it.rounds || []).forEach(r => {
+  pos.forEach(p => poItems(p).forEach(it => (it.rounds || []).forEach(r => {
     if (roundReceived(r)) {
       const amt = parseFloat(r.actualAmount) || 0; if (!amt) return;
-      entries.push({ mk: r.actualDate.slice(0, 7), date: r.actualDate, code: it.code, amount: amt, type: "received", supplier: poSupplierName(p) });
+      entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, state: "received" });
     } else {
       const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-      entries.push({ mk: (r.planDate || p.date || "").slice(0, 7), date: r.planDate || p.date || "", code: it.code, amount: amt, type: "po", supplier: poSupplierName(p) });
+      entries.push({ code: it.code, mk: (r.planDate || p.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "pending" });
     }
   })));
   const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
-  const TYPE = { plan: { label: "แผน", clr: T.red, bg: T.redBg }, po: { label: "PO รอเข้า", clr: T.amber, bg: T.amberBg }, received: { label: "รับแล้ว", clr: T.green, bg: T.greenBg } };
-  const tdS = { padding: "6px 10px", borderBottom: `1px solid ${T.cardBorder}`, fontSize: 12, whiteSpace: "nowrap" };
 
-  // เมทริกซ์ code × เดือน (รับจริง = ดำ, ยังเป็นแผน/PO รอเข้า = แดง) เหมือนหน้าบัญชี
   const cellMap = {};
   entries.forEach(e => {
     const c = (cellMap[e.code] = cellMap[e.code] || {});
-    const cell = (c[e.mk] = c[e.mk] || { rec: 0, exp: 0 });
-    if (e.type === "received") cell.rec += e.amount; else cell.exp += e.amount;
+    const cell = (c[e.mk] = c[e.mk] || { rec: 0, exp: 0, late: 0 });
+    if (e.state === "received") cell.rec += e.amount;
+    else { cell.exp += e.amount; if (e.state === "late") cell.late += e.amount; }
   });
   const codes = Object.keys(cellMap).sort();
-  const effOf = (code, mk) => { const c = cellMap[code]?.[mk]; if (!c) return { v: 0, real: false }; return c.rec > 0 ? { v: c.rec, real: true } : { v: c.exp, real: false }; };
+  const effOf = (code, mk) => { const c = cellMap[code]?.[mk]; if (!c) return { v: 0, state: "none" }; if (c.rec > 0) return { v: c.rec, state: "received" }; return { v: c.exp, state: c.late > 0 ? "late" : "pending" }; };
+  const stClr = { received: T.green, late: T.amber, pending: T.red, none: T.textMuted };
   const rowTot = (code) => months.reduce((s, mk) => s + effOf(code, mk).v, 0);
   const colTot = (mk) => codes.reduce((s, c) => s + effOf(c, mk).v, 0);
   const grand = codes.reduce((s, c) => s + rowTot(c), 0);
+
+  // ── คอลัมน์ต้นทุน: Tender Cost / Stock / Balance Cost ────────────────────────
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  const budgetOf = (code) => parseFloat(combinedBudget[code]) || 0;
+  const committedOf = (code) => pos.reduce((s, p) => s + poAmountForCode(p, code), 0);
+  const plannedOf = (code) => list.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
+  const stockOf = (code) => pos.reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.store) || 0), 0), 0);
+  const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // ยอดที่เหลือต้องสั่ง
+
   const cM = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize: 11.5, whiteSpace: "nowrap" };
   const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
   const hM = (bg) => ({ ...cM, background: bg, fontWeight: 700, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
+  const bCost = "#f4e9ef";
+  const money = (n) => n ? (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n)) : "-";
+  const sum = (fn) => codes.reduce((s, c) => s + fn(c), 0);
 
   return (
     <div>
@@ -4478,37 +4495,50 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, onNew, onEdit, on
         <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
       </div>
 
-      {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ (แผน + PO จริง รวมกัน) */}
+      {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 6 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
           <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับจริง</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = แผน / PO รอเข้า</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.green, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับแล้ว</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.amber, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = ล่าช้า</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = แผน / รอเข้า</span>
           </div>
           <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
             <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
               <thead>
                 <tr>
                   <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 70 }}>Acc. Code</th>
-                  <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 190 }}>Acc. Name</th>
+                  <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 180 }}>Acc. Name</th>
+                  <th style={{ ...hM(bCost), minWidth: 120 }}>Tender Cost</th>
+                  <th style={{ ...hM(bCost), minWidth: 90 }}>Stock</th>
+                  <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Cost</th>
                   {months.map(mk => <th key={mk} style={hM("#eef3ee")}>{monthLbl(mk)}</th>)}
                   <th style={{ ...hM("#eef3ee"), fontWeight: 800 }}>TOTAL</th>
                 </tr>
               </thead>
               <tbody>
-                {codes.map(code => (
-                  <tr key={code}>
-                    <td style={{ ...cM, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
-                    <td style={{ ...cM, color: T.textSecondary }}>{nameOf(code)}</td>
-                    {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, color: e.v === 0 ? T.textMuted : (e.real ? T.textPrimary : T.red), fontWeight: e.v ? (e.real ? 600 : 500) : 400 }}>{e.v ? fmt(e.v) : "-"}{e.v ? usdLine(e.v, usdRate) : null}</td>; })}
-                    <td style={{ ...nM, fontWeight: 700, background: "#f6faf6" }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
-                  </tr>
-                ))}
+                {codes.map(code => {
+                  const bud = budgetOf(code), stk = stockOf(code), bc = balCostOf(code);
+                  return (
+                    <tr key={code}>
+                      <td style={{ ...cM, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
+                      <td style={{ ...cM, color: T.textSecondary }}>{nameOf(code)}</td>
+                      <td style={{ ...nM, background: bCost }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, color: stk ? T.textPrimary : T.textMuted }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, color: bc < 0 ? T.red : T.textPrimary, fontWeight: 600 }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
+                      {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, color: e.v === 0 ? T.textMuted : stClr[e.state], fontWeight: e.v ? (e.state === "received" ? 600 : 500) : 400 }}>{e.v ? fmt(e.v) : "-"}{e.v ? usdLine(e.v, usdRate) : null}</td>; })}
+                      <td style={{ ...nM, fontWeight: 700, background: "#f6faf6" }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
               <tfoot>
                 <tr>
                   <td style={{ ...cM, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7" }}>{money(sum(budgetOf))}</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7" }}>{money(sum(stockOf))}</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}</td>
                   {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}{colTot(mk) ? usdLine(colTot(mk), usdRate) : null}</td>)}
                   <td style={{ ...nM, fontWeight: 800, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}{grand ? usdLine(grand, usdRate) : null}</td>
                 </tr>
@@ -4976,7 +5006,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
-          <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+          <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -5174,9 +5204,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
               <span style={{color:T.textMuted,fontSize:11}}>→</span>
               <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:400}}>{d.actual||"รอ"}</span>
               {(() => {
-                const rec = parseFloat(d.actualAmount)||0, pl = parseFloat(d.planAmount)||0, amt = rec || pl;
+                const received = st === "received";   // รับจริงแล้ว (วันรับมาถึงแล้ว) → เขียว
+                const amt = received ? (parseFloat(d.actualAmount)||0) : (parseFloat(d.planAmount)||parseFloat(d.actualAmount)||0);
                 if (!amt) return <span style={{fontSize:10,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>(—)</span>;
-                return <span style={{fontSize:10,color:rec?T.green:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:rec?700:400}}>({fmt(amt)})</span>;
+                return <span style={{fontSize:10,color:received?T.green:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:received?700:400}}>({fmt(amt)})</span>;
               })()}
             </div>
           );
