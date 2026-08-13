@@ -4425,140 +4425,54 @@ function StatusPicker({ status, onChange, compact, disabled }) {
   );
 }
 
-// ─── จัดซื้อ: แผนของเข้าทั้งโปรเจค (วางแผนก่อนออก PO) ───────────────────────────
-//  รายการ "แผนของเข้า" — แต่ละแผน = วันที่แผนของเข้า + หลายบรรทัด (Acc code + ยอด).
-//  ยังไม่ใช่ PO จริง (ยังไม่รับของ). กด "สร้าง PO จริง" เพื่อเปิดฟอร์ม PO ที่เติม
-//  ข้อมูลจากแผนไว้ให้ — พอบันทึก PO แล้วแผนจะถูกย้ายออก. ข้อมูลนี้โชว์เป็น Incoming
-//  Plan (สีแดง) ในตารางรวมของบัญชี.
-function IncomingPlanTab({ incomingPlan, saveIncomingPlan, tenderCosts = {}, additions = {}, extraItems, hiddenAccounts, onConvert }) {
-  const plans = Array.isArray(incomingPlan) ? incomingPlan : [];
-  const accounts = exportAccountList(extraItems, hiddenAccounts);
-  const nameOf = (code) => accounts.find(a => a.code === code)?.name || "";
-  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
-  const budgetForCode = (code) => parseFloat(combinedBudget[code]) || 0;
-  const netForLine = (it) => Math.max(budgetForCode(it.code) - (parseFloat(it.store) || 0), 0);
-  const [modal, setModal] = useState(null); // { id?, date, items:[{id,code,store,amount,pct}] } | null
-
-  const blankLine = () => ({ id: uid(), code: "", store: "", amount: "", pct: "" });
-  const openNew = () => setModal({ date: "", items: [blankLine()] });
-  const openEdit = (pl) => setModal({ id: pl.id, date: pl.date || "", items: (pl.items || []).map(it => ({ id: it.id || uid(), code: it.code, store: it.store || "", amount: it.amount, pct: it.pct ?? "" })) });
-  const planTotal = (pl) => (pl.items || []).reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
-
-  const saveModal = () => {
-    if (!modal.date) { alert("เลือกวันที่แผนของเข้าก่อน"); return; }
-    const items = (modal.items || []).filter(it => it.code && (parseFloat(it.amount) || 0) > 0).map(it => ({ id: it.id || uid(), code: it.code, store: it.store || "", amount: it.amount, pct: it.pct ?? "" }));
-    if (!items.length) { alert("กรอก Acc code และยอดอย่างน้อย 1 บรรทัด"); return; }
-    const entry = { id: modal.id || uid(), date: modal.date, items };
-    saveIncomingPlan(modal.id ? plans.map(pl => pl.id === modal.id ? entry : pl) : [...plans, entry]);
-    setModal(null);
-  };
-  const removePlan = (id) => { if (window.confirm("ลบแผนของเข้านี้?")) saveIncomingPlan(plans.filter(pl => pl.id !== id)); };
-  const convert = (pl) => { if (window.confirm("สร้าง PO จริงจากแผนนี้?\n\nฟอร์ม PO จะเปิดพร้อมข้อมูลจากแผน — เมื่อบันทึก PO แล้ว แผนนี้จะถูกย้ายออก")) onConvert?.(pl); };
-
+// ─── จัดซื้อ: แผนของเข้าทั้งโปรเจค (ใช้ฟอร์มเดียวกับ PO) ────────────────────────
+//  แผน = อ็อบเจ็กต์รูปเดียวกับ PO (isPlan:true) สร้าง/แก้ผ่านฟอร์ม PO โดยติ๊ก
+//  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
+//  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
+function IncomingPlanTab({ plans, onNew, onEdit, onConvert, onDelete }) {
+  const list = Array.isArray(plans) ? plans : [];
   const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
-  const sorted = [...plans].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-  const setLine = (i, k, v) => setModal(m => ({ ...m, items: m.items.map((it, idx) => idx === i ? { ...it, [k]: v } : it) }));
-  const addLine = () => setModal(m => ({ ...m, items: [...m.items, blankLine()] }));
-  const delLine = (i) => setModal(m => ({ ...m, items: m.items.length > 1 ? m.items.filter((_, idx) => idx !== i) : m.items }));
+  const nameOf = (code) => ACCOUNTS.find(a => a.code === code)?.name || "";
+  const planDates = (pl) => poRounds(pl).map(r => r.planDate).filter(Boolean).sort();
+  const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
 
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-        <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 แผนของเข้าทั้งโปรเจค — วางแผนล่วงหน้าก่อนออก PO · พอของเข้าจริงกด “→ สร้าง PO จริง”</div>
-        <button onClick={openNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
+        <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 แผนของเข้าทั้งโปรเจค — ใช้ฟอร์มเดียวกับ PO (ติ๊ก “แผนของเข้า”) · พร้อมแล้วกด “→ ทำเป็น PO จริง”</div>
+        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
       </div>
-
       {sorted.length === 0 ? (
         <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>📅</div>ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {sorted.map(pl => (
-            <div key={pl.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 18px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
-                <span style={{ background: T.amberBg, color: T.amber, fontWeight: 700, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 ของเข้า {lbl(pl.date)}</span>
-                <span style={{ fontSize: 12, color: T.textMuted }}>{(pl.items || []).length} รายการ</span>
-                <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(planTotal(pl))}</span>
-                <button onClick={() => convert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ สร้าง PO จริง</button>
-                <button onClick={() => openEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
-                <button onClick={() => removePlan(pl.id)} title="ลบแผน" className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px", color: T.red, borderColor: T.red }}>🗑</button>
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {(pl.items || []).map(it => (
-                  <span key={it.id} style={{ background: "#f8fafc", border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "5px 10px", fontSize: 12 }}>
-                    <b style={{ fontFamily: "'JetBrains Mono',monospace", color: T.blue }}>{it.code}</b> {nameOf(it.code)} · <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>฿{fmt(parseFloat(it.amount) || 0)}</b>
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {modal && (
-        <div onClick={() => setModal(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 300, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflow: "auto" }}>
-          <div onClick={e => e.stopPropagation()} style={{ background: T.card, borderRadius: 16, width: "min(560px,100%)", overflow: "hidden", boxShadow: "0 24px 60px rgba(15,23,42,0.3)" }}>
-            <div style={{ background: "linear-gradient(135deg,#78350f,#d97706)", padding: "16px 22px", color: "#fff", fontWeight: 700, fontSize: 16 }}>{modal.id ? "แก้ไขแผนของเข้า" : "เพิ่มแผนของเข้า"}</div>
-            <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 16 }}>
-              <label style={{ fontSize: 12, color: T.textSecondary, display: "flex", flexDirection: "column", gap: 5 }}>
-                วันที่แผนของเข้า
-                <input type="date" value={modal.date} onChange={e => setModal(m => ({ ...m, date: e.target.value }))} className="input-base" style={{ padding: "8px 10px" }} />
-              </label>
-              <div>
-                <div style={{ fontSize: 12, color: T.textSecondary, fontWeight: 600, marginBottom: 6 }}>รายการ (กรอกของใน store และ % ของยอดสั่ง)</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {modal.items.map((it, i) => {
-                    const budget = budgetForCode(it.code);
-                    const net = netForLine(it);
-                    return (
-                      <div key={it.id} style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: 12, background: T.bg }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center", marginBottom: 10 }}>
-                          <select value={it.code} onChange={e => setLine(i, "code", e.target.value)} className="input-base">
-                            <option value="">— เลือก Acc code —</option>
-                            {accounts.map(a => <option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
-                          </select>
-                          <button onClick={() => delLine(i)} title="ลบบรรทัด" style={{ background: "none", border: "none", color: T.red, cursor: "pointer", padding: "4px 8px", fontSize: 15 }}>🗑</button>
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={{ fontSize: 11, color: T.textSecondary }}>งบโครงการ</span>
-                            <input className="input-base" readOnly tabIndex={-1} value={fmtMoneyInput(budget)} style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, background: T.card, color: T.textPrimary }} />
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={{ fontSize: 11, color: T.textSecondary }}>มีใน store</span>
-                            <MoneyInput value={it.store} onChange={v => setLine(i, "store", v)} />
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={{ fontSize: 11, color: T.amber }}>ต้องสั่งสุทธิ</span>
-                            <input className="input-base" readOnly tabIndex={-1} value={fmtMoneyInput(net)} style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, background: T.amberBg, color: T.amber, borderColor: "transparent" }} />
-                          </label>
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={{ fontSize: 11, color: T.textSecondary }}>ยอดวางแผน (THB)</span>
-                            <MoneyInput value={it.amount} onChange={v => setLine(i, "amount", v)} />
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={{ fontSize: 11, color: T.textSecondary }}>% ของยอดสั่ง (กรอกเอง)</span>
-                            <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
-                              <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e => setLine(i, "pct", e.target.value)} className="input-base" style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", flex: 1, paddingRight: 26 }} />
-                              <span style={{ position: "absolute", right: 11, fontSize: 13, color: (it.pct ?? "") !== "" ? T.textPrimary : T.textMuted, fontWeight: 600, pointerEvents: "none" }}>%</span>
-                            </div>
-                          </label>
-                        </div>
-                      </div>
-                    );
-                  })}
+          {sorted.map(pl => {
+            const items = poItems(pl);
+            const total = items.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
+            const ds = planDates(pl);
+            return (
+              <div key={pl.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+                  <span style={{ background: T.amberBg, color: T.amber, fontWeight: 700, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 ของเข้า {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
+                  {pl.supplier?.name && <span style={{ fontSize: 12, color: T.textSecondary }}>· {pl.supplier.name}</span>}
+                  <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} รายการ</span>
+                  <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(total)}</span>
+                  <button onClick={() => onConvert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ ทำเป็น PO จริง</button>
+                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
+                  <button onClick={() => onDelete(pl.id)} title="ลบแผน" className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px", color: T.red, borderColor: T.red }}>🗑</button>
                 </div>
-                <button onClick={addLine} className="btn-ghost" style={{ marginTop: 10, fontSize: 12 }}>+ เพิ่มบรรทัด</button>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {items.map(it => (
+                    <span key={it.id} style={{ background: "#f8fafc", border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "5px 10px", fontSize: 12 }}>
+                      <b style={{ fontFamily: "'JetBrains Mono',monospace", color: T.blue }}>{it.code}</b> {nameOf(it.code)} · <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>฿{fmt(parseFloat(it.amount) || 0)}</b>
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 22px", borderTop: `1px solid ${T.cardBorder}` }}>
-              <button onClick={() => setModal(null)} className="btn-ghost">ยกเลิก</button>
-              <button onClick={saveModal} className="btn-primary" style={{ background: T.amber }}>บันทึกแผน</button>
-            </div>
-          </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -4579,15 +4493,16 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     date:new Date().toISOString().slice(0,10), status:"PO Issued",
     supplier:{ name:"", poNumber:"" },
     paymentType:"", creditDays:DEFAULT_CREDIT_DAYS, notes:"",
-    items:[ blankItem() ],
+    items:[ blankItem() ], isPlan:false,
   });
   const [form,   setForm]   = useState(emptyForm);
   const [editId, setEditId] = useState(null);
+  const [editingPlan, setEditingPlan] = useState(false); // true = กำลังแก้ "แผนของเข้า" (มาจากลิสต์แผน)
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState(null);
   const [collapsed, setCollapsed] = useState({});
-  const [convertPlanId, setConvertPlanId] = useState(null); // แผนของเข้าที่กำลังแปลงเป็น PO (จะถูกย้ายออกเมื่อบันทึก PO)
+  const plans = Array.isArray(incomingPlan) ? incomingPlan : [];
   // อยู่ในโหมดแก้ไขเมื่อเปิดฟอร์มเพิ่ม/แก้ PO หรือเปิดหน้ารายละเอียด (บันทึกของเข้า/แบ่งงวด)
   useEffect(() => { setEditMode?.(view==="add" || detailId!=null); return () => setEditMode?.(false); }, [view, detailId, setEditMode]);
 
@@ -4660,17 +4575,27 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       paymentType: form.paymentType || "", creditDays: parseInt(form.creditDays,10) || DEFAULT_CREDIT_DAYS,
       items: validItems,
     };
+    const toPlan = !!form.isPlan;   // ติ๊ก "แผนของเข้า" ไว้ไหม
 
-    const prev = editId ? poEntries.find(x=>x.id===editId) : null;
+    const prev = editId ? (editingPlan ? plans.find(x=>x.id===editId) : poEntries.find(x=>x.id===editId)) : null;
     const entries = [];
     if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `เปลี่ยนสถานะ: ${prev.status} → ${payload.status}`));
-    entries.push(historyEntry(session, prev ? "edited" : "created", prev ? "แก้ไขข้อมูล PO" : "สร้างรายการ PO"));
-    const withLog = { ...payload, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
+    entries.push(historyEntry(session, prev ? "edited" : "created", toPlan ? (prev?"แก้ไขแผนของเข้า":"สร้างแผนของเข้า") : (prev?"แก้ไขข้อมูล PO":"สร้างรายการ PO")));
+    const withLog = { ...payload, isPlan: toPlan, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
 
-    savePO(editId ? poEntries.map(p=>p.id===editId?{...withLog,id:editId}:p) : [...poEntries,{...withLog,id:uid()}]);
-    // ถ้าบันทึกจากการ "แปลงแผน" → ย้ายแผนต้นทางออก (ไม่ให้นับซ้ำกับ PO จริง)
-    if (convertPlanId) { saveIncomingPlan((Array.isArray(incomingPlan)?incomingPlan:[]).filter(pl=>pl.id!==convertPlanId)); setConvertPlanId(null); }
-    setEditId(null);
+    if (editingPlan) {
+      // ต้นทางเป็น "แผน": ติ๊กแผนอยู่ = อัปเดตแผน · เอาติ๊กออก = แปลงแผน → PO จริง (ย้ายออก)
+      if (toPlan) saveIncomingPlan(plans.map(pl=>pl.id===editId?{...withLog,id:editId}:pl));
+      else { saveIncomingPlan(plans.filter(pl=>pl.id!==editId)); savePO([...poEntries,{...withLog,id:uid()}]); }
+    } else if (toPlan) {
+      // ต้นทางเป็น PO (หรือรายการใหม่) แต่ติ๊กเป็นแผน → บันทึกเป็นแผน (ถ้าเดิมเป็น PO ให้ย้ายออก)
+      if (editId && poEntries.some(p=>p.id===editId)) savePO(poEntries.filter(p=>p.id!==editId));
+      saveIncomingPlan([...plans,{...withLog,id:uid()}]);
+    } else {
+      // PO ปกติ (ใหม่/แก้ไข)
+      savePO(editId ? poEntries.map(p=>p.id===editId?{...withLog,id:editId}:p) : [...poEntries,{...withLog,id:uid()}]);
+    }
+    setEditId(null); setEditingPlan(false);
     setForm(emptyForm());
     setView("browse");
   };
@@ -4702,10 +4627,30 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         id: it.id || uid(), code: it.code || "", store: it.store || "", amount: it.amount || "",
         rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
           .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
-      })),
+      })), isPlan:false,
     });
-    setEditId(p.id); setView("add"); setDetailId(null);
+    setEditId(p.id); setEditingPlan(false); setView("add"); setDetailId(null);
   };
+  // โหลด PO/แผน (โครงสร้างเดียวกัน) เข้าฟอร์ม — ใช้ร่วมกันทั้งแก้แผนและแปลงเป็น PO
+  const loadIntoForm = (p, asPlan) => {
+    const P = migratePO(p);
+    setForm({
+      date: P.date || todayStr(), status: P.status || "PO Issued", notes: P.notes || "",
+      supplier: { name: P.supplier?.name || "", poNumber: P.supplier?.poNumber || "" },
+      paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
+      items: (P.items||[]).map(it=>({
+        id: it.id || uid(), code: it.code || "", store: it.store || "", pct: it.pct ?? "", amount: it.amount || "",
+        rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
+          .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
+      })), isPlan: asPlan,
+    });
+    setEditId(p.id); setEditingPlan(true); setDetailId(null); setView("add");
+  };
+  const openNewPO   = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:false }); setDetailId(null); setView("add"); };
+  const openNewPlan = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:true }); setDetailId(null); setView("add"); };
+  const openEditPlan = (pl) => loadIntoForm(pl, true);   // แก้แผน (ติ๊กแผนอยู่)
+  const startConvert = (pl) => loadIntoForm(pl, false);  // แปลงแผน → PO (เอาติ๊กออกให้แล้ว กดบันทึกก็เป็น PO)
+  const deletePlan = (id) => { if (window.confirm("ลบแผนของเข้านี้?")) saveIncomingPlan(plans.filter(pl=>pl.id!==id)); };
   const deletePO = (id) => {
     const po = poEntries.find(x=>x.id===id);
     if (po && !canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin"); return; }
@@ -4715,20 +4660,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
     if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
   };
-  const closeForm = () => { setView("browse"); setEditId(null); setConvertPlanId(null); setForm(emptyForm()); };
-  // แปลง "แผนของเข้า" → เปิดฟอร์ม PO พร้อมข้อมูลจากแผน (วันแผน = แผนของเข้างวดแรก)
-  // เมื่อบันทึก PO สำเร็จ แผนต้นทางจะถูกย้ายออก (กันนับซ้ำ)
-  const startConvert = (pl) => {
-    const items = (pl.items || []).filter(it => it.code).map(it => ({
-      id: uid(), code: it.code, store: it.store || "", pct: it.pct ?? "", amount: it.amount || "",
-      rounds: [{ id: uid(), planDate: pl.date || "", planAmount: it.amount || "", actualAmount: "", actualDate: "" }],
-    }));
-    setEditId(null);
-    setConvertPlanId(pl.id);
-    setForm({ ...emptyForm(), date: todayStr(), notes: "แปลงจากแผนของเข้า", items: items.length ? items : emptyForm().items });
-    setDetailId(null);
-    setView("add");
-  };
+  const closeForm = () => { setView("browse"); setEditId(null); setEditingPlan(false); setForm(emptyForm()); };
   // ปุ่ม "กลับ" — ย้อนทีละชั้น: ฟอร์ม → ปิดฟอร์ม, รายละเอียด → ปิด, สลับแท็บ → ย้อนแท็บ,
   // สุดทางแล้วค่อยออกไปหน้าก่อนหน้า (เลือกโครงการ/เลือกโรล)
   const backNav = () => {
@@ -4807,12 +4739,20 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
         {view==="add" ? (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:28,maxWidth:680,animation:"fadeIn 0.2s ease"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
               <div>
-                <div style={{fontSize:15,fontWeight:700,color:T.textPrimary}}>{editId?"แก้ไขรายการ PO":"เพิ่ม PO ใหม่"}</div>
-                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>กรอกข้อมูลคำสั่งซื้อ และแผนของเข้า/จ่ายเงิน</div>
+                <div style={{fontSize:15,fontWeight:700,color:T.textPrimary}}>{(editId||editingPlan) ? (form.isPlan?"แก้ไขแผนของเข้า":"บันทึกเป็น PO จริง") : (form.isPlan?"เพิ่มแผนของเข้า":"เพิ่ม PO ใหม่")}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>เลือกด้านล่างว่าจะบันทึกเป็น PO จริง หรือ แผนของเข้า (ฟอร์มเดียวกัน)</div>
               </div>
               <button onClick={closeForm} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
+            </div>
+            {/* สวิตช์: PO จริง / แผนของเข้า — ติ๊กแผนจากลิสต์แผนแล้วเปลี่ยนเป็น PO = แปลงเป็น PO จริง */}
+            <div style={{display:"flex",gap:6,marginBottom:18,background:T.bg,padding:4,borderRadius:10,width:"fit-content"}}>
+              {[["🧾 PO จริง",false,T.blue],["📅 แผนของเข้า",true,T.amber]].map(([label,val,clr])=>(
+                <button key={label} onClick={()=>setForm(f=>({...f,isPlan:val}))}
+                  style={{border:"none",borderRadius:8,padding:"7px 18px",fontSize:13,fontWeight:600,cursor:"pointer",
+                    background: form.isPlan===val ? clr : "transparent", color: form.isPlan===val ? "#fff" : T.textSecondary}}>{label}</button>
+              ))}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -4939,7 +4879,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             </div>
             {/* เว้นที่ด้านล่างให้พ้นแถบ "ย้อนกลับ/ทำซ้ำ" ที่ลอยมุมซ้ายล่าง ไม่ให้ทับปุ่ม */}
             <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap",alignItems:"center"}}>
-              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editId?"บันทึก":"เพิ่ม PO"}</button>
+              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editingPlan && !form.isPlan ? "แปลงเป็น PO จริง" : form.isPlan ? "บันทึกแผน" : (editId?"บันทึก":"เพิ่ม PO")}</button>
               <button onClick={closeForm} className="btn-ghost">ยกเลิก</button>
               {editId && (
                 <button onClick={()=>{ deletePO(editId); }}
@@ -4950,14 +4890,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             </div>
           </div>
         ) : tab==="tracking" ? (
-          <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={()=>setView("add")}
+          <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
             onStatusChange={changeStatus} session={session} usdRate={usdRate}
             tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
-          <IncomingPlanTab incomingPlan={incomingPlan} saveIncomingPlan={saveIncomingPlan}
-            tenderCosts={tenderCosts} additions={additions}
-            extraItems={extraItems} hiddenAccounts={hiddenAccounts} onConvert={startConvert} />
+          <IncomingPlanTab plans={plans} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -4978,7 +4916,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   {Object.keys(groupTotals).length>0 && Object.keys(groupTotals).every(c=>collapsed[c]) ? "⬇️ ขยายทั้งหมด" : "⬆️ ย่อทั้งหมด"}
                 </button>
               )}
-              <button onClick={()=>setView("add")} className="btn-primary" style={{background:T.amber}}>+ เพิ่ม PO</button>
+              <button onClick={openNewPO} className="btn-primary" style={{background:T.amber}}>+ เพิ่ม PO</button>
             </div>
 
             {filtered.length===0 ? (
@@ -5315,10 +5253,15 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const actual = {}, payplan = {};
   const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
   const incoming = {};
-  // แผนของเข้า = รายการแผน [{ date, items:[{code,amount}] }] → บัคเก็ตตามเดือนของ date
+  // แผนของเข้า = อ็อบเจ็กต์รูปเดียวกับ PO → บัคเก็ตตามวันแผนรับของแต่ละงวด
+  // (ไม่มีวันแผนก็ใช้วันในฟอร์ม) รวมยอดที่วางแผนไว้ต่อ Acc code ต่อเดือน
   (Array.isArray(incomingPlan) ? incomingPlan : []).forEach(pl => {
-    const mk = (pl.date || "").slice(0, 7);
-    (pl.items || []).forEach(it => bump(incoming, it.code, mk, parseFloat(it.amount) || 0));
+    poItems(pl).forEach(it => {
+      (it.rounds || []).forEach(r => {
+        const amt = parseFloat(r.planAmount) || 0;
+        if (amt > 0) bump(incoming, it.code, (r.planDate || pl.date || "").slice(0, 7), amt);
+      });
+    });
   });
   poEntries.forEach(p => {
     poItems(p).forEach(it => {
