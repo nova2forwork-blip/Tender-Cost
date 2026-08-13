@@ -4429,7 +4429,7 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 //  แผน = อ็อบเจ็กต์รูปเดียวกับ PO (isPlan:true) สร้าง/แก้ผ่านฟอร์ม PO โดยติ๊ก
 //  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
 //  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
-function IncomingPlanTab({ plans, poEntries = [], onNew, onEdit, onConvert, onDelete }) {
+function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, onNew, onEdit, onConvert, onDelete }) {
   const list = Array.isArray(plans) ? plans : [];
   const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
   const nameOf = (code) => ACCOUNTS.find(a => a.code === code)?.name || "";
@@ -4501,16 +4501,16 @@ function IncomingPlanTab({ plans, poEntries = [], onNew, onEdit, onConvert, onDe
                   <tr key={code}>
                     <td style={{ ...cM, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
                     <td style={{ ...cM, color: T.textSecondary }}>{nameOf(code)}</td>
-                    {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, color: e.v === 0 ? T.textMuted : (e.real ? T.textPrimary : T.red), fontWeight: e.v ? (e.real ? 600 : 500) : 400 }}>{e.v ? fmt(e.v) : "-"}</td>; })}
-                    <td style={{ ...nM, fontWeight: 700, background: "#f6faf6" }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}</td>
+                    {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, color: e.v === 0 ? T.textMuted : (e.real ? T.textPrimary : T.red), fontWeight: e.v ? (e.real ? 600 : 500) : 400 }}>{e.v ? fmt(e.v) : "-"}{e.v ? usdLine(e.v, usdRate) : null}</td>; })}
+                    <td style={{ ...nM, fontWeight: 700, background: "#f6faf6" }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
                   </tr>
                 ))}
               </tbody>
               <tfoot>
                 <tr>
                   <td style={{ ...cM, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
-                  {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}</td>)}
-                  <td style={{ ...nM, fontWeight: 800, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}</td>
+                  {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}{colTot(mk) ? usdLine(colTot(mk), usdRate) : null}</td>)}
+                  <td style={{ ...nM, fontWeight: 800, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}{grand ? usdLine(grand, usdRate) : null}</td>
                 </tr>
               </tfoot>
             </table>
@@ -4625,7 +4625,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
   // Budget / net / % helpers for the % field on each account-code line.
   const budgetForCode = (code) => parseFloat(combinedBudget[code])||0;
-  const itemNet = (it) => Math.max(budgetForCode(it.code) - (parseFloat(it.store)||0), 0);
+  // ยอด PO ที่สั่งไปแล้ว + แผนที่มีอยู่แล้วของ code นี้ (ยกเว้นรายการที่กำลังแก้อยู่)
+  const otherCommitted = (code) => poEntries.reduce((s,p)=> (!editingPlan && p.id===editId) ? s : s + poAmountForCode(p, code), 0);
+  const otherPlanned   = (code) => plans.reduce((s,pl)=> (editingPlan && pl.id===editId) ? s : s + poAmountForCode(pl, code), 0);
+  // "ต้องสั่งสุทธิ" = ยอดที่เหลือต้องสั่งจริง = งบ − ของใน store − PO ที่สั่งแล้ว − แผนที่มี
+  const itemNet = (it) => budgetForCode(it.code) - (parseFloat(it.store)||0) - otherCommitted(it.code) - otherPlanned(it.code);
   const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
   // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
 
@@ -4887,9 +4891,9 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         <MoneyInput value={it.store} onChange={v=>updateItemRow(it.id,"store",v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.amber,fontWeight:500}}>ต้องสั่งสุทธิ</span>
-                        <input className="input-base" readOnly tabIndex={-1} value={fmtMoneyInput(net)}
-                          style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:T.amberBg,color:T.amber,borderColor:"transparent"}}/>
+                        <span style={{fontSize:11,color:net<0?T.red:T.amber,fontWeight:500}}>ต้องสั่งสุทธิ {net<0?"(เกิน)":""}</span>
+                        <input className="input-base" readOnly tabIndex={-1} value={net<0?`-${fmtMoneyInput(Math.abs(net))}`:fmtMoneyInput(net)}
+                          style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:net<0?T.redBg:T.amberBg,color:net<0?T.red:T.amber,borderColor:"transparent"}}/>
                       </label>
                     </div>
                     {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
@@ -4972,7 +4976,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
-          <IncomingPlanTab plans={plans} poEntries={poEntries} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+          <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
