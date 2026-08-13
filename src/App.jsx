@@ -4837,6 +4837,8 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       })),
     }));
     if (!validItems.length) { alert("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ"); return; }
+    // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
+    if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { alert("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก"); return; }
     const payload = {
       date: form.date, status: form.status, notes: form.notes || "",
       supplier: { name: form.supplier.name.trim(), poNumber: (form.supplier.poNumber||"").trim() },
@@ -5062,11 +5064,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
               {/* Supplier — exactly one vendor per PO. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier (ไม่บังคับ · หนึ่งเจ้าต่อ PO)</span>
+                <span style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier · ชื่อไม่บังคับ{!form.isPlan && <span style={{color:T.red}}> · เลข PO บังคับ *</span>}</span>
               </div>
               <div style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                 <input placeholder="ชื่อ Supplier (ถ้ามี)" value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
-                <input placeholder="เลข PO" value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"/>
+                <input placeholder={form.isPlan ? "เลข PO (ถ้ามี)" : "เลข PO *"} value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"
+                  style={!form.isPlan && !(form.supplier.poNumber||"").trim() ? {borderColor:T.red, background:T.redBg} : undefined}/>
               </div>
 
               {/* Account-code line items — each carries its own store amount and
