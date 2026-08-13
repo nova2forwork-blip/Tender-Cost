@@ -194,7 +194,8 @@ const roundPayDate  = (p, r) => {
 // Received once the actual date has really arrived (a future date typed ahead
 // of time doesn't count yet) and a quantity was recorded.
 const roundReceived = (r) => !!r.actualDate && r.actualDate <= todayStr() && (parseFloat(r.actualAmount)||0) > 0;
-const roundPaid     = (p, r) => { const d = roundPayDate(p,r); return !!d && d <= todayStr(); };
+// ตั้งสถานะ PO เป็น "Paid" เอง = ถือว่าจ่ายครบทุกงวดทันที (ไม่ต้องรอวันครบกำหนดเครดิต)
+const roundPaid     = (p, r) => { if (migratePO(p).status === "Paid") return true; const d = roundPayDate(p,r); return !!d && d <= todayStr(); };
 const itemOrdered   = (it) => parseFloat(it.amount)||0;
 const itemReceived  = (it) => (it.rounds||[]).filter(roundReceived).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
 const itemEntered   = (it) => (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
@@ -4442,40 +4443,39 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const monthLbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
   const today = todayStr();
 
-  // ── รวมรายการของเข้า พร้อมสถานะ: received(เขียว)/late(ส้ม)/po(ดำ)/plan(แดง) ─────
+  // ── รวมรายการของเข้า แยกที่มา: จริง(รับแล้ว/PO) vs แผน — เดือนไหนมีทั้งคู่จะโชว์ 2 ค่า
   const entries = [];
   const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
   list.forEach(pl => poItems(pl).forEach(it => (it.rounds || []).forEach(r => {
     const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-    entries.push({ code: it.code, mk: (r.planDate || pl.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "plan" });
+    entries.push({ code: it.code, mk: (r.planDate || pl.date || "").slice(0, 7), amount: amt, src: "plan", late: lateOf(r), received: false });
   })));
   pos.forEach(p => poItems(p).forEach(it => (it.rounds || []).forEach(r => {
     if (roundReceived(r)) {
       const amt = parseFloat(r.actualAmount) || 0; if (!amt) return;
-      entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, state: "received" });
+      entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, src: "po", late: false, received: true });
     } else {
       const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-      entries.push({ code: it.code, mk: (r.planDate || p.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "po" });
+      entries.push({ code: it.code, mk: (r.planDate || p.date || "").slice(0, 7), amount: amt, src: "po", late: lateOf(r), received: false });
     }
   })));
   const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
 
+  // แต่ละช่องเก็บแยก: rec(รับแล้ว) / po(PO ยังไม่รับ) / plan(แผน) + ธง late
   const cellMap = {};
   entries.forEach(e => {
     const c = (cellMap[e.code] = cellMap[e.code] || {});
-    const cell = (c[e.mk] = c[e.mk] || { rec: 0, late: 0, po: 0, plan: 0 });
-    cell[e.state === "received" ? "rec" : e.state] += e.amount;
+    const cell = (c[e.mk] = c[e.mk] || { rec: 0, po: 0, poLate: false, plan: 0, planLate: false });
+    if (e.received) cell.rec += e.amount;
+    else if (e.src === "po") { cell.po += e.amount; if (e.late) cell.poLate = true; }
+    else { cell.plan += e.amount; if (e.late) cell.planLate = true; }
   });
   const codes = Object.keys(cellMap).sort();
-  const effOf = (code, mk) => {
-    const c = cellMap[code]?.[mk]; if (!c) return { v: 0, state: "none" };
-    if (c.rec > 0) return { v: c.rec, state: "received" };
-    const exp = c.late + c.po + c.plan;
-    return { v: exp, state: c.late > 0 ? "late" : (c.po > 0 ? "po" : "plan") };
-  };
-  const stClr = { received: T.green, late: T.amber, po: T.textPrimary, plan: T.red, none: T.textMuted };
-  const rowTot = (code) => months.reduce((s, mk) => s + effOf(code, mk).v, 0);
-  const colTot = (mk) => codes.reduce((s, c) => s + effOf(c, mk).v, 0);
+  const cellOf = (code, mk) => cellMap[code]?.[mk] || null;
+  const cellTot = (c) => c ? (c.rec + c.po + c.plan) : 0;
+  const realTot = (code) => months.reduce((s, mk) => { const c = cellOf(code, mk); return s + (c ? c.rec + c.po : 0); }, 0); // "มีจริง" = รับแล้ว + PO
+  const rowTot = (code) => months.reduce((s, mk) => s + cellTot(cellOf(code, mk)), 0);
+  const colTot = (mk) => codes.reduce((s, c) => s + cellTot(cellOf(c, mk)), 0);
   const grand = codes.reduce((s, c) => s + rowTot(c), 0);
 
   // ── คอลัมน์ต้นทุน: Tender Cost / Stock / Balance Cost ────────────────────────
@@ -4535,7 +4535,19 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: bpo < 0 ? T.red : T.textPrimary }}>{money(bpo)}{bpo ? usdLine(Math.abs(bpo), usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
-                      {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, fontWeight: 600, color: e.v === 0 ? T.textMuted : stClr[e.state] }}>{e.v ? fmt(e.v) : "-"}{e.v ? usdLine(e.v, usdRate) : null}</td>; })}
+                      {months.map(mk => {
+                        const c = cellOf(code, mk); const tot = cellTot(c);
+                        return (
+                          <td key={mk} style={{ ...nM, fontWeight: 600, color: tot ? T.textPrimary : T.textMuted }}>
+                            {!tot ? "-" : (<>
+                              {c.rec > 0 && <div style={{ color: T.green }}>{fmt(c.rec)}</div>}
+                              {c.po > 0 && <div style={{ color: c.poLate ? T.amber : T.textPrimary }}>{fmt(c.po)}</div>}
+                              {c.plan > 0 && <div style={{ color: c.planLate ? T.amber : T.red }}>{fmt(c.plan)}</div>}
+                              {usdLine(tot, usdRate)}
+                            </>)}
+                          </td>
+                        );
+                      })}
                       <td style={{ ...nM, fontWeight: 600, background: "#f6faf6", color: T.textPrimary }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
                     </tr>
                   );
