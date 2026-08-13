@@ -4429,12 +4429,32 @@ function StatusPicker({ status, onChange, compact, disabled }) {
 //  แผน = อ็อบเจ็กต์รูปเดียวกับ PO (isPlan:true) สร้าง/แก้ผ่านฟอร์ม PO โดยติ๊ก
 //  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
 //  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
-function IncomingPlanTab({ plans, onNew, onEdit, onConvert, onDelete }) {
+function IncomingPlanTab({ plans, poEntries = [], onNew, onEdit, onConvert, onDelete }) {
   const list = Array.isArray(plans) ? plans : [];
   const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
   const nameOf = (code) => ACCOUNTS.find(a => a.code === code)?.name || "";
   const planDates = (pl) => poRounds(pl).map(r => r.planDate).filter(Boolean).sort();
   const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
+  const monthLbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
+
+  // ── รวม "รายการของเข้ารายเดือน" ทั้งแผน + PO จริง ─────────────────────────────
+  const entries = [];
+  list.forEach(pl => poItems(pl).forEach(it => (it.rounds || []).forEach(r => {
+    const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
+    entries.push({ mk: (r.planDate || pl.date || "").slice(0, 7), date: r.planDate || pl.date || "", code: it.code, amount: amt, type: "plan", supplier: pl.supplier?.name || "" });
+  })));
+  (Array.isArray(poEntries) ? poEntries : []).forEach(p => poItems(p).forEach(it => (it.rounds || []).forEach(r => {
+    if (roundReceived(r)) {
+      const amt = parseFloat(r.actualAmount) || 0; if (!amt) return;
+      entries.push({ mk: r.actualDate.slice(0, 7), date: r.actualDate, code: it.code, amount: amt, type: "received", supplier: poSupplierName(p) });
+    } else {
+      const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
+      entries.push({ mk: (r.planDate || p.date || "").slice(0, 7), date: r.planDate || p.date || "", code: it.code, amount: amt, type: "po", supplier: poSupplierName(p) });
+    }
+  })));
+  const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
+  const TYPE = { plan: { label: "แผน", clr: T.red, bg: T.redBg }, po: { label: "PO รอเข้า", clr: T.amber, bg: T.amberBg }, received: { label: "รับแล้ว", clr: T.green, bg: T.greenBg } };
+  const tdS = { padding: "6px 10px", borderBottom: `1px solid ${T.cardBorder}`, fontSize: 12, whiteSpace: "nowrap" };
 
   return (
     <div>
@@ -4442,6 +4462,47 @@ function IncomingPlanTab({ plans, onNew, onEdit, onConvert, onDelete }) {
         <div style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>📅 แผนของเข้าทั้งโปรเจค — ใช้ฟอร์มเดียวกับ PO (ติ๊ก “แผนของเข้า”) · พร้อมแล้วกด “→ ทำเป็น PO จริง”</div>
         <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
       </div>
+
+      {/* รายการของเข้ารายเดือน — แผน + PO จริง รวมกัน */}
+      {months.length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 6 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
+          <div style={{ display: "flex", gap: 14, marginBottom: 10, fontSize: 11.5, color: T.textMuted, flexWrap: "wrap" }}>
+            {Object.values(TYPE).map(t => <span key={t.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: t.clr, display: "inline-block" }} />{t.label}</span>)}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {months.map(mk => {
+              const rows = entries.filter(e => e.mk === mk).sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.code.localeCompare(b.code));
+              const total = rows.reduce((s, e) => s + e.amount, 0);
+              return (
+                <div key={mk} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 12, overflow: "hidden" }}>
+                  <div style={{ padding: "9px 14px", background: "#f8fafc", borderBottom: `1px solid ${T.cardBorder}`, display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontWeight: 700, color: T.textPrimary, fontSize: 13 }}>{monthLbl(mk)}</span>
+                    <span style={{ fontSize: 11, color: T.textMuted }}>{rows.length} รายการ</span>
+                    <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(total)}</span>
+                  </div>
+                  <div className="hscroll"><table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
+                    <tbody>
+                      {rows.map((e, i) => (
+                        <tr key={i}>
+                          <td style={{ ...tdS, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{e.code}</td>
+                          <td style={{ ...tdS, color: T.textSecondary }}>{nameOf(e.code)}</td>
+                          <td style={tdS}><span style={{ background: TYPE[e.type].bg, color: TYPE[e.type].clr, fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 12 }}>{TYPE[e.type].label}</span></td>
+                          <td style={{ ...tdS, color: T.textMuted, fontFamily: "'JetBrains Mono',monospace" }}>{e.date || "—"}</td>
+                          <td style={{ ...tdS, color: T.textMuted }}>{e.supplier || "—"}</td>
+                          <td style={{ ...tdS, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: TYPE[e.type].clr }}>฿{fmt(e.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table></div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📝 จัดการแผน (แก้ไข / แปลงเป็น PO)</div>
       {sorted.length === 0 ? (
         <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>📅</div>ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม
@@ -4895,7 +4956,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
             onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
-          <IncomingPlanTab plans={plans} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+          <IncomingPlanTab plans={plans} poEntries={poEntries} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
