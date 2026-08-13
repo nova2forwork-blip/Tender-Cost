@@ -5435,11 +5435,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
           ⚠️ แสดงเฉพาะรายการล่าช้า
         </button>
-        <span style={{width:1,alignSelf:"stretch",background:T.cardBorder,margin:"0 2px"}}/>
-        {STATUS_FILTERS.map(([k,l])=>(
-          <button key={k} onClick={()=>setStatusFilter(k)}
-            style={{background:statusFilter===k?T.amber:"transparent",border:`1.5px solid ${statusFilter===k?T.amber:T.cardBorder}`,borderRadius:8,padding:"6px 12px",color:statusFilter===k?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>{l}</button>
-        ))}
+        <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
+          style={{padding:"7px 12px",border:`1.5px solid ${statusFilter!=="all"?T.amber:T.cardBorder}`,borderRadius:8,fontSize:12,fontWeight:600,color:statusFilter!=="all"?T.amber:T.textSecondary,background:"#fff",cursor:"pointer"}}>
+          {STATUS_FILTERS.map(([k,l])=><option key={k} value={k}>{k==="all"?"สถานะ: ทั้งหมด":`สถานะ: ${l}`}</option>)}
+        </select>
         <button onClick={()=>setCollapsed(new Set(sortedCodes))}
           style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
           ▲ ย่อทั้งหมด
