@@ -4442,12 +4442,12 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const monthLbl = (mk) => { const [y, m] = mk.split("-"); return `${MATRIX_EN_MONTH[(+m) - 1]} ${String(y).slice(2)}`; };
   const today = todayStr();
 
-  // ── รวมรายการของเข้า (แผน + PO จริง) พร้อมสถานะ: received / late / pending ─────
+  // ── รวมรายการของเข้า พร้อมสถานะ: received(เขียว)/late(ส้ม)/po(ดำ)/plan(แดง) ─────
   const entries = [];
   const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
   list.forEach(pl => poItems(pl).forEach(it => (it.rounds || []).forEach(r => {
     const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-    entries.push({ code: it.code, mk: (r.planDate || pl.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "pending" });
+    entries.push({ code: it.code, mk: (r.planDate || pl.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "plan" });
   })));
   pos.forEach(p => poItems(p).forEach(it => (it.rounds || []).forEach(r => {
     if (roundReceived(r)) {
@@ -4455,7 +4455,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, state: "received" });
     } else {
       const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-      entries.push({ code: it.code, mk: (r.planDate || p.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "pending" });
+      entries.push({ code: it.code, mk: (r.planDate || p.date || "").slice(0, 7), amount: amt, state: lateOf(r) ? "late" : "po" });
     }
   })));
   const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
@@ -4463,13 +4463,17 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const cellMap = {};
   entries.forEach(e => {
     const c = (cellMap[e.code] = cellMap[e.code] || {});
-    const cell = (c[e.mk] = c[e.mk] || { rec: 0, exp: 0, late: 0 });
-    if (e.state === "received") cell.rec += e.amount;
-    else { cell.exp += e.amount; if (e.state === "late") cell.late += e.amount; }
+    const cell = (c[e.mk] = c[e.mk] || { rec: 0, late: 0, po: 0, plan: 0 });
+    cell[e.state === "received" ? "rec" : e.state] += e.amount;
   });
   const codes = Object.keys(cellMap).sort();
-  const effOf = (code, mk) => { const c = cellMap[code]?.[mk]; if (!c) return { v: 0, state: "none" }; if (c.rec > 0) return { v: c.rec, state: "received" }; return { v: c.exp, state: c.late > 0 ? "late" : "pending" }; };
-  const stClr = { received: T.green, late: T.amber, pending: T.red, none: T.textMuted };
+  const effOf = (code, mk) => {
+    const c = cellMap[code]?.[mk]; if (!c) return { v: 0, state: "none" };
+    if (c.rec > 0) return { v: c.rec, state: "received" };
+    const exp = c.late + c.po + c.plan;
+    return { v: exp, state: c.late > 0 ? "late" : (c.po > 0 ? "po" : "plan") };
+  };
+  const stClr = { received: T.green, late: T.amber, po: T.textPrimary, plan: T.red, none: T.textMuted };
   const rowTot = (code) => months.reduce((s, mk) => s + effOf(code, mk).v, 0);
   const colTot = (mk) => codes.reduce((s, c) => s + effOf(c, mk).v, 0);
   const grand = codes.reduce((s, c) => s + rowTot(c), 0);
@@ -4480,6 +4484,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const committedOf = (code) => pos.reduce((s, p) => s + poAmountForCode(p, code), 0);
   const plannedOf = (code) => list.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
   const stockOf = (code) => pos.reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.store) || 0), 0), 0);
+  const balPendingOf = (code) => budgetOf(code) - committedOf(code);                              // งบ − PO ที่สั่งแล้ว
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // ยอดที่เหลือต้องสั่ง
 
   const cM = { border: "1px solid #d9e0ea", padding: "5px 9px", fontSize: 11.5, whiteSpace: "nowrap" };
@@ -4499,10 +4504,11 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 6 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
-          <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12 }}>
+          <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12, flexWrap: "wrap" }}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.green, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับแล้ว</span>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.amber, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = ล่าช้า</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = แผน / รอเข้า</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = PO รอเข้า</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = แผน</span>
           </div>
           <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
             <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
@@ -4511,6 +4517,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 70 }}>Acc. Code</th>
                   <th style={{ ...hM("#f1f5f9"), textAlign: "left", minWidth: 180 }}>Acc. Name</th>
                   <th style={{ ...hM(bCost), minWidth: 120 }}>Tender Cost</th>
+                  <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Pending PO</th>
                   <th style={{ ...hM(bCost), minWidth: 90 }}>Stock</th>
                   <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Cost</th>
                   {months.map(mk => <th key={mk} style={hM("#eef3ee")}>{monthLbl(mk)}</th>)}
@@ -4519,16 +4526,17 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
               </thead>
               <tbody>
                 {codes.map(code => {
-                  const bud = budgetOf(code), stk = stockOf(code), bc = balCostOf(code);
+                  const bud = budgetOf(code), bpo = balPendingOf(code), stk = stockOf(code), bc = balCostOf(code);
                   return (
                     <tr key={code}>
                       <td style={{ ...cM, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
                       <td style={{ ...cM, color: T.textSecondary }}>{nameOf(code)}</td>
-                      <td style={{ ...nM, background: bCost }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
-                      <td style={{ ...nM, background: bCost, color: stk ? T.textPrimary : T.textMuted }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
-                      <td style={{ ...nM, background: bCost, color: bc < 0 ? T.red : T.textPrimary, fontWeight: 600 }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
-                      {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, color: e.v === 0 ? T.textMuted : stClr[e.state], fontWeight: e.v ? (e.state === "received" ? 600 : 500) : 400 }}>{e.v ? fmt(e.v) : "-"}{e.v ? usdLine(e.v, usdRate) : null}</td>; })}
-                      <td style={{ ...nM, fontWeight: 700, background: "#f6faf6" }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: bpo < 0 ? T.red : T.textPrimary }}>{money(bpo)}{bpo ? usdLine(Math.abs(bpo), usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
+                      {months.map(mk => { const e = effOf(code, mk); return <td key={mk} style={{ ...nM, fontWeight: 600, color: e.v === 0 ? T.textMuted : stClr[e.state] }}>{e.v ? fmt(e.v) : "-"}{e.v ? usdLine(e.v, usdRate) : null}</td>; })}
+                      <td style={{ ...nM, fontWeight: 600, background: "#f6faf6", color: T.textPrimary }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
                     </tr>
                   );
                 })}
@@ -4536,9 +4544,10 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
               <tfoot>
                 <tr>
                   <td style={{ ...cM, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
-                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7" }}>{money(sum(budgetOf))}</td>
-                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7" }}>{money(sum(stockOf))}</td>
-                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7" }}>{money(sum(budgetOf))}{sum(budgetOf) ? usdLine(sum(budgetOf), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7", color: sum(balPendingOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balPendingOf))}{sum(balPendingOf) ? usdLine(Math.abs(sum(balPendingOf)), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7" }}>{money(sum(stockOf))}{sum(stockOf) ? usdLine(sum(stockOf), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 800, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
                   {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}{colTot(mk) ? usdLine(colTot(mk), usdRate) : null}</td>)}
                   <td style={{ ...nM, fontWeight: 800, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}{grand ? usdLine(grand, usdRate) : null}</td>
                 </tr>
@@ -4565,10 +4574,12 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <span style={{ background: T.amberBg, color: T.amber, fontWeight: 700, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 ของเข้า {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
                   {pl.supplier?.name && <span style={{ fontSize: 12, color: T.textSecondary }}>· {pl.supplier.name}</span>}
                   <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} รายการ</span>
-                  <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(total)}</span>
+                  <span style={{ marginLeft: "auto", textAlign: "right" }}>
+                    <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: T.textPrimary }}>฿{fmt(total)}</span>
+                    {total ? usdLine(total, usdRate) : null}
+                  </span>
                   <button onClick={() => onConvert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ ทำเป็น PO จริง</button>
-                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
-                  <button onClick={() => onDelete(pl.id)} title="ลบแผน" className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px", color: T.red, borderColor: T.red }}>🗑</button>
+                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข (ลบได้ในนี้)</button>
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {items.map(it => (
@@ -4993,9 +5004,9 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editingPlan && !form.isPlan ? "แปลงเป็น PO จริง" : form.isPlan ? "บันทึกแผน" : (editId?"บันทึก":"เพิ่ม PO")}</button>
               <button onClick={closeForm} className="btn-ghost">ยกเลิก</button>
               {editId && (
-                <button onClick={()=>{ deletePO(editId); }}
+                <button onClick={()=>{ if (editingPlan) { deletePlan(editId); closeForm(); } else deletePO(editId); }}
                   style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,color:T.red,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-                  🗑 ลบ PO นี้
+                  🗑 {editingPlan ? "ลบแผนนี้" : "ลบ PO นี้"}
                 </button>
               )}
             </div>
@@ -5358,7 +5369,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 //  ด้วยสรุป PO: Total PO (ยอดผูกพัน) และ PO Balance (Total PO − รับจริง).
 //  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
 const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [] }) {
+function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [], usdRate = 0 }) {
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   const combined = buildCombinedBudget(tenderCosts, additions);
   const committedByCode = {}, stockByCode = {};
@@ -5421,10 +5432,10 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const num  = { ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
   const hCell = (bg) => ({ ...cell, background: bg, fontWeight: 700, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
   const numCell = (v, bg) => (
-    <td style={{ ...num, background: bg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 400 }}>{money(v)}</td>
+    <td style={{ ...num, background: bg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 400 }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>
   );
   const mgCell = (c, bg) => (
-    <td style={{ ...num, background: bg, color: c.eff === 0 ? T.textMuted : (c.real ? T.textPrimary : T.red), fontWeight: c.eff ? (c.real ? 600 : 500) : 400 }}>{c.eff ? money(c.eff) : "-"}</td>
+    <td style={{ ...num, background: bg, color: c.eff === 0 ? T.textMuted : (c.real ? T.textPrimary : T.red), fontWeight: c.eff ? (c.real ? 600 : 500) : 400 }}>{c.eff ? money(c.eff) : "-"}{c.eff ? usdLine(c.eff, usdRate) : null}</td>
   );
 
   return (
@@ -5470,9 +5481,9 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
                 {numCell(r.stock, bCost)}
                 {numCell(r.balCost, bCost)}
                 {r.mgRow.map((c, i) => <Fragment key={"m" + i}>{mgCell(c, bMg)}</Fragment>)}
-                <td style={{ ...num, background: bMg, fontWeight: 700, color: T.textPrimary }}>{money(r.mgTot)}</td>
+                <td style={{ ...num, background: bMg, fontWeight: 700, color: T.textPrimary }}>{money(r.mgTot)}{r.mgTot ? usdLine(r.mgTot, usdRate) : null}</td>
                 {r.pyRow.map((v, i) => <Fragment key={"p" + i}>{numCell(v, bPy)}</Fragment>)}
-                <td style={{ ...num, background: bPy, fontWeight: 700, color: r.pyTot < 0 ? T.red : T.textPrimary }}>{money(r.pyTot)}</td>
+                <td style={{ ...num, background: bPy, fontWeight: 700, color: r.pyTot < 0 ? T.red : T.textPrimary }}>{money(r.pyTot)}{r.pyTot ? usdLine(r.pyTot, usdRate) : null}</td>
                 {numCell(r.committed, bPO)}
                 {numCell(r.balPOout, bPO)}
               </tr>
@@ -5485,16 +5496,16 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
             <tfoot>
               <tr>
                 <td style={{ ...cell, fontWeight: 800, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
-                <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.budget))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balPO) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPO))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(totOf(r => r.stock))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: totOf(r => r.balCost) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balCost))}</td>
-                {mgM.map((mk, i) => <td key={"tm" + mk} style={{ ...num, fontWeight: 700, background: "#e6ede6" }}>{money(mgColSum(i))}</td>)}
-                <td style={{ ...num, fontWeight: 800, background: "#e6ede6" }}>{money(totOf(r => r.mgTot))}</td>
-                {payM.map((mk, i) => <td key={"tp" + mk} style={{ ...num, fontWeight: 700, background: "#fbe9d4" }}>{money(pyColSum(i))}</td>)}
-                <td style={{ ...num, fontWeight: 800, background: "#fbe9d4" }}>{money(totOf(r => r.pyTot))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#e2e8f2" }}>{money(totOf(r => r.committed))}</td>
-                <td style={{ ...num, fontWeight: 800, background: "#e2e8f2", color: totOf(r => r.balPOout) < 0 ? T.red : T.textPrimary }}>{money(totOf(r => r.balPOout))}</td>
+                {(() => { const v = totOf(r => r.budget); return <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.balPO); return <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: v < 0 ? T.red : T.textPrimary }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.stock); return <td style={{ ...num, fontWeight: 800, background: "#eef2f7" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.balCost); return <td style={{ ...num, fontWeight: 800, background: "#eef2f7", color: v < 0 ? T.red : T.textPrimary }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>; })()}
+                {mgM.map((mk, i) => { const v = mgColSum(i); return <td key={"tm" + mk} style={{ ...num, fontWeight: 700, background: "#e6ede6" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })}
+                {(() => { const v = totOf(r => r.mgTot); return <td style={{ ...num, fontWeight: 800, background: "#e6ede6" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {payM.map((mk, i) => { const v = pyColSum(i); return <td key={"tp" + mk} style={{ ...num, fontWeight: 700, background: "#fbe9d4" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })}
+                {(() => { const v = totOf(r => r.pyTot); return <td style={{ ...num, fontWeight: 800, background: "#fbe9d4" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.committed); return <td style={{ ...num, fontWeight: 800, background: "#e2e8f2" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.balPOout); return <td style={{ ...num, fontWeight: 800, background: "#e2e8f2", color: v < 0 ? T.red : T.textPrimary }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>; })()}
               </tr>
             </tfoot>
           )}
@@ -6019,7 +6030,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
             )}
           </div>
         ) : view==="matrix" ? (
-          <AccountingMatrixTab tenderCosts={tenderCosts} additions={additions} poEntries={poEntries} extraItems={extraItems} hiddenAccounts={hiddenAccounts} incomingPlan={incomingPlan} />
+          <AccountingMatrixTab tenderCosts={tenderCosts} additions={additions} poEntries={poEntries} extraItems={extraItems} hiddenAccounts={hiddenAccounts} incomingPlan={incomingPlan} usdRate={usdRate} />
         ) : (
           <div>
             {/* สรุปยอดที่ต้องเตรียมจ่าย */}
