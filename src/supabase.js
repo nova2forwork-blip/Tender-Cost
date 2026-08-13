@@ -98,6 +98,21 @@ export const ss = async (key, value) => {
   }
 };
 
+// ── รุ่น "โยน error" (ไม่กลืน) สำหรับงานที่ต้องรู้ว่าพลาด เช่น ย้ายรหัสบัญชี ─────────
+//  sg/ss ปกติจะกลืน error เพื่อไม่ให้ UI ล้ม แต่การ migrate ข้ามหลายคีย์ต้อง
+//  "รู้ทันทีเมื่อพลาด" เพื่อหยุดก่อนเขียนทับ ไม่งั้นข้อมูลบางโครงการจะย้ายไม่ครบเงียบ ๆ
+export const sgOrThrow = async (key) => {
+  const { data, error } = await supabase
+    .from("kv_store").select("value").eq("key", key).maybeSingle();
+  if (error) throw error;
+  return data ? JSON.parse(data.value) : null;
+};
+export const ssOrThrow = async (key, value) => {
+  const { error } = await supabase
+    .from("kv_store").upsert({ key, value: JSON.stringify(value), updated_at: new Date().toISOString() });
+  if (error) throw error;
+};
+
 // ── เขียนแบบกันชนกันหลายคน (optimistic-concurrency + 3-way merge) ────────────
 //  ปัญหาเดิม: ทั้ง PO/โครงการ เก็บเป็นก้อน JSON ก้อนเดียวต่อคีย์ → ถ้า 2 คนแก้
 //  พร้อมกัน คนบันทึกทีหลังจะทับงานคนแรกหายทั้งก้อน (last-writer-wins).
@@ -157,7 +172,20 @@ export const ssMerge = async (key, prev, next, _tries = 0) => {
     if (error) throw error;
     if (!data || data.length === 0) {
       if (_tries < 4) return ssMerge(key, prev, next, _tries + 1); // มีคนเขียนแทรก → ลองใหม่
-      const { error: e2 } = await supabase.from("kv_store").upsert(payload); // ยอมแพ้ → เขียนทับ
+      // ยอมแพ้เรื่อง guard updated_at แต่ "ยังรวมไม่ทับ" — อ่านค่าล่าสุดอีกรอบแล้ว
+      // merge การแก้ของเรา (prev→next) ลงบนของล่าสุด ก่อนเขียน กันงานคนอื่นหายเงียบ ๆ
+      const fresh = await _sgRaw(key);
+      let merged = next;
+      if (fresh) {
+        let server = null; try { server = JSON.parse(fresh.value); } catch { server = null; }
+        if (server != null && JSON.stringify(server) !== JSON.stringify(prev)) {
+          if (_hasIds(server) && _hasIds(prev) && _hasIds(next))       merged = _mergeById(server, prev, next);
+          else if (_isObj(server) && _isObj(prev) && _isObj(next))     merged = _mergeByKey(server, prev, next);
+          else                                                          merged = next; // ชนิดไม่รู้จัก → LWW
+        }
+      }
+      const { error: e2 } = await supabase.from("kv_store")
+        .upsert({ key, value: JSON.stringify(merged), updated_at: new Date().toISOString() });
       if (e2) throw e2;
     }
   } else {
