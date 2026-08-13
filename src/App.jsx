@@ -76,10 +76,50 @@ const ACCOUNTS = [
 ];
 
 const GROUPS      = [...new Set(ACCOUNTS.map(a => a.group))];
-const PO_STATUS   = ["Pending","PO Issued","Delivered","Invoiced","Paid"];
-const STATUS_CLR  = { Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#8b5cf6",Paid:"#10b981" };
-const STATUS_BG   = { Pending:"#f1f5f9","PO Issued":"#eff6ff",Delivered:"#fffbeb",Invoiced:"#f5f3ff",Paid:"#f0fdf4" };
+const PO_STATUS   = ["PO Issued","Delivered","Invoiced","Paid"];
+const STATUS_CLR  = { Planning:"#94a3b8", Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#8b5cf6",Paid:"#10b981" };
+const STATUS_BG   = { Planning:"#f1f5f9", Pending:"#f1f5f9","PO Issued":"#eff6ff",Delivered:"#fffbeb",Invoiced:"#f5f3ff",Paid:"#f0fdf4" };
 const GRP_COLORS  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#ec4899"];
+
+// ── รายการบัญชีแก้ได้ (แอดมิน) ─────────────────────────────────────────────────
+//  เก็บใน kv 'tcs-accounts' (ใช้ร่วมทุกโครงการ). applyAccountList จะทับ ACCOUNTS/
+//  GROUPS "ในที่" (mutate) เพื่อให้ทุกจุดที่อ่าน ACCOUNTS เห็นค่าล่าสุดหลัง re-render.
+function applyAccountList(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  const clean = list.filter(a => a && a.code).map(a => ({ code: String(a.code).trim(), name: a.name || "", group: a.group || "Other" }));
+  if (!clean.length) return;
+  ACCOUNTS.splice(0, ACCOUNTS.length, ...clean);
+  GROUPS.splice(0, GROUPS.length, ...[...new Set(ACCOUNTS.map(a => a.group))]);
+}
+// ย้ายข้อมูลเมื่อเปลี่ยนรหัสบัญชี (ข้ามทุกโครงการ) — renameMap = { oldCode: newCode }
+async function migrateAccountCodes(renameMap) {
+  const map = Object.fromEntries(Object.entries(renameMap || {}).filter(([o, n]) => o && n && o !== n));
+  if (!Object.keys(map).length) return;
+  const ren = (code) => map[code] || code;
+  const renObjKeys = (obj) => {  // คีย์ที่เป็น "code" หรือ "code:col" ให้เปลี่ยนฐาน (ข้ามคีย์ meta $…)
+    if (!obj || typeof obj !== "object") return obj;
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k.startsWith("$")) { out[k] = v; continue; }
+      const ci = k.indexOf(":"); const base = ci >= 0 ? k.slice(0, ci) : k; const nb = map[base];
+      out[nb ? (ci >= 0 ? nb + k.slice(ci) : nb) : k] = v;
+    }
+    return out;
+  };
+  const projects = (await sg("tcs-projects")) || [];
+  for (const proj of projects) {
+    const id = proj?.id; if (!id) continue;
+    const t = await sg(`tcs-tenders-${id}`);   if (t && typeof t === "object") await ss(`tcs-tenders-${id}`, renObjKeys(t));
+    const ad = await sg(`tcs-additions-${id}`); if (ad && typeof ad === "object") {
+      const nad = {}; for (const [m, mo] of Object.entries(ad)) nad[m] = (m.startsWith("$") || typeof mo !== "object") ? mo : renObjKeys(mo);
+      await ss(`tcs-additions-${id}`, nad);
+    }
+    const po = await sg(`tcs-po-${id}`);  if (Array.isArray(po))  await ss(`tcs-po-${id}`,  po.map(p => ({ ...p, items: (p.items || []).map(it => ({ ...it, code: ren(it.code) })) })));
+    const ex = await sg(`tcs-extra-${id}`); if (Array.isArray(ex)) await ss(`tcs-extra-${id}`, ex.map(e => ({ ...e, code: ren(e.code), ...(e.parentCode ? { parentCode: ren(e.parentCode) } : {}) })));
+    const hid = await sg(`tcs-hidden-${id}`); if (Array.isArray(hid)) await ss(`tcs-hidden-${id}`, hid.map(ren));
+    const inp = await sg(`tcs-inplan-${id}`); if (Array.isArray(inp)) await ss(`tcs-inplan-${id}`, inp.map(pl => ({ ...pl, items: (pl.items || []).map(it => ({ ...it, code: ren(it.code) })) })));
+  }
+}
 
 // ─── Incoming / Payment tracking status ────────────────────────────────────
 // A PO's incoming status is derived from its planned/actual dates rather than
@@ -235,9 +275,11 @@ const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:
 // Every round already carries its own "received" date; a PO's overall
 // received date(s) are just the distinct actual dates across every round.
 const poReceivedDates = (p) => [...new Set(poRounds(p).filter(roundReceived).map(r=>r.actualDate).filter(Boolean))].sort();
-// Paid date = the latest due date among rounds that have auto-paid.
+// Paid date = วันจ่ายที่กำหนดเอง (ถ้าตั้งสถานะ Paid เอง) มิฉะนั้นใช้วันครบกำหนดอัตโนมัติ
 const poPaidDate = (p) => {
-  const paid = poRounds(p).filter(r=>roundPaid(p,r)).map(r=>roundPayDate(p,r)).filter(Boolean).sort();
+  const P = migratePO(p);
+  if (P.status === "Paid" && P.paidDate) return P.paidDate;
+  const paid = poRounds(P).filter(r=>roundPaid(P,r)).map(r=>roundPayDate(P,r)).filter(Boolean).sort();
   return paid.length ? paid[paid.length-1] : null;
 };
 // Earliest upcoming/known payment due date across all rounds (for list/export).
@@ -1618,6 +1660,7 @@ export default function App() {
   const [authReady, setAuthReady]   = useState(false);  // true เมื่อเช็ค session เสร็จ
   const [screen,   setScreen]   = useState("home");
   const [projects, setProjects] = useState([]);
+  const [accountsRev, setAccountsRev] = useState(0); // bump เมื่อรายการบัญชี (ACCOUNTS) ถูกแก้ → re-render ทั้งแอป
   const [activeId, setActiveId] = useState(null);
   const [role,     setRole]     = useState(null);
   const [tenderCosts, setTCosts]= useState({});
@@ -1681,6 +1724,11 @@ export default function App() {
     const list = await sg("tcs-projects");
     if (list) setProjects(list);
   }, []);
+  // โหลดรายการบัญชีที่แอดมินแก้ (ใช้ร่วมทุกโครงการ) แล้วทับ ACCOUNTS ในที่
+  const fetchAccounts = useCallback(async () => {
+    const list = await sg("tcs-accounts");
+    if (Array.isArray(list) && list.length) { applyAccountList(list); setAccountsRev(v => v + 1); }
+  }, []);
 
   // โหลดรายการโครงการ "หลังล็อกอินเสร็จ" — สำคัญมากตอนใช้ RLS: ถ้าอ่านก่อน
   // Supabase แนบ token จะโดน DB ปฏิเสธแล้วขึ้น 0 โครงการ ทั้งที่มีสิทธิ์อ่าน
@@ -1688,11 +1736,11 @@ export default function App() {
   useEffect(() => {
     if (!session) { setLoaded(true); return; }
     (async () => {
-      try { await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
+      try { await fetchAccounts(); await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
       catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า"); }
       finally { setLoaded(true); }   // กันจอโหลดค้างเสมอ แม้ดึงข้อมูลพลาด
     })();
-  }, [fetchProjects, session]);
+  }, [fetchProjects, fetchAccounts, session]);
 
   useEffect(() => {
     if (!activeId || !session) return;
@@ -1707,6 +1755,7 @@ export default function App() {
         setSyncing(true);
         try {
           if (key === "tcs-projects") await fetchProjects();
+          else if (key === "tcs-accounts") { await fetchAccounts(); if (activeId) await fetchProjectData(activeId); }
           else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}` || key === `tcs-inplan-${activeId}`)) await fetchProjectData(activeId);
           setSyncedAt(new Date());
         } catch (e) {
@@ -1716,7 +1765,7 @@ export default function App() {
         }
       }).subscribe();
     return () => supabase.removeChannel(channel);
-  }, [activeId, fetchProjects, fetchProjectData, session]);
+  }, [activeId, fetchProjects, fetchAccounts, fetchProjectData, session]);
 
   // ─── Undo / Redo ───────────────────────────────────────────────────────────
   // ทุกการบันทึกวิ่งผ่าน commit() ซึ่งจดค่าเดิมไว้ก่อนเขียนทับ → กด Ctrl+Z หรือ
@@ -2356,6 +2405,88 @@ function AdminRestoreTab() {
   );
 }
 
+// ─── Admin: จัดการรหัสบัญชี (แก้รหัส+ชื่อ, ห้ามซ้ำ, ย้ายข้อมูลให้) ─────────────
+function AdminAccountsTab() {
+  const [rows, setRows] = useState(() => ACCOUNTS.map(a => ({ rid: uid(), code: a.code, name: a.name, group: a.group, orig: a.code })));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg]   = useState("");
+  const groupOptions = [...new Set([...GROUPS, ...rows.map(r => r.group).filter(Boolean), "Other"])];
+  const setCell = (rid, k, v) => setRows(rs => rs.map(r => r.rid === rid ? { ...r, [k]: v } : r));
+  const addRow  = () => setRows(rs => [...rs, { rid: uid(), code: "", name: "", group: "Other", orig: "" }]);
+  const delRow  = (rid) => setRows(rs => rs.filter(r => r.rid !== rid));
+  const dupCodes = (() => { const seen = {}, dup = new Set(); rows.forEach(r => { const c = (r.code || "").trim(); if (!c) return; if (seen[c]) dup.add(c); seen[c] = 1; }); return dup; })();
+
+  const save = async () => {
+    const clean = rows.map(r => ({ ...r, code: (r.code || "").trim(), name: (r.name || "").trim(), group: (r.group || "Other").trim() }));
+    if (clean.some(r => !r.code)) { setMsg("⚠ มีรหัสว่าง — กรอกรหัสให้ครบ"); return; }
+    if (clean.some(r => !r.name)) { setMsg("⚠ มีชื่อว่าง — กรอกชื่อให้ครบ"); return; }
+    const codes = clean.map(r => r.code);
+    if (new Set(codes).size !== codes.length) { setMsg("⚠ มีรหัสซ้ำกัน — Acc code ห้ามซ้ำ"); return; }
+    const renameMap = {}; clean.forEach(r => { if (r.orig && r.orig !== r.code) renameMap[r.orig] = r.code; });
+    const nRen = Object.keys(renameMap).length;
+    if (!window.confirm(`บันทึกรายการบัญชี ${clean.length} รายการ?` + (nRen ? `\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ` : "") + `\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`)) return;
+    setBusy(true); setMsg("กำลังบันทึก…");
+    try {
+      if (nRen) { setMsg("กำลังย้ายข้อมูลข้ามทุกโครงการ…"); await migrateAccountCodes(renameMap); }
+      const list = clean.map(r => ({ code: r.code, name: r.name, group: r.group }));
+      await ss("tcs-accounts", list);
+      applyAccountList(list);
+      setMsg("✓ บันทึกเรียบร้อย กำลังรีเฟรช…");
+      setTimeout(() => { if (typeof window !== "undefined") window.location.reload(); }, 700);
+    } catch (e) { console.warn("save accounts failed", e); setBusy(false); setMsg("บันทึกไม่สำเร็จ: " + (e.message || "ลองใหม่อีกครั้ง")); }
+  };
+
+  const inp = { padding: "6px 8px", fontSize: 12.5, border: `1px solid ${T.cardBorder}`, borderRadius: 8, width: "100%", fontFamily: "inherit" };
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${T.cardBorder}`, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.textPrimary }}>รหัสบัญชีทั้งหมด ({rows.length})</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>แก้รหัส/ชื่อได้ · รหัสห้ามซ้ำ · เปลี่ยนรหัสแล้วระบบย้ายข้อมูลเดิมให้ทุกโครงการ · ใช้ร่วมกันทุกโครงการ</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={addRow} className="btn-ghost">+ เพิ่มรหัส</button>
+          <button onClick={save} disabled={busy || dupCodes.size > 0} className="btn-primary" style={{ background: dupCodes.size ? T.textMuted : T.blue }}>{busy ? "⏳ กำลังบันทึก…" : "💾 บันทึก"}</button>
+        </div>
+      </div>
+      {msg && <div style={{ padding: "10px 18px", fontSize: 12.5, fontWeight: 600, color: msg.startsWith("✓") ? T.green : (msg.startsWith("⚠") || msg.startsWith("บันทึกไม่")) ? T.red : T.textSecondary, background: "#f8fafc" }}>{msg}</div>}
+      <div style={{ maxHeight: "58vh", overflow: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead>
+            <tr>
+              {["Acc. Code", "ชื่อ / คำอธิบาย", "กลุ่ม", ""].map((h, i) => (
+                <th key={h + i} style={{ position: "sticky", top: 0, background: "#f1f5f9", textAlign: "left", padding: "9px 12px", fontSize: 11, color: T.textMuted, fontWeight: 700, borderBottom: `1px solid ${T.cardBorder}`, width: h === "" ? 40 : (h === "Acc. Code" ? 130 : (h === "กลุ่ม" ? 160 : "auto")) }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => {
+              const isDup = dupCodes.has((r.code || "").trim());
+              return (
+                <tr key={r.rid} style={{ borderBottom: `1px solid ${T.cardBorder}` }}>
+                  <td style={{ padding: "5px 10px" }}>
+                    <input value={r.code} onChange={e => setCell(r.rid, "code", e.target.value)} style={{ ...inp, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, borderColor: isDup ? T.red : T.cardBorder, background: isDup ? T.redBg : "#fff" }} />
+                    {r.orig && r.orig !== (r.code || "").trim() && <div style={{ fontSize: 10, color: T.amber, marginTop: 2 }}>เดิม {r.orig}</div>}
+                  </td>
+                  <td style={{ padding: "5px 10px" }}><input value={r.name} onChange={e => setCell(r.rid, "name", e.target.value)} style={inp} /></td>
+                  <td style={{ padding: "5px 10px" }}>
+                    <input list="acc-groups" value={r.group} onChange={e => setCell(r.rid, "group", e.target.value)} style={inp} />
+                  </td>
+                  <td style={{ padding: "5px 10px", textAlign: "center" }}>
+                    <button onClick={() => delRow(r.rid)} title="ลบรหัสนี้" style={{ background: "none", border: "none", color: T.red, cursor: "pointer", fontSize: 14 }}>🗑</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <datalist id="acc-groups">{groupOptions.map(g => <option key={g} value={g} />)}</datalist>
+      </div>
+      {dupCodes.size > 0 && <div style={{ padding: "10px 18px", fontSize: 12, color: T.red, fontWeight: 600 }}>⚠ มีรหัสซ้ำ: {[...dupCodes].join(", ")} — แก้ให้ไม่ซ้ำก่อนบันทึก</div>}
+    </div>
+  );
+}
+
 // ─── Admin Panel ────────────────────────────────────────────────────────────
 function AdminPanel({ onBack, onLogout, session }) {
   const [tab,   setTab]   = useState("users");
@@ -2407,7 +2538,7 @@ function AdminPanel({ onBack, onLogout, session }) {
 
       <div style={{padding:"28px 32px"}}>
         <div style={{display:"flex",gap:8,marginBottom:22}}>
-          {[["users","👥 จัดการผู้ใช้"],["logs","📜 Log การเข้าใช้งาน"],["restore","🕘 กู้คืนข้อมูล"]].map(([id,label])=>(
+          {[["users","👥 จัดการผู้ใช้"],["accounts","🏷️ รหัสบัญชี"],["logs","📜 Log การเข้าใช้งาน"],["restore","🕘 กู้คืนข้อมูล"]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
@@ -2419,6 +2550,8 @@ function AdminPanel({ onBack, onLogout, session }) {
           <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลด...</div>
         ) : tab === "restore" ? (
           <AdminRestoreTab />
+        ) : tab === "accounts" ? (
+          <AdminAccountsTab />
         ) : tab === "users" ? (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`}}>
@@ -4569,7 +4702,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
         </div>
       )}
 
-      <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📝 จัดการแผน (แก้ไข / แปลงเป็น PO)</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📝 จัดการแผน</div>
       {sorted.length === 0 ? (
         <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>📅</div>ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม
@@ -4591,7 +4724,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                     {total ? usdLine(total, usdRate) : null}
                   </span>
                   <button onClick={() => onConvert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ ทำเป็น PO จริง</button>
-                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข (ลบได้ในนี้)</button>
+                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {items.map(it => (
@@ -4628,6 +4761,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const [form,   setForm]   = useState(emptyForm);
   const [editId, setEditId] = useState(null);
   const [editingPlan, setEditingPlan] = useState(false); // true = กำลังแก้ "แผนของเข้า" (มาจากลิสต์แผน)
+  const [payModal, setPayModal] = useState(null);        // {po, date} — ตอนตั้งสถานะ Paid ให้กรอกวันจ่ายเอง
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState(null);
@@ -4743,11 +4877,19 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // listed, so procurement doesn't need to open the full edit form just to
   // move a PO from "PO Issued" to "Delivered". Still fully logged. Locked
   // once a PO is fully received + fully paid, unless the current user is admin.
+  const applyStatus = (po, newStatus, paidDate) => {
+    const patch = { ...po, status: newStatus };
+    if (newStatus === "Paid") patch.paidDate = paidDate || todayStr();   // จำวันจ่ายที่กำหนดเอง
+    const label = `เปลี่ยนสถานะ: ${po.status} → ${newStatus}` + (newStatus === "Paid" && patch.paidDate ? ` (จ่าย ${patch.paidDate})` : "");
+    const updated = withHistory(patch, historyEntry(session, "status", label));
+    savePO(poEntries.map(x=>x.id===po.id?updated:x));
+  };
   const changeStatus = (po, newStatus) => {
     if (newStatus === po.status) return;
     if (!canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin"); return; }
-    const updated = withHistory({ ...po, status:newStatus }, historyEntry(session, "status", `เปลี่ยนสถานะ: ${po.status} → ${newStatus}`));
-    savePO(poEntries.map(x=>x.id===po.id?updated:x));
+    // ตั้งเป็น "Paid" → ให้กรอกวันจ่ายเองก่อน
+    if (newStatus === "Paid") { setPayModal({ po, date: po.paidDate || todayStr() }); return; }
+    applyStatus(po, newStatus);
   };
 
   const openEdit = (p) => {
@@ -4832,6 +4974,24 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
   return (
     <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+      {payModal && (
+        <div onClick={()=>setPayModal(null)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,width:"min(380px,100%)",overflow:"hidden",boxShadow:"0 24px 60px rgba(15,23,42,0.3)"}}>
+            <div style={{background:"linear-gradient(135deg,#065f46,#10b981)",padding:"14px 20px",color:"#fff",fontWeight:700,fontSize:15}}>💵 บันทึกการจ่ายเงิน</div>
+            <div style={{padding:20,display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{fontSize:12.5,color:T.textSecondary}}>{poSupplierName(payModal.po)} · <b>฿{fmt(poTotal(payModal.po))}</b></div>
+              <label style={{fontSize:12,color:T.textSecondary,display:"flex",flexDirection:"column",gap:5}}>
+                วันที่จ่ายเงิน
+                <input type="date" value={payModal.date} onChange={e=>setPayModal(m=>({...m,date:e.target.value}))} className="input-base" style={{padding:"8px 10px"}}/>
+              </label>
+            </div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10,padding:"14px 20px",borderTop:`1px solid ${T.cardBorder}`}}>
+              <button onClick={()=>setPayModal(null)} className="btn-ghost">ยกเลิก</button>
+              <button onClick={()=>{ if(!payModal.date){alert("เลือกวันที่จ่าย");return;} applyStatus(payModal.po,"Paid",payModal.date); setPayModal(null); }} className="btn-primary" style={{background:T.green}}>บันทึกจ่ายแล้ว</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
@@ -5066,13 +5226,20 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   const rows = groupedFiltered[code].slice().sort((a,b)=> (b.po.date||"").localeCompare(a.po.date||""));
                   const isCollapsed = !!collapsed[code];
                   const groupTotal = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
+                  // งบ + ยอดที่ต้องสั่งเพิ่ม (งบ − ของใน store − PO ที่สั่งแล้วของ code นี้ทั้งหมด)
+                  const grpBudget = parseFloat(combinedBudget[code]) || 0;
+                  const grpCommitted = poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
+                  const grpStock = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
+                  const grpToOrder = grpBudget - grpStock - grpCommitted;
                   return (
                     <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-                      <div onClick={()=>toggleGroup(code)} style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+                      <div onClick={()=>toggleGroup(code)} style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",flexWrap:"wrap"}}>
                         <span style={{color:T.textMuted,fontSize:11,transition:"transform 0.15s",transform:isCollapsed?"rotate(-90deg)":"none"}}>▾</span>
                         <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:700}}>{code}</span>
                         <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                         <span style={{flex:1}}/>
+                        <span style={{fontSize:11,color:T.textMuted}}>งบ <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
+                        <span style={{fontSize:11,color:T.textMuted}}>ต้องสั่งเพิ่ม <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
                         <span style={{color:T.textMuted,fontSize:11}}>{rows.length} รายการ</span>
                         <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:700,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
                       </div>
@@ -5161,6 +5328,19 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[] }) {
   const trkBudget = buildCombinedBudget(tenderCosts, additions);
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
+  const STATUS_FILTERS = [["all","ทั้งหมด"],["pending","รอของเข้า"],["late","ล่าช้า"],["received","รับแล้ว"],["payPending","รอจ่าย"],["paid","จ่ายแล้ว"]];
+  const matchesStatus = (p) => {
+    const inc = incomingStatus(p), pay = paymentStatus(p);
+    switch (statusFilter) {
+      case "pending":    return inc === "pending";
+      case "late":       return inc === "late" || pay === "late";
+      case "received":   return inc === "received" || inc === "partial";
+      case "payPending": return pay === "pending";
+      case "paid":       return pay === "paid";
+      default:           return true;
+    }
+  };
   // Which Account-Code groups are collapsed — lets a busy board with many
   // PO rows be tidied away group by group instead of scrolling forever.
   const [collapsed, setCollapsed] = useState(() => new Set());
@@ -5184,7 +5364,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
     const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
     const matchesSearch = q==="" || [itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(q);
     const hasIssue = incomingStatus(p)==="late" || paymentStatus(p)==="late";
-    return matchesSearch && (!onlyIssues || hasIssue);
+    return matchesSearch && (!onlyIssues || hasIssue) && matchesStatus(p);
   };
 
   const filteredEntries = poEntries.filter(passesFilter);
@@ -5255,6 +5435,11 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
           ⚠️ แสดงเฉพาะรายการล่าช้า
         </button>
+        <span style={{width:1,alignSelf:"stretch",background:T.cardBorder,margin:"0 2px"}}/>
+        {STATUS_FILTERS.map(([k,l])=>(
+          <button key={k} onClick={()=>setStatusFilter(k)}
+            style={{background:statusFilter===k?T.amber:"transparent",border:`1.5px solid ${statusFilter===k?T.amber:T.cardBorder}`,borderRadius:8,padding:"6px 12px",color:statusFilter===k?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>{l}</button>
+        ))}
         <button onClick={()=>setCollapsed(new Set(sortedCodes))}
           style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:600}}>
           ▲ ย่อทั้งหมด
