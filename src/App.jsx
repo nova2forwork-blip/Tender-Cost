@@ -4852,7 +4852,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const takeoffOf = (code) => [...pos, ...list].reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.takeoff) || 0), 0), 0); // Take off (กรอกเอง)
   const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // ยอดที่เหลือต้องสั่ง
-  const balPOof   = (code) => takeoffOf(code) - issuePOof(code);                                    // Balance PO = Take off − Issue PO (เหลือต้องออก PO)
+  const balPOof   = (code) => takeoffOf(code) - stockOf(code) - issuePOof(code);                     // Balance PO = Take off − Stock − Issue PO
 
   const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
