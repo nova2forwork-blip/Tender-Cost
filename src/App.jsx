@@ -5660,6 +5660,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   const trkBudget = buildCombinedBudget(tenderCosts, additions);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
+  const [groupBy, setGroupBy] = useState("code"); // "code" = จัดกลุ่มตาม Acc. Code · "po" = จัดกลุ่มตาม PO
   const STATUS_FILTERS = [["all","ทั้งหมด"],["pending","รอของเข้า"],["late","ล่าช้า"],["received","รับแล้ว"],["payPending","รอจ่าย"],["paid","จ่ายแล้ว"]];
   const matchesStatus = (p) => {
     const inc = incomingStatus(p), pay = paymentStatus(p);
@@ -5711,6 +5712,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
     });
   });
   const sortedCodes = Object.keys(groups).sort();
+  // จัดกลุ่มตาม PO (ทางเลือก) — หนึ่งใบต่อกลุ่ม เรียงตามวันเปิด PO แล้วเลข PO
+  const posSorted = filteredEntries.slice().sort((a,b)=> (a.date||"").localeCompare(b.date||"") || poNumbersLabel(a).localeCompare(poNumbersLabel(b)));
+  // คีย์ที่ใช้ย่อ/ขยายทั้งหมด ตามโหมดที่เลือก
+  const allGroupKeys = groupBy==="po" ? posSorted.map(p=>p.id) : sortedCodes;
 
   // committed/stock ต่อ code ต้องคิดจาก PO "ทั้งหมด" ไม่ใช่เฉพาะที่ผ่านตัวกรอง
   // (ไม่งั้น "ต้องสั่งเพิ่ม" จะเพี้ยน/เกินจริงเมื่อเปิดฟิลเตอร์สถานะหรือเฉพาะล่าช้า)
@@ -5760,6 +5765,91 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
     );
   };
 
+  // แถวเดียว (ต่อ item) ใช้ได้ทั้งโหมดจัดกลุ่มตาม Acc. Code และตาม PO
+  // showAcc=true → โชว์ Acc. Code/ชื่อบัญชีแทนคอลัมน์ วันเปิด/Supplier/PO (ใช้ในโหมดจัดกลุ่มตาม PO)
+  const renderRow = ({po:p,item},i,showAcc=false) => {
+    // แถวนี้แยกตาม item → คิด/แสดงเฉพาะงวดของ item นี้ ไม่เอางวดของ code อื่นในใบเดียวกันมาปน
+    const pItem = { ...p, items:[item] };
+    const inc = incomingStatus(pItem), pay = paymentStatus(pItem);
+    const splitAcrossCodes = poItems(p).length>1;
+    const locked = !canEditPO(p, session);
+    const receivedDates = poReceivedDates(pItem);
+    const paidDate = poPaidDate(pItem);
+    const acc = ACCOUNTS.find(a=>a.code===item.code);
+    return (
+      <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>onView?.(p)}
+        style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
+        onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
+        onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
+        {showAcc ? (
+          <>
+            <td style={{padding:"9px 16px",color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{item.code||"—"}</td>
+            <td style={{padding:"9px 16px",color:T.textSecondary,fontSize:13}} colSpan={2}>{acc?.name||"—"}</td>
+          </>
+        ) : (
+          <>
+            <td style={{padding:"9px 16px",color:T.textMuted,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
+            <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
+            <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{poNumbersLabel(p)}</td>
+          </>
+        )}
+        <td style={{padding:"9px 16px",textAlign:"right"}}>
+          <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+          {usdLine(parseFloat(item.amount)||0, usdRate)}
+          {!showAcc && splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
+        </td>
+        <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
+          {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
+        </td>
+        <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:paidDate?T.green:T.textMuted,fontWeight:paidDate?600:450}}>
+          {paidDate || "—"}
+        </td>
+        <td style={{padding:"9px 16px"}}><DeliveryList po={pItem}/></td>
+        <td style={{padding:"9px 16px"}}>
+          <DateCell value={poNextDueDate(pItem)} lateTint={false}/>
+          {p.paymentType && (
+            <div style={{marginTop:3}}>
+              <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${paymentTypeLabel(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+            </div>
+          )}
+        </td>
+        <td style={{padding:"9px 16px"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
+            <Badge text={INCOMING_LABEL[inc]} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+            <Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+          </div>
+        </td>
+        <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",alignItems:"center",gap:4}}>
+            <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
+            {locked && <span title="รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin" style={{fontSize:12}}>🔒</span>}
+          </div>
+          {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)}</div>}
+        </td>
+        <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+          <button onClick={()=>onEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข"}
+            style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
+        </td>
+      </tr>
+    );
+  };
+  const thStyle = (align) => ({padding:"9px 16px",textAlign:align,color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`});
+  const theadRow = (mode) => (
+    <tr>
+      {mode==="po" ? (<>
+        <th style={thStyle("left")}>Acc. Code</th>
+        <th colSpan={2} style={thStyle("left")}>Account Name</th>
+      </>) : (<>
+        <th style={thStyle("left")}>วันเปิด PO</th>
+        <th style={thStyle("left")}>Supplier</th>
+        <th style={thStyle("left")}>PO No.</th>
+      </>)}
+      {["มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ","แผนจ่ายเงิน","ติดตาม","สถานะ",""].map((h,ci)=>(
+        <th key={ci} style={thStyle(h==="มูลค่า (THB)"?"right":"left")}>{h}</th>
+      ))}
+    </tr>
+  );
+
   return (
     <div>
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -5770,9 +5860,14 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
         </button>
         <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
           style={{padding:"7px 12px",border:`1.5px solid ${statusFilter!=="all"?T.amber:T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:statusFilter!=="all"?T.amber:T.textSecondary,background:"#fff",cursor:"pointer"}}>
-          {STATUS_FILTERS.map(([k,l])=><option key={k} value={k}>{k==="all"?"สถานะ: ทั้งหมด":`สถานะ: ${l}`}</option>)}
+          {STATUS_FILTERS.filter(([k])=>k!=="late").map(([k,l])=><option key={k} value={k}>{l}</option>)}
         </select>
-        <button onClick={()=>setCollapsed(new Set(sortedCodes))}
+        <select value={groupBy} onChange={e=>{ setGroupBy(e.target.value); setCollapsed(new Set()); }}
+          style={{padding:"7px 12px",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:T.textSecondary,background:"#fff",cursor:"pointer"}}>
+          <option value="code">จัดกลุ่ม: ตาม Acc. Code</option>
+          <option value="po">จัดกลุ่ม: ตาม PO</option>
+        </select>
+        <button onClick={()=>setCollapsed(new Set(allGroupKeys))}
           style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
           ▲ ย่อทั้งหมด
         </button>
@@ -5783,11 +5878,41 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
         <div style={{flex:1}}/>
       </div>
 
-      {sortedCodes.length===0 ? (
+      {filteredEntries.length===0 ? (
         <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
           <div style={{fontSize:32,marginBottom:12}}>🚚</div>
           <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>ไม่พบรายการที่ตรงเงื่อนไข</div>
           <div style={{fontSize:13}}>ลองล้างตัวกรอง หรือคำค้นหา</div>
+        </div>
+      ) : groupBy==="po" ? (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          {posSorted.map(p => {
+            const items = poItems(p);
+            const isCollapsed = collapsed.has(p.id);
+            const inc = incomingStatus(p), pay = paymentStatus(p);
+            return (
+              <div key={p.id} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                <div onClick={()=>toggleGroup(p.id)}
+                  style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
+                  <span style={{color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{poNumbersLabel(p)}</span>
+                  <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{poSupplierName(p)}</span>
+                  <span style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>เปิด {p.date}</span>
+                  <span style={{flex:1}}/>
+                  <span style={{fontSize:12,color:T.textMuted}}>มูลค่า <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(poTotal(p))}</b></span>
+                  <span style={{color:T.textMuted,fontSize:12}}>{items.length} รายการ</span>
+                  <Badge text={INCOMING_LABEL[inc]} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+                  <Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+                </div>
+                {!isCollapsed && (
+                <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+                  <thead>{theadRow("po")}</thead>
+                  <tbody>{items.map((it,ii)=>renderRow({po:p,item:it},ii,true))}</tbody>
+                </table></div>
+                )}
+              </div>
+            );
+          })}
         </div>
       ) : (
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
