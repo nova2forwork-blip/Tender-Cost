@@ -387,7 +387,8 @@ const incomingStatus = (p) => {
   if (allReceived) return "received";
   if (anyLate) return "late";
   if (anyReceived) return "partial";
-  if (rounds.some(r=>r.planDate)) return "pending";
+  // มีนัด (วันแผน) หรือมีวันรับล่วงหน้าที่ยังไม่ถึง = "รอของเข้า" (ให้ตรงกับป้ายระดับงวด)
+  if (rounds.some(r=>r.planDate || r.actualDate)) return "pending";
   return "unset";
 };
 // Auto-pay: reaching a round's due date is what marks it paid, so payment is
@@ -1366,7 +1367,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
   const payM = monthsOf(payplan);
   const rowsData = accounts.map(a => {
     const budget = parseFloat(combined[a.code])||0, committed = committedByCode[a.code]||0, stock = stockByCode[a.code]||0, planned = plannedByCode[a.code]||0;
-    const mgRow = mgM.map(mk => { const av=actual[a.code]?.[mk]||0, pv=incoming[a.code]?.[mk]||0; return { eff: av>0?av:pv, real: av>0 }; });
+    const mgRow = mgM.map(mk => { const av=actual[a.code]?.[mk]||0, pv=incoming[a.code]?.[mk]||0; return { eff: av+pv, real: pv===0 }; }); // รวมรับจริง+ยังไม่เข้า (ไม่ให้ตกหล่นเมื่อเดือนเดียวมีทั้งคู่) · ดำ=รับครบ, แดง=ยังมีค้าง
     const pyRow = payM.map(mk => payplan[a.code]?.[mk]||0);
     return { a, budget, committed, stock, planned, balPO:budget-committed, balCost:budget-stock-committed-planned, balPOout:budget-stock-committed,
       mgRow, pyRow, mgTot:mgRow.reduce((s,c)=>s+c.eff,0), pyTot:pyRow.reduce((s,x)=>s+x,0) };
@@ -4589,12 +4590,12 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   const locked = !canEditPO(po, session);
   const receivedDates = poReceivedDates(po);
   const paidDate = poPaidDate(po);
-  // ยอดรวมทุกงวด (ของเข้าจริง หรือ แผน) ห้ามเกินยอดสั่ง — ใช้ปิดปุ่มบันทึก + เตือนค้างไว้
+  // ยอด "ของเข้าจริง" รวมทุกงวด ห้ามเกินยอดสั่ง — ใช้ปิดปุ่มบันทึก + เตือนค้างไว้
+  // (ยอดแผนเกินมี overPlanned เตือนแบบไม่บล็อกอยู่แล้ว จะได้ไม่กันการบันทึกยอดที่รับจริง)
   const overCapItem = items.find(it => {
     const o = itemOrdered(it); if (!(o > 0)) return false;
     const recvSum = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-    const planSum = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
-    return recvSum > o + 0.001 || planSum > o + 0.001;
+    return recvSum > o + 0.001;
   });
 
   // Record actual received / split remaining into a new round, then persist.
@@ -4863,6 +4864,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
   const monthLbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
   const today = todayStr();
+  const [mSearch, setMSearch] = useState("");            // ค้นหาในตารางของเข้ารายเดือน (Acc. Code/ชื่อ)
+  const [mSort, setMSort] = useState({ key: "code", dir: "asc" }); // เรียงตามหัวคอลัมน์
 
   // ── รวมรายการของเข้า แยกที่มา: จริง(รับแล้ว/PO) vs แผน — เดือนไหนมีทั้งคู่จะโชว์ 2 ค่า
   const entries = [];
@@ -4897,8 +4900,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const cellTot = (c) => c ? (c.rec + c.po + c.plan) : 0;
   const realTot = (code) => months.reduce((s, mk) => { const c = cellOf(code, mk); return s + (c ? c.rec + c.po : 0); }, 0); // "มีจริง" = รับแล้ว + PO
   const rowTot = (code) => months.reduce((s, mk) => s + cellTot(cellOf(code, mk)), 0);
-  const colTot = (mk) => codes.reduce((s, c) => s + cellTot(cellOf(c, mk)), 0);
-  const grand = codes.reduce((s, c) => s + rowTot(c), 0);
+  const colTot = (mk) => shownCodes.reduce((s, c) => s + cellTot(cellOf(c, mk)), 0);
 
   // ── คอลัมน์ต้นทุน: Tender Cost / Stock / Balance Cost ────────────────────────
   const combinedBudget = buildCombinedBudget(tenderCosts, additions);
@@ -4910,6 +4912,36 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // "Pending PO" = งบ − Stock − Issue PO − แผน (ยอดที่ยังต้องสั่ง)
   const balPOof   = (code) => budgetOf(code) - stockOf(code) - issuePOof(code);                      // "Balance Cost" = Tender Cost − Stock − Issue PO
+  // ── ค้นหา + เรียงลำดับตามหัวคอลัมน์ ──────────────────────────────────────────
+  const sortVal = (code, key) => {
+    switch (key) {
+      case "code":    return code;
+      case "name":    return nameOf(code);
+      case "tender":  return budgetOf(code);
+      case "takeoff": return takeoffOf(code);
+      case "stock":   return stockOf(code);
+      case "issue":   return issuePOof(code);
+      case "pending": return balCostOf(code);
+      case "total":   return rowTot(code);
+      case "balcost": return balPOof(code);
+      default:        return key.startsWith("m:") ? cellTot(cellOf(code, key.slice(2))) : code;
+    }
+  };
+  const mQ = mSearch.trim().toLowerCase();
+  const shownCodes = codes
+    .filter(c => !mQ || c.toLowerCase().includes(mQ) || nameOf(c).toLowerCase().includes(mQ))
+    .sort((a, b) => {
+      const va = sortVal(a, mSort.key), vb = sortVal(b, mSort.key);
+      const d = (typeof va === "string" || typeof vb === "string")
+        ? String(va).localeCompare(String(vb), "th")
+        : (va - vb);
+      return mSort.dir === "asc" ? d : -d;
+    });
+  const grand = shownCodes.reduce((s, c) => s + rowTot(c), 0);
+  const toggleSort = (key) => setMSort(s => s.key === key
+    ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: (key === "code" || key === "name") ? "asc" : "desc" });
+  const arrow = (key) => mSort.key === key ? (mSort.dir === "asc" ? " ▲" : " ▼") : "";
 
   const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
@@ -4922,7 +4954,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const stickyHead0 = { left: 0, zIndex: 3 };
   const stickyHead1 = { left: COL1_W, zIndex: 3 };
   const money = (n) => n ? (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n)) : "-";
-  const sum = (fn) => codes.reduce((s, c) => s + fn(c), 0);
+  const sum = (fn) => shownCodes.reduce((s, c) => s + fn(c), 0);
 
   return (
     <div>
@@ -4940,24 +4972,28 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = PO รอเข้า</span>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123 *</b> = แผน (มี * ต่อท้าย)</span>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+            <SearchInput value={mSearch} onChange={setMSearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260}/>
+            <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownCodes.length}/{codes.length} รายการ</span>
+          </div>
           <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
             <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
               <thead>
                 <tr>
-                  <th style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W }}>Acc. Code</th>
-                  <th style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180 }}>Acc. Name</th>
-                  <th style={{ ...hM(bCost), minWidth: 120 }}>Tender Cost</th>
-                  <th style={{ ...hM(bCost), minWidth: 110 }}>Take off</th>
-                  <th style={{ ...hM(bCost), minWidth: 90 }}>Stock</th>
-                  <th style={{ ...hM(bCost), minWidth: 110 }}>Issue PO</th>
-                  <th style={{ ...hM(bCost), minWidth: 110 }}>Pending PO</th>
-                  {months.map(mk => <th key={mk} style={hM("#eef3ee")}>{monthLbl(mk)}</th>)}
-                  <th style={{ ...hM("#eef3ee"), fontWeight: 700 }}>TOTAL</th>
-                  <th style={{ ...hM("#eaeef5"), minWidth: 110 }}>Balance Cost</th>
+                  <th onClick={()=>toggleSort("code")}    style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
+                  <th onClick={()=>toggleSort("name")}    style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
+                  <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("tender")}</th>
+                  <th onClick={()=>toggleSort("takeoff")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Take off{arrow("takeoff")}</th>
+                  <th onClick={()=>toggleSort("stock")}   style={{ ...hM(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
+                  <th onClick={()=>toggleSort("issue")}   style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Issue PO{arrow("issue")}</th>
+                  <th onClick={()=>toggleSort("pending")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("pending")}</th>
+                  {months.map(mk => <th key={mk} onClick={()=>toggleSort("m:"+mk)} style={{ ...hM("#eef3ee"), cursor:"pointer", userSelect:"none" }}>{monthLbl(mk)}{arrow("m:"+mk)}</th>)}
+                  <th onClick={()=>toggleSort("total")}   style={{ ...hM("#eef3ee"), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("total")}</th>
+                  <th onClick={()=>toggleSort("balcost")} style={{ ...hM("#eaeef5"), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balcost")}</th>
                 </tr>
               </thead>
               <tbody>
-                {codes.map(code => {
+                {shownCodes.map(code => {
                   const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code), bpo = balPOof(code);
                   return (
                     <tr key={code}>
@@ -6028,10 +6064,16 @@ const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","
 function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [], usdRate = 0 }) {
   const accounts = exportAccountList(extraItems, hiddenAccounts);
   const combined = buildCombinedBudget(tenderCosts, additions);
+  const [aSearch, setASearch] = useState("");                       // ค้นหา Acc. Code/ชื่อบัญชี
+  const [aSort, setASort] = useState({ key: "code", dir: "asc" });  // เรียงตามหัวคอลัมน์
   const committedByCode = {}, stockByCode = {}, plannedByCode = {};
-  const actual = {}, payplan = {};
+  const payplan = {};
   const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
-  const incoming = {};
+  const today = todayStr();
+  const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
+  // แต่ละช่องเดือน (ต่อ code) เก็บแยก rec(รับแล้ว)/po(PO รอเข้า)/plan(แผน) + ธง late — สีเหมือนตารางจัดซื้อ
+  const mCell = {};
+  const mBucket = (code, mk) => { const c = (mCell[code] = mCell[code] || {}); return (c[mk] = c[mk] || { rec:0, po:0, poLate:false, plan:0, planLate:false }); };
   // แผนของเข้า = อ็อบเจ็กต์รูปเดียวกับ PO → บัคเก็ตตามวันแผนรับของแต่ละงวด
   // (ไม่มีวันแผนก็ใช้วันในฟอร์ม) รวมยอดที่วางแผนไว้ต่อ Acc code ต่อเดือน
   // และเก็บยอดแผนรวมต่อ Acc code (plannedByCode) ใช้คำนวณ Balance Cost ให้ตรงกับ
@@ -6041,7 +6083,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
       plannedByCode[it.code] = (plannedByCode[it.code] || 0) + (parseFloat(it.amount) || 0);
       (it.rounds || []).forEach(r => {
         const amt = parseFloat(r.planAmount) || 0;
-        if (amt > 0) bump(incoming, it.code, (r.planDate || pl.date || "").slice(0, 7), amt);
+        if (amt > 0) { const cc = mBucket(it.code, (r.planDate || pl.date || "").slice(0, 7)); cc.plan += amt; if (lateOf(r)) cc.planLate = true; }
       });
     });
   });
@@ -6052,20 +6094,20 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
       stockByCode[code] = (stockByCode[code] || 0) + (parseFloat(it.store) || 0);
       (it.rounds || []).forEach(r => {
         if (roundReceived(r)) {
-          bump(actual, code, r.actualDate.slice(0, 7), parseFloat(r.actualAmount) || 0); // รับจริง (ดำ)
+          const cc = mBucket(code, r.actualDate.slice(0, 7)); cc.rec += parseFloat(r.actualAmount) || 0; // รับแล้ว (เขียว)
         } else {
-          // PO ที่สั่งแล้วแต่ยังไม่รับ = "คาดว่าจะเข้า" (แดง)
-          // ใช้ "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
+          // PO ที่สั่งแล้วแต่ยังไม่รับ = "PO รอเข้า" (ดำ) · ใช้ยอดจริงที่กรอกไว้ก่อน ไม่มีค่อยใช้แผน
           const amt = parseFloat(r.actualAmount) || parseFloat(r.planAmount) || 0;
-          if (amt > 0) bump(incoming, code, (r.actualDate || r.planDate || p.date || "").slice(0, 7), amt);
+          if (amt > 0) { const cc = mBucket(code, (r.actualDate || r.planDate || p.date || "").slice(0, 7)); cc.po += amt; if (lateOf(r)) cc.poLate = true; }
         }
       });
     });
     poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount || 0));
   });
   const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m => Object.keys(m)))].sort();
-  const mgM = [...new Set([...monthsOf(incoming), ...monthsOf(actual)])].sort(); // แผน ∪ รับจริง
+  const mgM = monthsOf(mCell);            // เดือนที่มีของเข้า (รับ/PO/แผน)
   const payM = monthsOf(payplan);
+  const cellTot = (c) => c ? (c.rec + c.po + c.plan) : 0;
   const lbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
   const money = (n) => !n ? "-" : (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n));
 
@@ -6077,16 +6119,45 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
     const balPO = budget - committed;                                   // Balance Pending PO (งบ − PO)
     const balCost = budget - stock - committed - planned;               // Balance Cost = เหลือต้องสั่งจริง (งบ − Stock − PO − แผน) ตรงกับหน้าจัดซื้อ
     const balPOout = budget - stock - committed;                        // PO Balance = งบ − Stock − PO ที่สั่งแล้ว (ยังไม่คิดแผน)
-    const mgRow = mgM.map(mk => { const av = actual[a.code]?.[mk] || 0; const pv = incoming[a.code]?.[mk] || 0; const eff = av > 0 ? av : pv; return { eff, real: av > 0 }; });
+    const mgRow = mgM.map(mk => mCell[a.code]?.[mk] || { rec:0, po:0, poLate:false, plan:0, planLate:false });
     const pyRow = payM.map(mk => payplan[a.code]?.[mk] || 0);
-    const mgTot = mgRow.reduce((s, c) => s + c.eff, 0);
+    const mgTot = mgRow.reduce((s, c) => s + cellTot(c), 0);
     const pyTot = pyRow.reduce((s, x) => s + x, 0);
     return { a, budget, committed, balPO, balPOout, stock, balCost, mgRow, pyRow, mgTot, pyTot };
   }).filter(r => r.budget || r.committed || r.stock || r.mgTot || r.pyTot);
 
-  const mgColSum = (i) => rows.reduce((s, r) => s + (r.mgRow[i]?.eff || 0), 0);
-  const pyColSum = (i) => rows.reduce((s, r) => s + (r.pyRow[i] || 0), 0);
-  const totOf = (pick) => rows.reduce((s, r) => s + pick(r), 0);
+  // ── ค้นหา + เรียงลำดับตามหัวคอลัมน์ ──────────────────────────────────────────
+  const aQ = aSearch.trim().toLowerCase();
+  const sortVal = (r, key) => {
+    switch (key) {
+      case "code":      return r.a.code;
+      case "name":      return r.a.name || "";
+      case "budget":    return r.budget;
+      case "balPO":     return r.balPO;
+      case "stock":     return r.stock;
+      case "balCost":   return r.balCost;
+      case "mgTot":     return r.mgTot;
+      case "committed": return r.committed;
+      case "balPOout":  return r.balPOout;
+      case "pyTot":     return r.pyTot;
+      default:
+        if (key.startsWith("im:")) return cellTot(r.mgRow[+key.slice(3)]);
+        if (key.startsWith("pm:")) return r.pyRow[+key.slice(3)] || 0;
+        return r.a.code;
+    }
+  };
+  const shownRows = rows
+    .filter(r => !aQ || r.a.code.toLowerCase().includes(aQ) || (r.a.name || "").toLowerCase().includes(aQ))
+    .sort((x, y) => {
+      const vx = sortVal(x, aSort.key), vy = sortVal(y, aSort.key);
+      const d = (typeof vx === "string" || typeof vy === "string") ? String(vx).localeCompare(String(vy), "th") : (vx - vy);
+      return aSort.dir === "asc" ? d : -d;
+    });
+  const toggleSort = (key) => setASort(s => s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: (key === "code" || key === "name") ? "asc" : "desc" });
+  const arrow = (key) => aSort.key === key ? (aSort.dir === "asc" ? " ▲" : " ▼") : "";
+  const mgColSum = (i) => shownRows.reduce((s, r) => s + cellTot(r.mgRow[i]), 0);
+  const pyColSum = (i) => shownRows.reduce((s, r) => s + (r.pyRow[i] || 0), 0);
+  const totOf = (pick) => shownRows.reduce((s, r) => s + pick(r), 0);
 
   const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2", bPO = "#eaeef5";
   const cell = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
@@ -6101,46 +6172,56 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const numCell = (v, bg) => (
     <td style={{ ...num, background: bg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 450 }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>
   );
-  // รับจริง=ดำ, แผน/ยังไม่เข้า=แดง + เติม " *" ให้ค่าที่ยังเป็นแผน (กันตาบอดสีอ่านพลาด)
-  const mgCell = (c, bg) => (
-    <td style={{ ...num, background: bg, color: c.eff === 0 ? T.textMuted : (c.real ? T.textPrimary : T.red), fontWeight: c.eff ? (c.real ? 600 : 500) : 450 }}>{c.eff ? (c.real ? money(c.eff) : money(c.eff) + " *") : "-"}{c.eff ? usdLine(c.eff, usdRate) : null}</td>
-  );
+  // ช่องเดือน: รับแล้ว=เขียว · PO รอเข้า=ดำ(⚠=ล่าช้า) · แผน=แดง มี * — เหมือนตารางจัดซื้อ
+  const mgCell = (c, bg) => {
+    const tot = cellTot(c);
+    return (
+      <td style={{ ...num, background: bg, color: tot ? T.textPrimary : T.textMuted, fontWeight: 600 }}>
+        {!tot ? "-" : (<>
+          {c.rec > 0 && <div style={{ color: T.green }}>{fmt(c.rec)}</div>}
+          {c.po > 0 && <div style={{ color: c.poLate ? T.amber : T.textPrimary }}>{fmt(c.po)}{c.poLate ? " ⚠" : ""}</div>}
+          {c.plan > 0 && <div style={{ color: c.planLate ? T.amber : T.red }}>{fmt(c.plan)} *{c.planLate ? "⚠" : ""}</div>}
+          {usdLine(tot, usdRate)}
+        </>)}
+      </td>
+    );
+  };
 
   return (
     <div>
       <div style={{ fontSize:12, color: T.textMuted, marginBottom: 8 }}>
-        โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับจริง(ดำ) + PO ที่สั่งแล้วยังไม่เข้า/แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)
+        โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)
       </div>
-      <div style={{ display: "flex", gap: 18, marginBottom: 12, fontSize: 12 }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับจริง</span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123 *</b> = ยังเป็นแผน (ของเข้า) — มี * ต่อท้าย</span>
+      <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12, flexWrap: "wrap" }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.green, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับแล้ว</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.amber, fontFamily: "'JetBrains Mono',monospace" }}>123 ⚠</b> = ล่าช้า</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = PO รอเข้า</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123 *</b> = แผน (มี * ต่อท้าย)</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        <SearchInput value={aSearch} onChange={setASearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260}/>
+        <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownRows.length}/{rows.length} รายการ</span>
       </div>
       <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
         <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
           <thead>
             <tr>
-              <th style={hCell("#f8fafc")} colSpan={6}></th>
-              <th style={hCell(bMg)} colSpan={mgM.length + 1}>Incoming / Received</th>
-              <th style={hCell(bPy)} colSpan={payM.length + 1}>Payment Plan</th>
-              <th style={hCell(bPO)} colSpan={2}>สรุป PO</th>
-            </tr>
-            <tr>
-              <th style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W }}>Acc. Code</th>
-              <th style={{ ...hCell("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190 }}>Acc. Name</th>
-              <th style={{ ...hCell(bCost), minWidth: 120 }}>Tender Cost</th>
-              <th style={{ ...hCell(bCost), minWidth: 110 }}>Balance Pending PO</th>
-              <th style={{ ...hCell(bCost), minWidth: 90 }}>Stock</th>
-              <th style={{ ...hCell(bCost), minWidth: 100 }}>Balance Cost</th>
-              {mgM.map(mk => <th key={"m" + mk} style={hCell(bMg)}>{lbl(mk)}</th>)}
-              <th style={{ ...hCell(bMg), fontWeight: 700 }}>TOTAL</th>
-              {payM.map(mk => <th key={"p" + mk} style={hCell(bPy)}>{lbl(mk)}</th>)}
-              <th style={{ ...hCell(bPy), fontWeight: 700 }}>TOTAL</th>
-              <th style={{ ...hCell(bPO), minWidth: 110 }}>Total PO</th>
-              <th style={{ ...hCell(bPO), minWidth: 110 }}>PO Balance</th>
+              <th onClick={()=>toggleSort("code")}      style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
+              <th onClick={()=>toggleSort("name")}      style={{ ...hCell("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
+              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("budget")}</th>
+              <th onClick={()=>toggleSort("balPO")}     style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Pending PO{arrow("balPO")}</th>
+              <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
+              <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balCost")}</th>
+              {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell(bMg), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("im:"+i)}</th>)}
+              <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("mgTot")}</th>
+              {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell(bPy), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("pm:"+i)}</th>)}
+              <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("pyTot")}</th>
+              <th onClick={()=>toggleSort("committed")} style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Total PO{arrow("committed")}</th>
+              <th onClick={()=>toggleSort("balPOout")}  style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>PO Balance{arrow("balPOout")}</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => (
+            {shownRows.map(r => (
               <tr key={r.a.code}>
                 <td style={{ ...cell, ...stickyBody0, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{r.a.code}</td>
                 <td style={{ ...cell, ...stickyBody1 }}>{r.a.name}</td>
@@ -6156,11 +6237,11 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
                 {numCell(r.balPOout, bPO)}
               </tr>
             ))}
-            {rows.length === 0 && (
-              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={mgM.length + payM.length + 10}>— ยังไม่มีข้อมูล —</td></tr>
+            {shownRows.length === 0 && (
+              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={mgM.length + payM.length + 10}>{rows.length === 0 ? "— ยังไม่มีข้อมูล —" : "— ไม่พบรายการที่ตรงกับการค้นหา —"}</td></tr>
             )}
           </tbody>
-          {rows.length > 0 && (
+          {shownRows.length > 0 && (
             <tfoot>
               <tr>
                 <td style={{ ...cell, ...stickyBody0, fontWeight: 700, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
