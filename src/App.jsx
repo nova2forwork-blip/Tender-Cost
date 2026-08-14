@@ -1245,8 +1245,8 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
       const cc=bucket(it.code, r.actualDate.slice(0,7));
       if (roundPaid(p,r)) cc.paid+=a; else cc.recv+=a;
     } else {
-      const a=parseFloat(r.planAmount)||0; if(!a) return;
-      const cc=bucket(it.code,(r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
+      const a=parseFloat(r.planAmount)||parseFloat(r.actualAmount)||0; if(!a) return;
+      const cc=bucket(it.code,(r.planDate||r.actualDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
     }
   })));
   const mCodes = Object.keys(mCell).sort();
@@ -1324,7 +1324,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
     stockByCode[it.code] = (stockByCode[it.code]||0)+(parseFloat(it.store)||0);
     (it.rounds||[]).forEach(r => {
       if (roundReceived(r)) bump(actual, it.code, r.actualDate.slice(0,7), parseFloat(r.actualAmount)||0);
-      else { const a=parseFloat(r.planAmount)||0; if(a>0) bump(incoming, it.code, (r.planDate||p.date||"").slice(0,7), a); }
+      else { const a=parseFloat(r.planAmount)||parseFloat(r.actualAmount)||0; if(a>0) bump(incoming, it.code, (r.planDate||r.actualDate||p.date||"").slice(0,7), a); }
     });
   }); poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount||0)); });
   const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m=>Object.keys(m)))].sort();
@@ -4829,8 +4829,9 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       const amt = parseFloat(r.actualAmount) || 0; if (!amt) return;
       entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, src: "po", late: false, received: true });
     } else {
-      const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
-      entries.push({ code: it.code, mk: (r.planDate || p.date || "").slice(0, 7), amount: amt, src: "po", late: lateOf(r), received: false });
+      // ยังไม่รับ = "PO รอเข้า" — ใช้ยอดแผน ถ้าไม่มีให้ถอยไปใช้ยอดจริงที่กรอกไว้ (งวดที่ลงวันรับล่วงหน้า)
+      const amt = parseFloat(r.planAmount) || parseFloat(r.actualAmount) || 0; if (!amt) return;
+      entries.push({ code: it.code, mk: (r.planDate || r.actualDate || p.date || "").slice(0, 7), amount: amt, src: "po", late: lateOf(r), received: false });
     }
   })));
   const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
@@ -5872,8 +5873,9 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
           bump(actual, code, r.actualDate.slice(0, 7), parseFloat(r.actualAmount) || 0); // รับจริง (ดำ)
         } else {
           // PO ที่สั่งแล้วแต่ยังไม่รับ = "คาดว่าจะเข้า" (แดง) ตามวันแผน (ไม่มีก็ใช้วันสั่ง PO)
-          const amt = parseFloat(r.planAmount) || 0;
-          if (amt > 0) bump(incoming, code, (r.planDate || p.date || "").slice(0, 7), amt);
+          // ยอดแผนว่าง → ถอยไปใช้ยอดจริงที่กรอกไว้ (งวดที่ลงวันรับล่วงหน้า) จะได้ไม่ตกหล่น
+          const amt = parseFloat(r.planAmount) || parseFloat(r.actualAmount) || 0;
+          if (amt > 0) bump(incoming, code, (r.planDate || r.actualDate || p.date || "").slice(0, 7), amt);
         }
       });
     });
