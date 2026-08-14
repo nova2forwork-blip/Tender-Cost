@@ -1286,34 +1286,54 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
     const combinedB = buildCombinedBudget(tenderCosts, additions);
     const today = todayStr();
     const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
-    const mEntries = [];
-    plansArr.forEach(pl => poItems(pl).forEach(it => (it.rounds||[]).forEach(r => { const a=parseFloat(r.planAmount)||0; if(!a) return; mEntries.push({code:it.code, mk:(r.planDate||pl.date||"").slice(0,7), amount:a, src:"plan", late:lateOf(r), received:false}); })));
-    poEntries.forEach(p => poItems(p).forEach(it => (it.rounds||[]).forEach(r => {
-      if (roundReceived(r)) { const a=parseFloat(r.actualAmount)||0; if(!a) return; mEntries.push({code:it.code, mk:r.actualDate.slice(0,7), amount:a, src:"po", late:false, received:true}); }
-      else { const a=parseFloat(r.planAmount)||0; if(!a) return; mEntries.push({code:it.code, mk:(r.planDate||p.date||"").slice(0,7), amount:a, src:"po", late:lateOf(r), received:false}); }
+    // เก็บต่อ code×เดือน แยก 4 ประเภท: จ่ายแล้ว(เขียว) / รับแต่ยังไม่จ่าย / PO รอเข้า (ดำ) / แผน(แดง)
+    const mCell = {};
+    const bucket = (code, mk) => { const c=(mCell[code]=mCell[code]||{}); return (c[mk]=c[mk]||{paid:0,recv:0,po:0,poLate:false,plan:0,planLate:false}); };
+    plansArr.forEach(pl => poItems(pl).forEach(it => (it.rounds||[]).forEach(r => {
+      const a=parseFloat(r.planAmount)||0; if(!a) return;
+      const cc=bucket(it.code,(r.planDate||pl.date||"").slice(0,7)); cc.plan+=a; if(lateOf(r)) cc.planLate=true;
     })));
-    const mMonths = [...new Set(mEntries.map(e=>e.mk).filter(Boolean))].sort();
-    if (mEntries.length && mMonths.length) {
-      const mCell = {};
-      mEntries.forEach(e => { const c=(mCell[e.code]=mCell[e.code]||{}); const cc=(c[e.mk]=c[e.mk]||{rec:0,po:0,poLate:false,plan:0,planLate:false}); if(e.received) cc.rec+=e.amount; else if(e.src==="po"){ cc.po+=e.amount; if(e.late) cc.poLate=true; } else { cc.plan+=e.amount; if(e.late) cc.planLate=true; } });
-      const mCodes = Object.keys(mCell).sort();
+    poEntries.forEach(p => poItems(p).forEach(it => (it.rounds||[]).forEach(r => {
+      if (roundReceived(r)) {
+        const a=parseFloat(r.actualAmount)||0; if(!a) return;
+        const cc=bucket(it.code, r.actualDate.slice(0,7));
+        if (roundPaid(p,r)) cc.paid+=a; else cc.recv+=a;
+      } else {
+        const a=parseFloat(r.planAmount)||0; if(!a) return;
+        const cc=bucket(it.code,(r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
+      }
+    })));
+    const mCodes = Object.keys(mCell).sort();
+    const mMonths = [...new Set(mCodes.flatMap(c=>Object.keys(mCell[c])))].filter(Boolean).sort();
+    if (mCodes.length && mMonths.length) {
       const cellOf = (code,mk) => mCell[code]?.[mk] || null;
-      const cellTot = (c) => c ? (c.rec+c.po+c.plan) : 0;
+      const cellTot = (c) => c ? (c.paid+c.recv+c.po+c.plan) : 0;
+      const cellLines = (c) => c ? [c.paid>0,c.recv>0,c.po>0,c.plan>0].filter(Boolean).length : 0;
       const budgetOf    = (code) => parseFloat(combinedB[code])||0;
       const committedOf = (code) => poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
       const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
       const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
-      const cellText = (c) => { if(!c) return "-"; const L=[]; if(c.rec>0)L.push(`รับ ${fmt0(c.rec)}`); if(c.po>0)L.push(`PO ${fmt0(c.po)}${c.poLate?" ⚠":""}`); if(c.plan>0)L.push(`แผน ${fmt0(c.plan)}${c.planLate?" ⚠":""}`); return L.length?L.join("\n"):"-"; };
+      // runs = ข้อความหลายสีในเซลล์เดียว (จ่าย=เขียว/รับ,PO=ดำ/แผน=แดง) + plain สำรอง
+      const cellRuns = (c) => {
+        if (!c) return { runs:[], plain:"-" };
+        const runs=[];
+        const add=(txt,rgb)=>runs.push({ t:(runs.length?"\n":"")+txt, s:{ color:{rgb}, sz:10, name:"Tahoma" } });
+        if (c.paid>0) add(`จ่าย ${fmt0(c.paid)}`, "10B981");
+        if (c.recv>0) add(`รับ ${fmt0(c.recv)}`, "1F2937");
+        if (c.po>0)   add(`PO ${fmt0(c.po)}${c.poLate?" ⚠":""}`, "1F2937");
+        if (c.plan>0) add(`แผน ${fmt0(c.plan)}${c.planLate?" ⚠":""}`, "EF4444");
+        return { runs, plain: runs.map(r=>r.t).join("") || "-" };
+      };
       const rows = [
         [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
-        [`รับ = รับจริง · PO = สั่งแล้วรอเข้า · แผน = ยังไม่เป็น PO (⚠ = ล่าช้า) · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
+        [`สี: จ่ายแล้ว=เขียว · รับ/PO(ปกติ)=ดำ · แผน=แดง (⚠=ล่าช้า) · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
         [],
         ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost", ...mMonths.map(monthShortLabel), "TOTAL"],
       ];
       const dataStart = rows.length, monthColStart = 6, totalCol = 6 + mMonths.length, numCols = 7 + mMonths.length;
       mCodes.forEach(code => {
         const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code);
-        const monthCells = mMonths.map(mk => cellText(cellOf(code,mk)));
+        const monthCells = mMonths.map(mk => cellRuns(cellOf(code,mk)).plain);
         const rowTot = mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0);
         rows.push([code, nameOf(code), budget, budget-committed, stock, budget-stock-committed-planned, ...monthCells, rowTot]);
       });
@@ -1324,10 +1344,11 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
       rows.push(["","TOTAL", sumOf(budgetOf), sumOf(c=>budgetOf(c)-committedOf(c)), sumOf(stockOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c)), ...mMonths.map(mk=>colTot(mk)), grand]);
       const totalRow = rows.length - 1;
       const ws = XLSX.utils.aoa_to_sheet(rows);
-      ws["!cols"] = [{wch:12},{wch:30},{wch:16},{wch:18},{wch:12},{wch:16}, ...mMonths.map(()=>({wch:16})), {wch:16}];
+      // กว้างขึ้นแก้ ###: ต้นทุน 17–19, Stock 15, เดือน 20, TOTAL 18
+      ws["!cols"] = [{wch:12},{wch:34},{wch:17},{wch:19},{wch:15},{wch:17}, ...mMonths.map(()=>({wch:20})), {wch:18}];
       styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
         moneyCols:[2,3,4,5, ...mMonths.map((_,i)=>monthColStart+i), totalCol], theme });
-      // เดือน = ข้อความหลายบรรทัด → ตั้ง wrapText + สีแดงถ้าเป็น "แผนล้วน" (ยังไม่มีจริง/PO) + ขยายสูงแถว
+      // เดือน = ข้อความหลายสี (rich text) + wrapText + ขยายสูงแถวตามจำนวนบรรทัด
       for (let r=dataStart; r<=dataEnd; r++) {
         const code = mCodes[r-dataStart];
         let maxLines = 1;
@@ -1335,13 +1356,13 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
           const c = cellOf(code, mMonths[ci]);
           const ref = XLSX.utils.encode_cell({r, c:monthColStart+ci});
           if (!ws[ref]) continue;
-          const lines = c ? Math.max(1, [c.rec>0,c.po>0,c.plan>0].filter(Boolean).length) : 1;
-          if (lines > maxLines) maxLines = lines;
-          const pureplan = c && (c.rec+c.po)===0 && c.plan>0;
-          ws[ref].s = { ...(ws[ref].s||{}), alignment:{ horizontal:"right", vertical:"top", wrapText:true },
-            font:{ sz:9.5, name:"Tahoma", color:{rgb: pureplan ? "DC2626" : "1F2937"} } };
+          const { runs, plain } = cellRuns(c);
+          maxLines = Math.max(maxLines, cellLines(c) || 1);
+          const baseS = ws[ref].s || {};
+          ws[ref] = { t:"s", v: plain, ...(runs.length?{r:runs}:{}),
+            s:{ ...baseS, numFmt: undefined, alignment:{ horizontal:"right", vertical:"top", wrapText:true }, font:{ sz:10, name:"Tahoma", color:{rgb:"1F2937"} } } };
         }
-        ws["!rows"][r] = { hpx: Math.max(19, maxLines*15) };
+        ws["!rows"][r] = { hpx: Math.max(20, maxLines*15) };
         [3,5].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
       }
       xBackLink(ws, 2, numCols-1, "สรุป");
