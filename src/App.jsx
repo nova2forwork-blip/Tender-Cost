@@ -4849,7 +4849,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const committedOf = (code) => pos.reduce((s, p) => s + poAmountForCode(p, code), 0);
   const plannedOf = (code) => list.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
   const stockOf = (code) => pos.reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.store) || 0), 0), 0);
-  const balPendingOf = (code) => budgetOf(code) - committedOf(code);                              // งบ − PO ที่สั่งแล้ว
+  const takeoffOf = (code) => [...pos, ...list].reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.takeoff) || 0), 0), 0); // Take off (กรอกเอง)
+  const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // ยอดที่เหลือต้องสั่ง
 
   const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
@@ -4868,7 +4869,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่มแผน</button>
+        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่ม PO</button>
       </div>
 
       {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
@@ -4888,24 +4889,26 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <th style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W }}>Acc. Code</th>
                   <th style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180 }}>Acc. Name</th>
                   <th style={{ ...hM(bCost), minWidth: 120 }}>Tender Cost</th>
-                  <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Pending PO</th>
+                  <th style={{ ...hM(bCost), minWidth: 110 }}>Take off</th>
                   <th style={{ ...hM(bCost), minWidth: 90 }}>Stock</th>
                   <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Cost</th>
+                  <th style={{ ...hM(bCost), minWidth: 110 }}>Issue PO</th>
                   {months.map(mk => <th key={mk} style={hM("#eef3ee")}>{monthLbl(mk)}</th>)}
                   <th style={{ ...hM("#eef3ee"), fontWeight: 700 }}>TOTAL</th>
                 </tr>
               </thead>
               <tbody>
                 {codes.map(code => {
-                  const bud = budgetOf(code), bpo = balPendingOf(code), stk = stockOf(code), bc = balCostOf(code);
+                  const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code);
                   return (
                     <tr key={code}>
                       <td style={{ ...cM, ...stickyBody0, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
                       <td style={{ ...cM, ...stickyBody1, color: T.textSecondary }}>{nameOf(code)}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
-                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: bpo < 0 ? T.red : T.textPrimary }}>{money(bpo)}{bpo ? usdLine(Math.abs(bpo), usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(iss)}{iss ? usdLine(iss, usdRate) : null}</td>
                       {months.map(mk => {
                         const c = cellOf(code, mk); const tot = cellTot(c);
                         return (
@@ -4928,9 +4931,10 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                 <tr>
                   <td style={{ ...cM, ...stickyBody0, fontWeight: 700, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(budgetOf))}{sum(budgetOf) ? usdLine(sum(budgetOf), usdRate) : null}</td>
-                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balPendingOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balPendingOf))}{sum(balPendingOf) ? usdLine(Math.abs(sum(balPendingOf)), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(takeoffOf))}{sum(takeoffOf) ? usdLine(sum(takeoffOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(stockOf))}{sum(stockOf) ? usdLine(sum(stockOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(issuePOof))}{sum(issuePOof) ? usdLine(sum(issuePOof), usdRate) : null}</td>
                   {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 650, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}{colTot(mk) ? usdLine(colTot(mk), usdRate) : null}</td>)}
                   <td style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}{grand ? usdLine(grand, usdRate) : null}</td>
                 </tr>
@@ -4988,7 +4992,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
   const [view,   setView]   = useState("browse"); // "browse" | "add"
-  const blankItem = () => ({ id:uid(), code:"", store:"", amount:"",
+  const blankItem = () => ({ id:uid(), code:"", takeoff:"", store:"", amount:"",
     rounds:[{ id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }] });
   const emptyForm = () => ({
     date:new Date().toISOString().slice(0,10), status:"PO Issued",
@@ -5057,7 +5061,8 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // — ต้องหักด้วย ไม่งั้น "ต้องสั่งสุทธิ" ในฟอร์มจะไม่ตรงกับ Balance Cost ในตาราง
   const otherStock = (code) => poEntries.reduce((s,p)=> (!editingPlan && p.id===editId) ? s : s + poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0), 0);
   // "ต้องสั่งสุทธิ" = ยอดที่เหลือต้องสั่งจริง = งบ − store(ในฟอร์ม) − store ที่บันทึกไว้แล้ว − PO ที่สั่งแล้ว − แผนที่มี
-  const itemNet = (it) => budgetForCode(it.code) - (parseFloat(it.store)||0) - otherStock(it.code) - otherCommitted(it.code) - otherPlanned(it.code);
+  // "ต้องสั่งสุทธิ" อ้างอิงจาก Take off (กรอกเอง) — ไม่ผูกกับงบโครงการ (QS) อีกต่อไป
+  const itemNet = (it) => (parseFloat(it.takeoff)||0) - (parseFloat(it.store)||0) - otherStock(it.code) - otherCommitted(it.code) - otherPlanned(it.code);
   const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
   // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
 
@@ -5068,7 +5073,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
     if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก"); return; }
     const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
-      id: it.id || uid(), code: it.code, store: it.store || "", amount: it.amount,
+      id: it.id || uid(), code: it.code, takeoff: it.takeoff || "", store: it.store || "", amount: it.amount,
       rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
         id: r.id || uid(),
         planDate: r.planDate || "",
@@ -5148,7 +5153,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       supplier: { name: P.supplier.name || "", poNumber: P.supplier.poNumber || "" },
       paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
       items: P.items.map(it=>({
-        id: it.id || uid(), code: it.code || "", store: it.store || "", amount: it.amount || "",
+        id: it.id || uid(), code: it.code || "", takeoff: it.takeoff || "", store: it.store || "", amount: it.amount || "",
         rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
           .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
       })), isPlan:false,
@@ -5163,7 +5168,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       supplier: { name: P.supplier?.name || "", poNumber: P.supplier?.poNumber || "" },
       paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
       items: (P.items||[]).map(it=>({
-        id: it.id || uid(), code: it.code || "", store: it.store || "", pct: it.pct ?? "", amount: it.amount || "",
+        id: it.id || uid(), code: it.code || "", takeoff: it.takeoff || "", store: it.store || "", pct: it.pct ?? "", amount: it.amount || "",
         rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
           .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
       })), isPlan: asPlan,
@@ -5346,12 +5351,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                       <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
                         style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
                     </div>
-                    {/* แถวบน: งบ (อ่านอย่างเดียว) · store · ต้องสั่งสุทธิ (อ่านอย่างเดียว) */}
+                    {/* แถวบน: Take off (กรอกเอง) · store · ต้องสั่งสุทธิ (อ่านอย่างเดียว) */}
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>งบโครงการ</span>
-                        <input className="input-base" readOnly tabIndex={-1} value={fmtMoneyInput(budget)}
-                          style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:T.card,color:T.textPrimary}}/>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>Take off <span style={{color:T.textMuted,fontWeight:400}}>(กรอกเอง)</span></span>
+                        <MoneyInput value={it.takeoff} onChange={v=>updateItemRow(it.id,"takeoff",v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
                         <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>มีใน store</span>
@@ -5439,7 +5443,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </div>
         ) : tab==="inplan" ? (
           <>
-            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPO} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
             {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
             <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
               <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14}}>🚚 ติดตามของเข้า / จ่ายเงิน</div>
@@ -5689,14 +5693,6 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 
   return (
     <div>
-      {/* Quick-glance counts so problems surface without reading every row */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-        <StatCard label="รอของเข้า" value={counts.incPending} sub="ยังไม่ถึงวันที่นัด" color={T.amber} icon="⏳" accent={T.amberBg}/>
-        <StatCard label="ของเข้าล่าช้า" value={counts.incLate} sub="เลยวันแผนของเข้าแล้ว" color={T.red} icon="⚠️" accent={T.redBg}/>
-        <StatCard label="รอจ่ายเงิน" value={counts.payPending} sub="ของเข้าแล้ว รอถึงกำหนด" color={T.amber} icon="⏳" accent={T.amberBg}/>
-        <StatCard label="ถึงกำหนดจ่าย" value={counts.payPaid} sub="ถึงวันครบกำหนดแล้ว (ระบบทำเครื่องหมายให้)" color={T.green} icon="✅" accent={T.greenBg}/>
-      </div>
-
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
         <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Acc. Code, supplier, PO..." width={240}/>
         <button onClick={()=>setOnlyIssues(v=>!v)}
@@ -5716,7 +5712,6 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           ▼ ขยายทั้งหมด
         </button>
         <div style={{flex:1}}/>
-        <button onClick={onAddNew} className="btn-primary" style={{background:T.amber}}>+ เพิ่ม PO</button>
       </div>
 
       {sortedCodes.length===0 ? (
