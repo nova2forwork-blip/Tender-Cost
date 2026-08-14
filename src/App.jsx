@@ -1245,8 +1245,8 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
       const cc=bucket(it.code, r.actualDate.slice(0,7));
       if (roundPaid(p,r)) cc.paid+=a; else cc.recv+=a;
     } else {
-      const a=parseFloat(r.planAmount)||parseFloat(r.actualAmount)||0; if(!a) return;
-      const cc=bucket(it.code,(r.planDate||r.actualDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
+      const a=parseFloat(r.actualAmount)||parseFloat(r.planAmount)||0; if(!a) return; // ยอดจริงที่กรอกไว้มาก่อน (ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้แผน
+      const cc=bucket(it.code,(r.actualDate||r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
     }
   })));
   const mCodes = Object.keys(mCell).sort();
@@ -1358,7 +1358,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
     stockByCode[it.code] = (stockByCode[it.code]||0)+(parseFloat(it.store)||0);
     (it.rounds||[]).forEach(r => {
       if (roundReceived(r)) bump(actual, it.code, r.actualDate.slice(0,7), parseFloat(r.actualAmount)||0);
-      else { const a=parseFloat(r.planAmount)||parseFloat(r.actualAmount)||0; if(a>0) bump(incoming, it.code, (r.planDate||r.actualDate||p.date||"").slice(0,7), a); }
+      else { const a=parseFloat(r.actualAmount)||parseFloat(r.planAmount)||0; if(a>0) bump(incoming, it.code, (r.actualDate||r.planDate||p.date||"").slice(0,7), a); }
     });
   }); poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount||0)); });
   const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m=>Object.keys(m)))].sort();
@@ -4589,6 +4589,13 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   const locked = !canEditPO(po, session);
   const receivedDates = poReceivedDates(po);
   const paidDate = poPaidDate(po);
+  // ยอดรวมทุกงวด (ของเข้าจริง หรือ แผน) ห้ามเกินยอดสั่ง — ใช้ปิดปุ่มบันทึก + เตือนค้างไว้
+  const overCapItem = items.find(it => {
+    const o = itemOrdered(it); if (!(o > 0)) return false;
+    const recvSum = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+    const planSum = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
+    return recvSum > o + 0.001 || planSum > o + 0.001;
+  });
 
   // Record actual received / split remaining into a new round, then persist.
   const setItemRounds = (itemId, rounds) =>
@@ -4803,8 +4810,10 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           </div>
         )}
 
-        {capWarn && (
-          <div style={{marginTop:14,fontSize:12,color:T.red,background:T.redBg,border:`1px solid ${T.red}`,borderRadius:10,padding:"9px 12px",lineHeight:1.5}}>{capWarn}</div>
+        {(capWarn || overCapItem) && (
+          <div style={{marginTop:14,fontSize:12,color:T.red,background:T.redBg,border:`1px solid ${T.red}`,borderRadius:10,padding:"9px 12px",lineHeight:1.5}}>
+            {capWarn || `⚠ ${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง ${fmt(itemOrdered(overCapItem))} — แก้ให้ไม่เกินก่อน จึงจะกดบันทึกได้ (ปุ่มบันทึกถูกปิดไว้)`}
+          </div>
         )}
         <div style={{display:"flex",gap:10,marginTop:16,flexWrap:"wrap",alignItems:"center"}}>
           <button
@@ -4814,8 +4823,9 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
               if (bad) { setCapWarn(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
               setCapWarn(""); onClose();
             }}
-            disabled={locked} className="btn-primary"
-            style={{background:locked?"#e2e8f0":T.green,color:locked?"#94a3b8":"#fff",cursor:locked?"not-allowed":"pointer"}}>{locked?"🔒":"💾"} บันทึก</button>
+            disabled={locked || !!overCapItem} className="btn-primary"
+            title={overCapItem?`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`:undefined}
+            style={{background:(locked||overCapItem)?"#e2e8f0":T.green,color:(locked||overCapItem)?"#94a3b8":"#fff",cursor:(locked||overCapItem)?"not-allowed":"pointer"}}>{locked?"🔒":overCapItem?"⚠":"💾"} บันทึก</button>
           {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title="แก้ผู้ขาย / หมวด / ยอดสั่ง">✏️ แก้ไข PO</button>}
           <button onClick={()=>onDelete(po.id)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
           <div style={{flex:1}}/>
@@ -4866,9 +4876,9 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       const amt = parseFloat(r.actualAmount) || 0; if (!amt) return;
       entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, src: "po", late: false, received: true });
     } else {
-      // ยังไม่รับ = "PO รอเข้า" — ใช้ยอดแผน ถ้าไม่มีให้ถอยไปใช้ยอดจริงที่กรอกไว้ (งวดที่ลงวันรับล่วงหน้า)
-      const amt = parseFloat(r.planAmount) || parseFloat(r.actualAmount) || 0; if (!amt) return;
-      entries.push({ code: it.code, mk: (r.planDate || r.actualDate || p.date || "").slice(0, 7), amount: amt, src: "po", late: lateOf(r), received: false });
+      // ยังไม่รับ = "PO รอเข้า" — ใช้ "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
+      const amt = parseFloat(r.actualAmount) || parseFloat(r.planAmount) || 0; if (!amt) return;
+      entries.push({ code: it.code, mk: (r.actualDate || r.planDate || p.date || "").slice(0, 7), amount: amt, src: "po", late: lateOf(r), received: false });
     }
   })));
   const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
@@ -5134,6 +5144,13 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       })),
     }));
     if (!validItems.length) { alert("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ"); return; }
+    // กันยอดของเข้าจริงรวมทุกงวดเกินยอดสั่งของแต่ละรายการ (แจ้งเตือน + บันทึกไม่ได้)
+    const overItem = validItems.find(it => {
+      const o = parseFloat(it.amount)||0; if (!(o>0)) return false;
+      const rc = it.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+      return rc > o + 0.001;
+    });
+    if (overItem) { alert(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
     // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
     if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { alert("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก"); return; }
     const payload = {
@@ -5731,7 +5748,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
               <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||"รอ"}</span>
               {(() => {
                 const received = st === "received";   // รับจริงแล้ว (วันรับมาถึงแล้ว) → เขียว
-                const amt = received ? (parseFloat(d.actualAmount)||0) : (parseFloat(d.planAmount)||parseFloat(d.actualAmount)||0);
+                // แสดง "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ให้ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
+                const amt = (parseFloat(d.actualAmount)||0) || (parseFloat(d.planAmount)||0);
                 if (!amt) return <span style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>(—)</span>;
                 return <span style={{fontSize:12,color:received?T.green:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:received?650:450}}>({fmt(amt)})</span>;
               })()}
@@ -5911,10 +5929,10 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
         if (roundReceived(r)) {
           bump(actual, code, r.actualDate.slice(0, 7), parseFloat(r.actualAmount) || 0); // รับจริง (ดำ)
         } else {
-          // PO ที่สั่งแล้วแต่ยังไม่รับ = "คาดว่าจะเข้า" (แดง) ตามวันแผน (ไม่มีก็ใช้วันสั่ง PO)
-          // ยอดแผนว่าง → ถอยไปใช้ยอดจริงที่กรอกไว้ (งวดที่ลงวันรับล่วงหน้า) จะได้ไม่ตกหล่น
-          const amt = parseFloat(r.planAmount) || parseFloat(r.actualAmount) || 0;
-          if (amt > 0) bump(incoming, code, (r.planDate || r.actualDate || p.date || "").slice(0, 7), amt);
+          // PO ที่สั่งแล้วแต่ยังไม่รับ = "คาดว่าจะเข้า" (แดง)
+          // ใช้ "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
+          const amt = parseFloat(r.actualAmount) || parseFloat(r.planAmount) || 0;
+          if (amt > 0) bump(incoming, code, (r.actualDate || r.planDate || p.date || "").slice(0, 7), amt);
         }
       });
     });
