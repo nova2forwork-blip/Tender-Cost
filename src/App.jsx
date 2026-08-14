@@ -1259,49 +1259,92 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
   const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
   const takeoffOf = (code) => [...poEntries, ...plansArr].reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.takeoff)||0),0),0);
-  const blank = (v) => v>0 ? v : "-";
-  // คอลัมน์ต้นทุน: Tender Cost · Take off · Stock · Issue PO · Balance Cost + เดือน + TOTAL + Balance PO (ท้ายสุด)
+  // เดือนละ 1 คอลัมน์ (ไม่แยก 3 ช่อง) — ในช่องใส่รายการแบบมีป้ายกำกับ จ่าย/รับ/รอเข้า/แผน
+  // ช่วยให้ตารางไม่กว้างเกินเมื่อมีหลายเดือน (เช่น 2 ปี = 24 คอลัมน์ แทน 72)
+  const cellLines = (c) => {
+    if (!c) return [];
+    const out = [];
+    if (c.paid>0) out.push(`จ่าย ${fmt(c.paid)}`);
+    if (c.recv>0) out.push(`รับ ${fmt(c.recv)}`);
+    if (c.po>0)   out.push(`รอเข้า ${fmt(c.po)}${c.poLate?" ⚠":""}`);
+    if (c.plan>0) out.push(`แผน ${fmt(c.plan)} *${c.planLate?" ⚠":""}`);
+    return out;
+  };
+  const cellStr = (c) => { const l=cellLines(c); return l.length ? l.join("\n") : "-"; };
+  // ถ้าช่องมีชนิดเดียวลงสีตามชนิด (จ่าย=เขียว/รับ,รอเข้า=ดำ/แผน=แดง/ล่าช้า=ส้ม); ถ้าปนกันใช้ดำ
+  const cellColor = (c) => {
+    if (!c) return null;
+    const n = [c.paid>0, c.recv>0, c.po>0, c.plan>0].filter(Boolean).length;
+    if (n !== 1) return (c.poLate || c.planLate) ? "D97706" : null;
+    if (c.paid>0) return "10B981";
+    if (c.plan>0) return c.planLate ? "D97706" : "EF4444";
+    if (c.po>0)   return c.poLate ? "D97706" : "1F2937";
+    return "1F2937";
+  };
+  // คอลัมน์ต้นทุน: Tender Cost · Take off · Stock · Issue PO · Balance Cost + เดือน (1 ช่อง/เดือน) + TOTAL + Balance PO
   const header = ["Acc. Code","Acc. Name","Tender Cost","Take off","Stock","Issue PO","Balance Cost"];
-  mMonths.forEach(mk => { const L=monthShortLabel(mk); header.push(`${L} จ่าย`, `${L} ปกติ`, `${L} แผน`); });
+  mMonths.forEach(mk => header.push(monthShortLabel(mk)));
   header.push("TOTAL","Balance PO");
   const rows = [
     [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
-    [`เดือนแยก 3 ช่อง — จ่าย(เขียว)=จ่ายแล้ว · ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO · Issue PO = PO ที่ยื่นจริง · Balance Cost = งบ−Stock−PO−แผน · Balance PO = Take off−Stock−PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [`เดือนละ 1 ช่อง (มีป้ายกำกับ) — จ่าย=จ่ายแล้ว(เขียว) · รับ=รับของแล้ว · รอเข้า=PO ยังไม่รับ(⚠=ล่าช้า) · แผน=ยังไม่เป็น PO(แดง, มี *) · Issue PO = PO ที่ยื่นจริง · Balance Cost = งบ−Stock−PO−แผน · Balance PO = Take off−Stock−PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
     header,
   ];
-  const dataStart = rows.length, monthColStart = 7, totalCol = 7 + mMonths.length*3, balPOcol = totalCol + 1, numCols = balPOcol + 1;
-  mCodes.forEach(code => {
+  const dataStart = rows.length, monthColStart = 7, totalCol = 7 + mMonths.length, balPOcol = totalCol + 1, numCols = balPOcol + 1;
+  const lineCount = {}; // จำนวนบรรทัดสูงสุดต่อแถว → ใช้ตั้งความสูงแถว
+  mCodes.forEach((code, ri) => {
     const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code), takeoff=takeoffOf(code);
     const row = [code, nameOf(code), budget, takeoff, stock, committed, budget-stock-committed-planned];
-    mMonths.forEach(mk => { const c=cellOf(code,mk); row.push(blank(c?c.paid:0), blank(c?(c.recv+c.po):0), blank(c?c.plan:0)); });
+    let maxLines = 1;
+    mMonths.forEach(mk => { const l=cellLines(cellOf(code,mk)); maxLines=Math.max(maxLines, l.length||1); row.push(l.length?l.join("\n"):"-"); });
     row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0), takeoff-stock-committed);
     rows.push(row);
+    lineCount[dataStart+ri] = maxLines;
   });
   const dataEnd = rows.length - 1;
   const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
   const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(takeoffOf), sumOf(stockOf), sumOf(committedOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
+  const totalCells = []; // agg cell ต่อเดือน สำหรับลงสีแถว TOTAL
+  let totalMaxLines = 1;
   mMonths.forEach(mk => {
-    totalArr.push(blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.paid:0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?(cc.recv+cc.po):0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.plan:0;})));
+    const agg = {
+      paid: sumOf(c=>cellOf(c,mk)?.paid||0), recv: sumOf(c=>cellOf(c,mk)?.recv||0),
+      po:   sumOf(c=>cellOf(c,mk)?.po||0),   plan: sumOf(c=>cellOf(c,mk)?.plan||0),
+      poLate: mCodes.some(c=>cellOf(c,mk)?.poLate), planLate: mCodes.some(c=>cellOf(c,mk)?.planLate),
+    };
+    totalCells.push(agg);
+    const l = cellLines(agg); totalMaxLines = Math.max(totalMaxLines, l.length||1);
+    totalArr.push(l.length?l.join("\n"):"-");
   });
   totalArr.push(mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0), sumOf(c=>takeoffOf(c)-stockOf(c)-committedOf(c)));
   rows.push(totalArr);
   const totalRow = rows.length - 1;
+  lineCount[totalRow] = totalMaxLines;
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [{wch:12},{wch:34},{wch:16},{wch:15},{wch:14},{wch:15},{wch:16}, ...mMonths.flatMap(()=>[{wch:13},{wch:13},{wch:13}]), {wch:18},{wch:16}];
-  const moneyCols = [2,3,4,5,6, ...Array.from({length:mMonths.length*3},(_,i)=>monthColStart+i), totalCol, balPOcol];
+  ws["!cols"] = [{wch:12},{wch:34},{wch:16},{wch:15},{wch:14},{wch:15},{wch:16}, ...mMonths.map(()=>({wch:17})), {wch:18},{wch:16}];
+  const moneyCols = [2,3,4,5,6, totalCol, balPOcol]; // ช่องเดือนเป็นข้อความ ไม่ใช่ตัวเลข
   styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols, theme });
-  const setColor = (r, col, rgb) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb} } }; };
-  for (let r=dataStart; r<=dataEnd; r++) {
-    const code = mCodes[r-dataStart];
+  // ลงสี + wrapText ช่องเดือน (ข้อความหลายบรรทัด) + ตั้งความสูงแถวตามจำนวนบรรทัด
+  if (!ws["!rows"]) ws["!rows"] = [];
+  const paintMonth = (r, isTotal) => {
     mMonths.forEach((mk,mi)=>{
-      const c = cellOf(code,mk); const base = monthColStart + mi*3;
-      setColor(r, base,   "10B981");
-      setColor(r, base+1, (c && c.poLate) ? "D97706" : "1F2937");
-      setColor(r, base+2, (c && c.planLate) ? "D97706" : "EF4444");
+      const c = isTotal ? totalCells[mi] : cellOf(mCodes[r-dataStart], mk);
+      const ref = XLSX.utils.encode_cell({r, c:monthColStart+mi});
+      if (!ws[ref]) return;
+      const rgb = cellColor(c);
+      ws[ref].s = { ...(ws[ref].s||{}),
+        font: { ...((ws[ref].s||{}).font||{}), ...(rgb?{color:{rgb}}:{}), ...(isTotal?{bold:true}:{}) },
+        alignment: { ...((ws[ref].s||{}).alignment||{}), horizontal:"right", vertical:"top", wrapText:true } };
     });
+    const n = lineCount[r] || 1;
+    if (n > 1) ws["!rows"][r] = { hpx: Math.max(19, n*14) };
+  };
+  for (let r=dataStart; r<=dataEnd; r++) {
+    paintMonth(r, false);
     [6, balPOcol].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
   }
+  paintMonth(totalRow, true);
   xBackLink(ws, 2, numCols-1, backSheet);
   XLSX.utils.book_append_sheet(wb, ws, "ของเข้ารายเดือน");
 }
