@@ -4888,8 +4888,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // ยอด PO ที่สั่งไปแล้ว + แผนที่มีอยู่แล้วของ code นี้ (ยกเว้นรายการที่กำลังแก้อยู่)
   const otherCommitted = (code) => poEntries.reduce((s,p)=> (!editingPlan && p.id===editId) ? s : s + poAmountForCode(p, code), 0);
   const otherPlanned   = (code) => plans.reduce((s,pl)=> (editingPlan && pl.id===editId) ? s : s + poAmountForCode(pl, code), 0);
-  // "ต้องสั่งสุทธิ" = ยอดที่เหลือต้องสั่งจริง = งบ − ของใน store − PO ที่สั่งแล้ว − แผนที่มี
-  const itemNet = (it) => budgetForCode(it.code) - (parseFloat(it.store)||0) - otherCommitted(it.code) - otherPlanned(it.code);
+  // ของใน store ที่ "บันทึกไว้แล้ว" ในรายการ PO อื่นของ code นี้ (ยกเว้นรายการที่กำลังแก้อยู่)
+  // — ต้องหักด้วย ไม่งั้น "ต้องสั่งสุทธิ" ในฟอร์มจะไม่ตรงกับ Balance Cost ในตาราง
+  const otherStock = (code) => poEntries.reduce((s,p)=> (!editingPlan && p.id===editId) ? s : s + poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0), 0);
+  // "ต้องสั่งสุทธิ" = ยอดที่เหลือต้องสั่งจริง = งบ − store(ในฟอร์ม) − store ที่บันทึกไว้แล้ว − PO ที่สั่งแล้ว − แผนที่มี
+  const itemNet = (it) => budgetForCode(it.code) - (parseFloat(it.store)||0) - otherStock(it.code) - otherCommitted(it.code) - otherPlanned(it.code);
   const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
   // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
 
