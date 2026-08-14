@@ -429,7 +429,7 @@ const uid  = () => Math.random().toString(36).slice(2,10);
 
 // ป้ายเวอร์ชัน build — โชว์บนแถบหัวทุกหน้า ไว้เช็คว่าเว็บโหลด bundle ตัวล่าสุดแล้วจริง
 // (ถ้ายังไม่เห็นป้ายนี้ = ยังรันไฟล์เก่า/เบราว์เซอร์แคช → redeploy + hard refresh)
-const BUILD_TAG = "v14ส · ต้องสั่งสุทธิหัก store";
+const BUILD_TAG = "v15 · แจกแจงต้องสั่งสุทธิ";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -5172,6 +5172,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                 {form.items.map((it)=>{
                   const budget = budgetForCode(it.code);
                   const net = itemNet(it);
+                  const _fs = parseFloat(it.store)||0, _st = otherStock(it.code), _co = otherCommitted(it.code), _pl = otherPlanned(it.code);
                   const amt = parseFloat(it.amount)||0;
                   const pct = net>0 ? Math.round(amt/net*100) : 0;
                   const prevOrdered = poEntries.reduce((s,p)=> p.id===editId ? s : s + poAmountForCode(p, it.code), 0);
@@ -5203,6 +5204,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                           style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:net<0?T.redBg:T.amberBg,color:net<0?T.red:T.amber,borderColor:"transparent"}}/>
                       </label>
                     </div>
+                    {it.code && (
+                      <div style={{fontSize:11,color:T.textMuted,marginTop:-2,marginBottom:8,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.5,background:"#f8fafc",borderRadius:8,padding:"6px 10px"}}>
+                        แจกแจง: งบ {fmt0(budget)} − store(ฟอร์ม) {fmt0(_fs)} − storeเดิม {fmt0(_st)} − PO {fmt0(_co)} − แผน {fmt0(_pl)} = <b style={{color:net<0?T.red:T.amber}}>{fmt0(net)}</b>
+                      </div>
+                    )}
                     {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
