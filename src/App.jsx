@@ -464,9 +464,11 @@ const GLOBAL_CSS = `
   body { font-family: 'Inter', sans-serif; background: ${T.bg}; color: ${T.textPrimary}; }
   input, select, textarea, button { font-family: 'Inter', sans-serif; }
   input[type=number]::-webkit-inner-spin-button { opacity: 0.4; }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: #f1f5f9; }
-  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
+  ::-webkit-scrollbar { width: 16px; height: 16px; }
+  ::-webkit-scrollbar-track { background: #eef2f7; border-radius: 10px; }
+  ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 10px; border: 3px solid #eef2f7; min-height: 48px; min-width: 48px; }
+  ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  * { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: auto; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
@@ -480,28 +482,28 @@ const GLOBAL_CSS = `
   .tag { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 600; }
   /* กล่องเลื่อนแนวนอน (ใช้กับตารางที่คอลัมน์เยอะ) — สกรอลบาร์เห็นชัดเสมอ */
   .hscroll { overflow-x: auto; overflow-y: hidden; }
-  .hscroll::-webkit-scrollbar { height: 16px; }
-  .hscroll::-webkit-scrollbar-track { background: #eef2f7; border-radius: 8px; }
-  .hscroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; border: 3px solid #eef2f7; }
-  .hscroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
-  .hscroll { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: thin; }
+  .hscroll::-webkit-scrollbar { height: 24px; }
+  .hscroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 12px; }
+  .hscroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 12px; border: 4px solid #e2e8f0; min-width: 56px; }
+  .hscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .hscroll { scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
   /* ตารางรายเดือน: เลื่อนในกล่องเอง (สูงไม่เกิน 70vh) + ตรึงหัวตาราง + สกรอลบาร์เห็นชัด */
   .mscroll { overflow: auto; max-height: 70vh; }
-  .mscroll::-webkit-scrollbar { height: 13px; width: 13px; }
-  .mscroll::-webkit-scrollbar-track { background: #eef2f7; }
-  .mscroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; border: 3px solid #eef2f7; }
-  .mscroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
-  .mscroll::-webkit-scrollbar-corner { background: #eef2f7; }
-  .mscroll { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: thin; }
+  .mscroll::-webkit-scrollbar { height: 24px; width: 24px; }
+  .mscroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 12px; }
+  .mscroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 12px; border: 4px solid #e2e8f0; min-width: 56px; min-height: 56px; }
+  .mscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .mscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
+  .mscroll { scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
   .mscroll thead th { position: sticky; background: #f8fafc; z-index: 2; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
   .mscroll thead tr:first-child th { top: 0; }
   .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 2; }
   /* สกรอลบาร์แนวนอนแบบใหญ่ คลิก/ลากง่าย — ใช้กับตารางรายเดือน (กว้างมาก) */
   .fatscroll { overflow: auto; -webkit-overflow-scrolling: touch; scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
-  .fatscroll::-webkit-scrollbar { height: 20px; width: 20px; }
-  .fatscroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 12px; }
-  .fatscroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 12px; border: 4px solid #e2e8f0; min-width: 48px; }
-  .fatscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .fatscroll::-webkit-scrollbar { height: 28px; width: 28px; }
+  .fatscroll::-webkit-scrollbar-track { background: #dbe2ec; border-radius: 14px; }
+  .fatscroll::-webkit-scrollbar-thumb { background: #556274; border-radius: 14px; border: 5px solid #dbe2ec; min-width: 64px; min-height: 64px; }
+  .fatscroll::-webkit-scrollbar-thumb:hover { background: #3b4756; }
   .fatscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
   /* เลื่อนลื่นบน iOS */
   .hscroll, .mscroll { -webkit-overflow-scrolling: touch; }
@@ -509,8 +511,8 @@ const GLOBAL_CSS = `
   @media (max-width: 640px) {
     .btn-primary, .btn-ghost { min-height: 40px; padding-top: 10px; padding-bottom: 10px; }
     .input-base { font-size: 16px; }
-    .hscroll::-webkit-scrollbar, .mscroll::-webkit-scrollbar { height: 12px; width: 12px; }
-    .fatscroll::-webkit-scrollbar { height: 16px; width: 16px; }
+    .hscroll::-webkit-scrollbar, .mscroll::-webkit-scrollbar { height: 18px; width: 18px; }
+    .fatscroll::-webkit-scrollbar { height: 22px; width: 22px; }
   }
 `;
 
