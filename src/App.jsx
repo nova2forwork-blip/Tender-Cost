@@ -1410,7 +1410,9 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
   const rowGroups1 = [];
   poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
     const pay = paymentStatus(p);
-    const deliveryStr = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
+    // ของเข้า: หนึ่งงวดต่อบรรทัด (อ่านง่ายกว่าอัดในบรรทัดเดียว) — "แผน → รับ/รอ"
+    const _rd = poRounds(p);
+    const deliveryStr = _rd.map((r,i) => `${_rd.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
       const amount = parseFloat(it.amount) || 0;
@@ -1430,7 +1432,9 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
     dataStart: poStart+dataStart1, dataEnd: poStart+dataEnd1, totalRow: poStart+totalRow1,
     moneyCols:U?[5,6]:[5], usdCols:U?[6]:[], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
   delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
-  dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
+  dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:30},{wch:16},{wch:16},{wch:28}];
+  // ขยายความสูงแถวตามจำนวนงวดในคอลัมน์ "ของเข้า" (multiline) + จัดชิดบน
+  { const dc = U?8:7; for (let r=dataStart1; r<=dataEnd1; r++){ const R=poStart+r; const ref=XLSX.utils.encode_cell({r:R,c:dc}); const v=dash.ws[ref]?.v; if(typeof v==="string"){ const n=v.split("\n").length; if(dash.ws[ref].s) dash.ws[ref].s.alignment={...(dash.ws[ref].s.alignment||{}),vertical:"top",wrapText:true}; if(n>1) dash.ws["!rows"][R]={hpx:Math.max(19,n*14)}; } } }
 
   // ชีต "ของเข้ารายเดือน (แผน + PO จริง)" — ต้นทุน + เดือนแยก 3 ช่อง จ่าย/ปกติ/แผน (สี)
   addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "สรุป" });
@@ -1659,7 +1663,8 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   const rowGroups2 = [];
   poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
     const pay = paymentStatus(p);
-    const deliveryStr = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
+    const _rd2 = poRounds(p);
+    const deliveryStr = _rd2.map((r,i) => `${_rd2.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
     poItems(p).forEach(it => {
       const acc = ACCOUNTS.find(a=>a.code===it.code);
       const amount = parseFloat(it.amount) || 0;
@@ -1672,9 +1677,11 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   rows2.push(["","","","","","TOTAL", grand2, ...(U?[toUsd(grand2,rate)]:[]),"","","",""]);
   const totalRow2 = rows2.length-1;
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
-  ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16}];
+  ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:30},{wch:16},{wch:16}];
   styleSheet(ws2, { numCols:11+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
     moneyCols:U?[6,7]:[6], usdCols:U?[7]:[], centerCols:U?[8,11]:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
+  // "ของเข้า (แผน→จริง)": หนึ่งงวดต่อบรรทัด — ตั้ง wrapText + ความสูงแถวตามจำนวนบรรทัด
+  { const dc = U?9:8; if(!ws2["!rows"]) ws2["!rows"]=[]; for (let R=dataStart2; R<=dataEnd2; R++){ const ref=XLSX.utils.encode_cell({r:R,c:dc}); const v=ws2[ref]?.v; if(typeof v==="string"){ const n=v.split("\n").length; if(ws2[ref].s) ws2[ref].s.alignment={...(ws2[ref].s.alignment||{}),vertical:"top",wrapText:true}; if(n>1) ws2["!rows"][R]={hpx:Math.max(19,n*14)}; } } }
   XLSX.utils.book_append_sheet(wb, ws2, "PO Entries");
 
   // Sheet 3 — roll-up by Group
