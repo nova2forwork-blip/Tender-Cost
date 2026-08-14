@@ -1308,61 +1308,53 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
     if (mCodes.length && mMonths.length) {
       const cellOf = (code,mk) => mCell[code]?.[mk] || null;
       const cellTot = (c) => c ? (c.paid+c.recv+c.po+c.plan) : 0;
-      const cellLines = (c) => c ? [c.paid>0,c.recv>0,c.po>0,c.plan>0].filter(Boolean).length : 0;
       const budgetOf    = (code) => parseFloat(combinedB[code])||0;
       const committedOf = (code) => poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
       const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
       const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
-      // runs = ข้อความหลายสีในเซลล์เดียว (จ่าย=เขียว/รับ,PO=ดำ/แผน=แดง) + plain สำรอง
-      const cellRuns = (c) => {
-        if (!c) return { runs:[], plain:"-" };
-        const runs=[];
-        const add=(txt,rgb)=>runs.push({ t:(runs.length?"\n":"")+txt, s:{ color:{rgb}, sz:10, name:"Tahoma" } });
-        if (c.paid>0) add(`จ่าย ${fmt0(c.paid)}`, "10B981");
-        if (c.recv>0) add(`รับ ${fmt0(c.recv)}`, "1F2937");
-        if (c.po>0)   add(`PO ${fmt0(c.po)}${c.poLate?" ⚠":""}`, "1F2937");
-        if (c.plan>0) add(`แผน ${fmt0(c.plan)}${c.planLate?" ⚠":""}`, "EF4444");
-        return { runs, plain: runs.map(r=>r.t).join("") || "-" };
-      };
+      const blank = (v) => v>0 ? v : "-";   // 0 = "-" (เซลล์ยังมีเส้นกรอบ)
+      // แต่ละเดือนแยกเป็น 3 ช่อง (จ่าย/ปกติ/แผน) — ช่องละสีเดียว เพื่อให้สีขึ้นชัวร์ทุกโปรแกรม
+      const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost"];
+      mMonths.forEach(mk => { const L=monthShortLabel(mk); header.push(`${L} จ่าย`, `${L} ปกติ`, `${L} แผน`); });
+      header.push("TOTAL");
       const rows = [
         [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
-        [`สี: จ่ายแล้ว=เขียว · รับ/PO(ปกติ)=ดำ · แผน=แดง (⚠=ล่าช้า) · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
+        [`แต่ละเดือนแยก 3 ช่อง — จ่าย(เขียว)=จ่ายแล้ว · ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
         [],
-        ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost", ...mMonths.map(monthShortLabel), "TOTAL"],
+        header,
       ];
-      const dataStart = rows.length, monthColStart = 6, totalCol = 6 + mMonths.length, numCols = 7 + mMonths.length;
+      const dataStart = rows.length, monthColStart = 6, numCols = 6 + mMonths.length*3 + 1, totalCol = numCols - 1;
       mCodes.forEach(code => {
         const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code);
-        const monthCells = mMonths.map(mk => cellRuns(cellOf(code,mk)).plain);
-        const rowTot = mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0);
-        rows.push([code, nameOf(code), budget, budget-committed, stock, budget-stock-committed-planned, ...monthCells, rowTot]);
+        const row = [code, nameOf(code), budget, budget-committed, stock, budget-stock-committed-planned];
+        mMonths.forEach(mk => { const c=cellOf(code,mk); row.push(blank(c?c.paid:0), blank(c?(c.recv+c.po):0), blank(c?c.plan:0)); });
+        row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0));
+        rows.push(row);
       });
       const dataEnd = rows.length - 1;
       const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
-      const colTot = (mk) => mCodes.reduce((s,c)=>s+cellTot(cellOf(c,mk)),0);
-      const grand = mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0);
-      rows.push(["","TOTAL", sumOf(budgetOf), sumOf(c=>budgetOf(c)-committedOf(c)), sumOf(stockOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c)), ...mMonths.map(mk=>colTot(mk)), grand]);
+      const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(c=>budgetOf(c)-committedOf(c)), sumOf(stockOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
+      mMonths.forEach(mk => {
+        totalArr.push(blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.paid:0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?(cc.recv+cc.po):0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.plan:0;})));
+      });
+      totalArr.push(mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0));
+      rows.push(totalArr);
       const totalRow = rows.length - 1;
       const ws = XLSX.utils.aoa_to_sheet(rows);
-      // กว้างขึ้นแก้ ###: ต้นทุน 17–19, Stock 15, เดือน 20, TOTAL 18
-      ws["!cols"] = [{wch:12},{wch:34},{wch:17},{wch:19},{wch:15},{wch:17}, ...mMonths.map(()=>({wch:20})), {wch:18}];
-      styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
-        moneyCols:[2,3,4,5, ...mMonths.map((_,i)=>monthColStart+i), totalCol], theme });
-      // เดือน = ข้อความหลายสี (rich text) + wrapText + ขยายสูงแถวตามจำนวนบรรทัด
+      // กว้างพอ กัน ###: ต้นทุน 17–19, Stock 15, ช่องเดือน 13, TOTAL 20
+      ws["!cols"] = [{wch:12},{wch:34},{wch:17},{wch:19},{wch:15},{wch:17}, ...mMonths.flatMap(()=>[{wch:13},{wch:13},{wch:13}]), {wch:20}];
+      const moneyCols = [2,3,4,5, ...Array.from({length:mMonths.length*3},(_,i)=>monthColStart+i), totalCol];
+      styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols, theme });
+      // สีต่อช่อง (สีเดียวต่อเซลล์ → ชัวร์): จ่าย=เขียว · ปกติ=ดำ/ส้ม(ล่าช้า) · แผน=แดง/ส้ม(ล่าช้า)
+      const setColor = (r, col, rgb) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb} } }; };
       for (let r=dataStart; r<=dataEnd; r++) {
         const code = mCodes[r-dataStart];
-        let maxLines = 1;
-        for (let ci=0; ci<mMonths.length; ci++) {
-          const c = cellOf(code, mMonths[ci]);
-          const ref = XLSX.utils.encode_cell({r, c:monthColStart+ci});
-          if (!ws[ref]) continue;
-          const { runs, plain } = cellRuns(c);
-          maxLines = Math.max(maxLines, cellLines(c) || 1);
-          const baseS = ws[ref].s || {};
-          ws[ref] = { t:"s", v: plain, ...(runs.length?{r:runs}:{}),
-            s:{ ...baseS, numFmt: undefined, alignment:{ horizontal:"right", vertical:"top", wrapText:true }, font:{ sz:10, name:"Tahoma", color:{rgb:"1F2937"} } } };
-        }
-        ws["!rows"][r] = { hpx: Math.max(20, maxLines*15) };
+        mMonths.forEach((mk,mi)=>{
+          const c = cellOf(code,mk); const base = monthColStart + mi*3;
+          setColor(r, base,   "10B981");                                   // จ่าย = เขียว
+          setColor(r, base+1, (c && c.poLate) ? "D97706" : "1F2937");      // ปกติ = ดำ (ส้มถ้าล่าช้า)
+          setColor(r, base+2, (c && c.planLate) ? "D97706" : "EF4444");    // แผน = แดง (ส้มถ้าล่าช้า)
+        });
         [3,5].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
       }
       xBackLink(ws, 2, numCols-1, "สรุป");
