@@ -2928,11 +2928,18 @@ function SyncBadge({ syncing, syncedAt }) {
 // Small wrapper around the standard .input-base search box used across QS,
 // Procurement, and Accounting toolbars — shows an × to instantly clear the
 // text once something has been typed, instead of having to select-and-delete.
-function SearchInput({ value, onChange, placeholder, width = 240 }) {
+function SearchInput({ value, onChange, placeholder, width = 240, big = false }) {
+  // big = เด่นขึ้น (กรอบชัด + เงา) แต่ "ขนาดเท่าเดิม"
+  const bigStyle = big ? {
+    border:`2px solid ${value?T.blue:"#94a3b8"}`, borderRadius:10, background:"#fff",
+    boxShadow:"0 1px 4px rgba(15,23,42,0.07)",
+  } : {};
   return (
     <div style={{position:"relative",width}}>
       <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-        className="input-base" style={{width:"100%",paddingRight:value?30:13}}/>
+        className="input-base" style={{width:"100%",paddingRight:value?30:13,...bigStyle}}
+        onFocus={big?(e=>{e.currentTarget.style.borderColor=T.blue;e.currentTarget.style.boxShadow="0 0 0 3px rgba(37,99,235,0.15)";}):undefined}
+        onBlur={big?(e=>{e.currentTarget.style.borderColor=value?T.blue:"#94a3b8";e.currentTarget.style.boxShadow="0 1px 4px rgba(15,23,42,0.07)";}):undefined}/>
       {value && (
         <button type="button" onClick={()=>onChange("")} title="ล้างคำค้นหา"
           style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",width:20,height:20,border:"none",
@@ -4975,15 +4982,16 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary, marginBottom: 6 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
-          <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12, flexWrap: "wrap" }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.green, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับแล้ว</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.amber, fontFamily: "'JetBrains Mono',monospace" }}>123 ⚠</b> = ล่าช้า</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = PO รอเข้า</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123 *</b> = แผน (มี * ต่อท้าย)</span>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            {[["รับแล้ว", T.green, "#eafaf1"], ["ล่าช้า ⚠", T.amber, "#fff6e6"], ["PO รอเข้า", T.textPrimary, "#eef2f7"], ["แผน (มี * ต่อท้าย)", T.red, "#fdecec"]].map(([label, clr, bg]) => (
+              <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, background: clr, display: "inline-block" }}/>{label}
+              </span>
+            ))}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-            <SearchInput value={mSearch} onChange={setMSearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260}/>
+            <SearchInput value={mSearch} onChange={setMSearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260} big/>
             <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownCodes.length}/{codes.length} รายการ</span>
           </div>
           <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
@@ -6202,14 +6210,15 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
       <div style={{ fontSize:12, color: T.textMuted, marginBottom: 8 }}>
         โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)
       </div>
-      <div style={{ display: "flex", gap: 18, marginBottom: 10, fontSize: 12, flexWrap: "wrap" }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.green, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = รับแล้ว</span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.amber, fontFamily: "'JetBrains Mono',monospace" }}>123 ⚠</b> = ล่าช้า</span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.textPrimary, fontFamily: "'JetBrains Mono',monospace" }}>123</b> = PO รอเข้า</span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><b style={{ color: T.red, fontFamily: "'JetBrains Mono',monospace" }}>123 *</b> = แผน (มี * ต่อท้าย)</span>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        {[["รับแล้ว", T.green, "#eafaf1"], ["ล่าช้า ⚠", T.amber, "#fff6e6"], ["PO รอเข้า", T.textPrimary, "#eef2f7"], ["แผน (มี * ต่อท้าย)", T.red, "#fdecec"]].map(([label, clr, bg]) => (
+          <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
+            <span style={{ width: 14, height: 14, borderRadius: 4, background: clr, display: "inline-block" }}/>{label}
+          </span>
+        ))}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-        <SearchInput value={aSearch} onChange={setASearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260}/>
+        <SearchInput value={aSearch} onChange={setASearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260} big/>
         <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownRows.length}/{rows.length} รายการ</span>
       </div>
       <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
