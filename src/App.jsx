@@ -6222,10 +6222,10 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
               <th onClick={()=>toggleSort("balPO")}     style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Pending PO{arrow("balPO")}</th>
               <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
               <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balCost")}</th>
-              {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell(bMg), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("im:"+i)}</th>)}
-              <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("mgTot")}</th>
-              {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell(bPy), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("pm:"+i)}</th>)}
-              <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("pyTot")}</th>
+              {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell(bMg), cursor:"pointer", userSelect:"none" }}><div style={{fontSize:9,fontWeight:700,color:"#15803d"}}>📦 ของเข้า</div>{lbl(mk)}{arrow("im:"+i)}</th>)}
+              <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}><div style={{fontSize:9,fontWeight:700,color:"#15803d"}}>📦 ของเข้า</div>TOTAL{arrow("mgTot")}</th>
+              {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell(bPy), cursor:"pointer", userSelect:"none" }}><div style={{fontSize:9,fontWeight:700,color:"#b45309"}}>💰 จ่ายเงิน</div>{lbl(mk)}{arrow("pm:"+i)}</th>)}
+              <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}><div style={{fontSize:9,fontWeight:700,color:"#b45309"}}>💰 จ่ายเงิน</div>TOTAL{arrow("pyTot")}</th>
               <th onClick={()=>toggleSort("committed")} style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Total PO{arrow("committed")}</th>
               <th onClick={()=>toggleSort("balPOout")}  style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>PO Balance{arrow("balPOout")}</th>
             </tr>
