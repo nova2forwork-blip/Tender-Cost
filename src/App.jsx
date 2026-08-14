@@ -1222,6 +1222,160 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
   XLSX.writeFile(wb, `QS_${clean(monthShortLabel(month)).replace(/[^\dA-Za-zก-๙]/g,"")}_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
+// ─── ชีตรวม: "ของเข้ารายเดือน (แผน + PO จริง)" ───────────────────────────────
+//  ใช้ร่วมทั้ง Export จัดซื้อ + บัญชี — ต่อ Acc. Code: ต้นทุน (Tender Cost / Balance
+//  Pending PO / Stock / Balance Cost) + แต่ละเดือนแยก 3 ช่อง: จ่าย(เขียว)=จ่ายแล้ว ·
+//  ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO + TOTAL แถว/คอลัมน์
+function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], theme, backSheet="สรุป" }) {
+  const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
+  const acctList = exportAccountList(extraItems, hiddenAccounts);
+  const nameOf   = (code) => acctList.find(a=>a.code===code)?.name || ACCOUNTS.find(a=>a.code===code)?.name || "";
+  const combinedB = buildCombinedBudget(tenderCosts, additions);
+  const today = todayStr();
+  const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
+  const mCell = {};
+  const bucket = (code, mk) => { const c=(mCell[code]=mCell[code]||{}); return (c[mk]=c[mk]||{paid:0,recv:0,po:0,poLate:false,plan:0,planLate:false}); };
+  plansArr.forEach(pl => poItems(pl).forEach(it => (it.rounds||[]).forEach(r => {
+    const a=parseFloat(r.planAmount)||0; if(!a) return;
+    const cc=bucket(it.code,(r.planDate||pl.date||"").slice(0,7)); cc.plan+=a; if(lateOf(r)) cc.planLate=true;
+  })));
+  poEntries.forEach(p => poItems(p).forEach(it => (it.rounds||[]).forEach(r => {
+    if (roundReceived(r)) {
+      const a=parseFloat(r.actualAmount)||0; if(!a) return;
+      const cc=bucket(it.code, r.actualDate.slice(0,7));
+      if (roundPaid(p,r)) cc.paid+=a; else cc.recv+=a;
+    } else {
+      const a=parseFloat(r.planAmount)||0; if(!a) return;
+      const cc=bucket(it.code,(r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
+    }
+  })));
+  const mCodes = Object.keys(mCell).sort();
+  const mMonths = [...new Set(mCodes.flatMap(c=>Object.keys(mCell[c])))].filter(Boolean).sort();
+  if (!mCodes.length || !mMonths.length) return;
+  const cellOf = (code,mk) => mCell[code]?.[mk] || null;
+  const cellTot = (c) => c ? (c.paid+c.recv+c.po+c.plan) : 0;
+  const budgetOf    = (code) => parseFloat(combinedB[code])||0;
+  const committedOf = (code) => poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
+  const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
+  const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
+  const blank = (v) => v>0 ? v : "-";
+  const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost"];
+  mMonths.forEach(mk => { const L=monthShortLabel(mk); header.push(`${L} จ่าย`, `${L} ปกติ`, `${L} แผน`); });
+  header.push("TOTAL");
+  const rows = [
+    [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
+    [`แต่ละเดือนแยก 3 ช่อง — จ่าย(เขียว)=จ่ายแล้ว · ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [],
+    header,
+  ];
+  const dataStart = rows.length, monthColStart = 6, numCols = 6 + mMonths.length*3 + 1, totalCol = numCols - 1;
+  mCodes.forEach(code => {
+    const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code);
+    const row = [code, nameOf(code), budget, budget-committed, stock, budget-stock-committed-planned];
+    mMonths.forEach(mk => { const c=cellOf(code,mk); row.push(blank(c?c.paid:0), blank(c?(c.recv+c.po):0), blank(c?c.plan:0)); });
+    row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0));
+    rows.push(row);
+  });
+  const dataEnd = rows.length - 1;
+  const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
+  const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(c=>budgetOf(c)-committedOf(c)), sumOf(stockOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
+  mMonths.forEach(mk => {
+    totalArr.push(blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.paid:0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?(cc.recv+cc.po):0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.plan:0;})));
+  });
+  totalArr.push(mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0));
+  rows.push(totalArr);
+  const totalRow = rows.length - 1;
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{wch:12},{wch:34},{wch:17},{wch:19},{wch:15},{wch:17}, ...mMonths.flatMap(()=>[{wch:13},{wch:13},{wch:13}]), {wch:20}];
+  const moneyCols = [2,3,4,5, ...Array.from({length:mMonths.length*3},(_,i)=>monthColStart+i), totalCol];
+  styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols, theme });
+  const setColor = (r, col, rgb) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb} } }; };
+  for (let r=dataStart; r<=dataEnd; r++) {
+    const code = mCodes[r-dataStart];
+    mMonths.forEach((mk,mi)=>{
+      const c = cellOf(code,mk); const base = monthColStart + mi*3;
+      setColor(r, base,   "10B981");
+      setColor(r, base+1, (c && c.poLate) ? "D97706" : "1F2937");
+      setColor(r, base+2, (c && c.planLate) ? "D97706" : "EF4444");
+    });
+    [3,5].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
+  }
+  xBackLink(ws, 2, numCols-1, backSheet);
+  XLSX.utils.book_append_sheet(wb, ws, "ของเข้ารายเดือน");
+}
+
+// ─── ชีต "ตารางรวมเดือน" (แบบหน้าบัญชี) — mirror AccountingMatrixTab ──────────
+//  ต้นทุน (Tender/Balance Pending PO/Stock/Balance Cost) + กลุ่มเดือน Incoming/Received
+//  (รับจริง=ดำ · แผน/PO รอเข้า=แดง) + Payment Plan รายเดือน + สรุป PO (Total PO/PO Balance)
+function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], theme, backSheet="Summary" }) {
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const combined = buildCombinedBudget(tenderCosts, additions);
+  const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
+  const committedByCode = {}, stockByCode = {}, plannedByCode = {}, actual = {}, incoming = {}, payplan = {};
+  const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code]=obj[code]||{}); obj[code][mk]=(obj[code][mk]||0)+amt; };
+  plansArr.forEach(pl => poItems(pl).forEach(it => {
+    plannedByCode[it.code] = (plannedByCode[it.code]||0) + (parseFloat(it.amount)||0);
+    (it.rounds||[]).forEach(r => { const a=parseFloat(r.planAmount)||0; if(a>0) bump(incoming, it.code, (r.planDate||pl.date||"").slice(0,7), a); });
+  }));
+  poEntries.forEach(p => { poItems(p).forEach(it => {
+    committedByCode[it.code] = (committedByCode[it.code]||0)+(parseFloat(it.amount)||0);
+    stockByCode[it.code] = (stockByCode[it.code]||0)+(parseFloat(it.store)||0);
+    (it.rounds||[]).forEach(r => {
+      if (roundReceived(r)) bump(actual, it.code, r.actualDate.slice(0,7), parseFloat(r.actualAmount)||0);
+      else { const a=parseFloat(r.planAmount)||0; if(a>0) bump(incoming, it.code, (r.planDate||p.date||"").slice(0,7), a); }
+    });
+  }); poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount||0)); });
+  const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m=>Object.keys(m)))].sort();
+  const mgM = [...new Set([...monthsOf(incoming), ...monthsOf(actual)])].sort();
+  const payM = monthsOf(payplan);
+  const rowsData = accounts.map(a => {
+    const budget = parseFloat(combined[a.code])||0, committed = committedByCode[a.code]||0, stock = stockByCode[a.code]||0, planned = plannedByCode[a.code]||0;
+    const mgRow = mgM.map(mk => { const av=actual[a.code]?.[mk]||0, pv=incoming[a.code]?.[mk]||0; return { eff: av>0?av:pv, real: av>0 }; });
+    const pyRow = payM.map(mk => payplan[a.code]?.[mk]||0);
+    return { a, budget, committed, stock, planned, balPO:budget-committed, balCost:budget-stock-committed-planned, balPOout:budget-stock-committed,
+      mgRow, pyRow, mgTot:mgRow.reduce((s,c)=>s+c.eff,0), pyTot:pyRow.reduce((s,x)=>s+x,0) };
+  }).filter(r => r.budget||r.committed||r.stock||r.mgTot||r.pyTot);
+  if (!rowsData.length) return;
+  const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost",
+    ...mgM.map(mk=>`${monthShortLabel(mk)} (เข้า)`), "รวมเข้า",
+    ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "PO Balance"];
+  const rows = [
+    [`ตารางรวมเดือน — ${project.name}`],
+    [`Incoming: รับจริง=ดำ · แผน/PO รอเข้า=แดง · Balance Cost = งบ − Stock − PO − แผน · PO Balance = งบ − Stock − PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [],
+    header,
+  ];
+  const dataStart = rows.length;
+  const mgStart = 6, mgTotCol = 6+mgM.length, payStart = mgTotCol+1, payTotCol = payStart+payM.length, poCol = payTotCol+1, poBalCol = poCol+1, numCols = poBalCol+1;
+  const blank = (v) => v ? v : "-";
+  rowsData.forEach(r => {
+    rows.push([r.a.code, r.a.name, blank(r.budget), blank(r.balPO), blank(r.stock), blank(r.balCost),
+      ...r.mgRow.map(c=>blank(c.eff)), blank(r.mgTot),
+      ...r.pyRow.map(v=>blank(v)), blank(r.pyTot), blank(r.committed), blank(r.balPOout)]);
+  });
+  const dataEnd = rows.length - 1;
+  const sumOf = (fn) => rowsData.reduce((s,r)=>s+fn(r),0);
+  const totalArr = ["","TOTAL", sumOf(r=>r.budget), sumOf(r=>r.balPO), sumOf(r=>r.stock), sumOf(r=>r.balCost)];
+  mgM.forEach((_,i)=>totalArr.push(sumOf(r=>r.mgRow[i]?.eff||0))); totalArr.push(sumOf(r=>r.mgTot));
+  payM.forEach((_,i)=>totalArr.push(sumOf(r=>r.pyRow[i]||0)));    totalArr.push(sumOf(r=>r.pyTot));
+  totalArr.push(sumOf(r=>r.committed), sumOf(r=>r.balPOout));
+  rows.push(totalArr.map((v,i)=> i<2 ? v : blank(v)));
+  const totalRow = rows.length - 1;
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{wch:12},{wch:32},{wch:16},{wch:18},{wch:14},{wch:16},
+    ...mgM.map(()=>({wch:14})), {wch:14}, ...payM.map(()=>({wch:14})), {wch:14}, {wch:16}, {wch:16}];
+  const allMoney = [2,3,4,5, ...Array.from({length:numCols-6},(_,i)=>6+i)];
+  styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols:allMoney, theme });
+  const setColor = (r, col, rgb, bold) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb}, ...(bold?{bold:true}:{}) } }; };
+  for (let r=dataStart; r<=dataEnd; r++) {
+    const rd = rowsData[r-dataStart];
+    rd.mgRow.forEach((c,i)=>{ if (c.eff) setColor(r, mgStart+i, c.real ? "1F2937" : "EF4444"); }); // รับจริง=ดำ · แผน/PO=แดง
+    [5, poBalCol].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) setColor(r, cc, "DC2626", true); });
+  }
+  xBackLink(ws, 2, numCols-1, backSheet);
+  XLSX.utils.book_append_sheet(wb, ws, "ตารางรวมเดือน");
+}
+
 // ─── Procurement: PO tracking export ───────────────────────────────────────
 function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
@@ -1276,91 +1430,8 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
   delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
   dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
 
-  // ─── ชีต "ของเข้ารายเดือน (แผน + PO จริง)" — mirror ตารางหน้าจัดซื้อ ─────────
-  //  ต่อ Acc. Code: ต้นทุน (Tender Cost / Balance Pending PO / Stock / Balance Cost)
-  //  + เดือนเป็นคอลัมน์ แยก "รับจริง / PO รอเข้า / แผน" (⚠ = ล่าช้า) + TOTAL แถว/คอลัมน์
-  {
-    const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
-    const acctList = exportAccountList(extraItems, hiddenAccounts);
-    const nameOf   = (code) => acctList.find(a=>a.code===code)?.name || ACCOUNTS.find(a=>a.code===code)?.name || "";
-    const combinedB = buildCombinedBudget(tenderCosts, additions);
-    const today = todayStr();
-    const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
-    // เก็บต่อ code×เดือน แยก 4 ประเภท: จ่ายแล้ว(เขียว) / รับแต่ยังไม่จ่าย / PO รอเข้า (ดำ) / แผน(แดง)
-    const mCell = {};
-    const bucket = (code, mk) => { const c=(mCell[code]=mCell[code]||{}); return (c[mk]=c[mk]||{paid:0,recv:0,po:0,poLate:false,plan:0,planLate:false}); };
-    plansArr.forEach(pl => poItems(pl).forEach(it => (it.rounds||[]).forEach(r => {
-      const a=parseFloat(r.planAmount)||0; if(!a) return;
-      const cc=bucket(it.code,(r.planDate||pl.date||"").slice(0,7)); cc.plan+=a; if(lateOf(r)) cc.planLate=true;
-    })));
-    poEntries.forEach(p => poItems(p).forEach(it => (it.rounds||[]).forEach(r => {
-      if (roundReceived(r)) {
-        const a=parseFloat(r.actualAmount)||0; if(!a) return;
-        const cc=bucket(it.code, r.actualDate.slice(0,7));
-        if (roundPaid(p,r)) cc.paid+=a; else cc.recv+=a;
-      } else {
-        const a=parseFloat(r.planAmount)||0; if(!a) return;
-        const cc=bucket(it.code,(r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
-      }
-    })));
-    const mCodes = Object.keys(mCell).sort();
-    const mMonths = [...new Set(mCodes.flatMap(c=>Object.keys(mCell[c])))].filter(Boolean).sort();
-    if (mCodes.length && mMonths.length) {
-      const cellOf = (code,mk) => mCell[code]?.[mk] || null;
-      const cellTot = (c) => c ? (c.paid+c.recv+c.po+c.plan) : 0;
-      const budgetOf    = (code) => parseFloat(combinedB[code])||0;
-      const committedOf = (code) => poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
-      const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
-      const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
-      const blank = (v) => v>0 ? v : "-";   // 0 = "-" (เซลล์ยังมีเส้นกรอบ)
-      // แต่ละเดือนแยกเป็น 3 ช่อง (จ่าย/ปกติ/แผน) — ช่องละสีเดียว เพื่อให้สีขึ้นชัวร์ทุกโปรแกรม
-      const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost"];
-      mMonths.forEach(mk => { const L=monthShortLabel(mk); header.push(`${L} จ่าย`, `${L} ปกติ`, `${L} แผน`); });
-      header.push("TOTAL");
-      const rows = [
-        [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
-        [`แต่ละเดือนแยก 3 ช่อง — จ่าย(เขียว)=จ่ายแล้ว · ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
-        [],
-        header,
-      ];
-      const dataStart = rows.length, monthColStart = 6, numCols = 6 + mMonths.length*3 + 1, totalCol = numCols - 1;
-      mCodes.forEach(code => {
-        const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code);
-        const row = [code, nameOf(code), budget, budget-committed, stock, budget-stock-committed-planned];
-        mMonths.forEach(mk => { const c=cellOf(code,mk); row.push(blank(c?c.paid:0), blank(c?(c.recv+c.po):0), blank(c?c.plan:0)); });
-        row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0));
-        rows.push(row);
-      });
-      const dataEnd = rows.length - 1;
-      const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
-      const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(c=>budgetOf(c)-committedOf(c)), sumOf(stockOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
-      mMonths.forEach(mk => {
-        totalArr.push(blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.paid:0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?(cc.recv+cc.po):0;})), blank(sumOf(c=>{const cc=cellOf(c,mk);return cc?cc.plan:0;})));
-      });
-      totalArr.push(mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0));
-      rows.push(totalArr);
-      const totalRow = rows.length - 1;
-      const ws = XLSX.utils.aoa_to_sheet(rows);
-      // กว้างพอ กัน ###: ต้นทุน 17–19, Stock 15, ช่องเดือน 13, TOTAL 20
-      ws["!cols"] = [{wch:12},{wch:34},{wch:17},{wch:19},{wch:15},{wch:17}, ...mMonths.flatMap(()=>[{wch:13},{wch:13},{wch:13}]), {wch:20}];
-      const moneyCols = [2,3,4,5, ...Array.from({length:mMonths.length*3},(_,i)=>monthColStart+i), totalCol];
-      styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols, theme });
-      // สีต่อช่อง (สีเดียวต่อเซลล์ → ชัวร์): จ่าย=เขียว · ปกติ=ดำ/ส้ม(ล่าช้า) · แผน=แดง/ส้ม(ล่าช้า)
-      const setColor = (r, col, rgb) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb} } }; };
-      for (let r=dataStart; r<=dataEnd; r++) {
-        const code = mCodes[r-dataStart];
-        mMonths.forEach((mk,mi)=>{
-          const c = cellOf(code,mk); const base = monthColStart + mi*3;
-          setColor(r, base,   "10B981");                                   // จ่าย = เขียว
-          setColor(r, base+1, (c && c.poLate) ? "D97706" : "1F2937");      // ปกติ = ดำ (ส้มถ้าล่าช้า)
-          setColor(r, base+2, (c && c.planLate) ? "D97706" : "EF4444");    // แผน = แดง (ส้มถ้าล่าช้า)
-        });
-        [3,5].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
-      }
-      xBackLink(ws, 2, numCols-1, "สรุป");
-      XLSX.utils.book_append_sheet(wb, ws, "ของเข้ารายเดือน");
-    }
-  }
+  // ชีต "ของเข้ารายเดือน (แผน + PO จริง)" — ต้นทุน + เดือนแยก 3 ช่อง จ่าย/ปกติ/แผน (สี)
+  addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "สรุป" });
 
   // แยกรายเดือนแบบละเอียด (หนึ่งชีตต่อเดือน) — เอา "สรุปสถานะ" และ "รายเดือน (สรุปกลุ่ม)" ออกแล้ว
   const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
@@ -1525,7 +1596,7 @@ async function exportPORich(project, poEntries) {
 
 
 // ─── Accounting: full financial export ─────────────────────────────────────
-function exportAccountingExcel(project, tenderCosts, additions, poEntries, extraItems=[], hiddenAccounts=[]) {
+function exportAccountingExcel(project, tenderCosts, additions, poEntries, extraItems=[], hiddenAccounts=[], incomingPlan=[]) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"10B981", dark:"047857" };
   const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
@@ -1709,6 +1780,12 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     XLSX.utils.book_append_sheet(wb, wsC, "แผนจ่าย");
   }
 
+  // ชีตใหม่: ของเข้ารายเดือน (3 ช่อง จ่าย/ปกติ/แผน มีสี) + ตารางรวมเดือน (แบบหน้าบัญชี)
+  addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "Summary" });
+  addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "Summary" });
+  const hasInSheet = wb.SheetNames.includes("ของเข้ารายเดือน");
+  const hasMxSheet = wb.SheetNames.includes("ตารางรวมเดือน");
+
   // ลิงก์นำทางใต้ตารางหน้า Summary — คลิกเพื่อไปดูที่มาของตัวเลขในแต่ละชีต
   {
     const acctLinks = [
@@ -1716,6 +1793,8 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       { text:"🏷 By Group (ตามกลุ่ม)", sheet:"By Group" },
       ...(allMonths.length ? [{ text:"📅 รายเดือน", sheet:"รายเดือน" }] : []),
       ...(payLines.length ? [{ text:"💰 แผนจ่าย", sheet:"แผนจ่าย" }] : []),
+      ...(hasInSheet ? [{ text:"📥 ของเข้ารายเดือน", sheet:"ของเข้ารายเดือน" }] : []),
+      ...(hasMxSheet ? [{ text:"📄 ตารางรวมเดือน", sheet:"ตารางรวมเดือน" }] : []),
     ];
     const navR = totalRow1 + 2;
     XLSX.utils.sheet_add_aoa(ws1, [["🔗 ไปที่ชีต (ไล่ที่มาของตัวเลข):"]], { origin:{ r:navR, c:0 } });
@@ -2278,7 +2357,7 @@ export default function App() {
         )} />
       )}
       {screen === "app" && effectiveRole === "accounting"  && (
-        <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts))} />
+        <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan))} />
       )}
       </ErrorBoundary>
     </>
@@ -5169,7 +5248,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
-            {[["list","📋 รายการ PO"],["tracking","🚚 ติดตามของเข้า/จ่ายเงิน"],["inplan","📅 แผนของเข้า"]].map(([id,label])=>(
+            {[["list","📋 รายการ PO"],["inplan","📅 แผนของเข้า"]].map(([id,label])=>(
               <button key={id} onClick={()=>goTab(id)}
                 style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
                 {label}
@@ -5189,7 +5268,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         </div>
 
         {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
-          <div onClick={()=>{ goTab("tracking"); setTrackingOnlyIssues(true); }}
+          <div onClick={()=>{ goTab("inplan"); setTrackingOnlyIssues(true); }}
             style={{background:T.redBg,border:`1.5px solid #fecaca`,borderRadius:12,padding:"12px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}>
             <span style={{fontSize:20}}>⚠️</span>
             <div style={{flex:1}}>
@@ -5358,13 +5437,18 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               )}
             </div>
           </div>
-        ) : tab==="tracking" ? (
-          <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
-            onStatusChange={changeStatus} session={session} usdRate={usdRate}
-            tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
-            onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
         ) : tab==="inplan" ? (
-          <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+          <>
+            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPlan} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+            {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
+            <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
+              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14}}>🚚 ติดตามของเข้า / จ่ายเงิน</div>
+              <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
+                onStatusChange={changeStatus} session={session} usdRate={usdRate}
+                tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
+                onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
+            </div>
+          </>
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -5923,6 +6007,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const [sortDir, setSortDir] = useState(1);
   // ค้นหา + ตัวกรอง "เฉพาะที่มี PO" บนแท็บ Cash Flow
   const [dateSearch, setDateSearch] = useState("");
+  const [planSearch, setPlanSearch] = useState("");   // ค้นหาในหน้าแผนจ่ายรายเดือน
   const [onlyWithPO, setOnlyWithPO] = useState(false);
   // Which Acc. Code groups are collapsed on the "วันที่ (Cash Flow)" tab.
   const [dateCollapsed, setDateCollapsed] = useState(() => new Set());
@@ -6059,6 +6144,15 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
     const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รวมยอดจ่ายจริง (รองรับจ่ายบางส่วน)
     return { mk, label: mk==="9999-99"?"ยังไม่ระบุวันจ่าย":monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
   });
+  // ค้นหาในหน้าแผนจ่าย: กรองงวดตาม Supplier/PO No./Acc/วิธีจ่าย/วันครบกำหนด แล้วคิดยอดใหม่ต่อเดือน
+  const pq = planSearch.trim().toLowerCase();
+  const shownPayByMonth = (!pq ? payByMonth : payByMonth.map(m => {
+    const lines = m.lines.filter(l => [l.supplier,l.poNo,l.code,l.accName,l.payDate,l.method,PAYMENT_LABEL[l.status]].join(" ").toLowerCase().includes(pq));
+    if (!lines.length) return null;
+    const cash=lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0), credit=lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
+    const sum=cash+credit, paidA=lines.reduce((s,l)=>s+(l.paidAmount||0),0);
+    return { ...m, lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
+  }).filter(Boolean));
   const planTotal  = payLines.reduce((s,l)=>s+l.amount,0);
   const planPaid   = payLines.reduce((s,l)=>s+(l.paidAmount||0),0);
   const planRemain = Math.max(0, planTotal - planPaid);
@@ -6435,15 +6529,24 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               <StatCard label={`ครบกำหนดเดือนหน้า (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} thb={dueNextMonth} rate={usdRate} sub={dueNextMonth>0?`${nextCount} งวด · เตรียมล่วงหน้า`:"ยังไม่มีที่ครบกำหนด"} color={T.amber} icon="🔔" accent={T.amberBg}/>
             </div>
 
+            {/* ค้นหา: Supplier / PO No. / Acc. Code / วิธีจ่าย / วันครบกำหนด */}
+            {payByMonth.length>0 && (
+              <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
+                <SearchInput value={planSearch} onChange={setPlanSearch} placeholder="🔍 ค้นหา Supplier / PO No. / Acc. Code / วิธีจ่าย / วันจ่าย" width={340}/>
+                <span style={{fontSize:12,color:T.textMuted}}>แสดง {shownPayByMonth.length} / {payByMonth.length} เดือน · {shownPayByMonth.reduce((s,m)=>s+m.lines.length,0)} งวด</span>
+              </div>
+            )}
             {payByMonth.length===0 ? (
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
                 <div style={{fontSize:32,marginBottom:12}}>💰</div>
                 <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>ยังไม่มีงวดจ่ายให้แสดง</div>
                 <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>วันครบกำหนดจ่ายมาจากวันรับของ (แผน/จริง) + เทอมเครดิตของ PO</div>
               </div>
+            ) : shownPayByMonth.length===0 ? (
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ไม่พบงวดที่ตรงกับ "{planSearch}"</div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                {payByMonth.map(m => {
+                {shownPayByMonth.map(m => {
                   const isCollapsed = planCollapsed.has(m.mk);
                   const isThis = m.mk===thisMonthKey;
                   return (
