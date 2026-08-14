@@ -480,7 +480,7 @@ const GLOBAL_CSS = `
   .tag { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 600; }
   /* กล่องเลื่อนแนวนอน (ใช้กับตารางที่คอลัมน์เยอะ) — สกรอลบาร์เห็นชัดเสมอ */
   .hscroll { overflow-x: auto; overflow-y: hidden; }
-  .hscroll::-webkit-scrollbar { height: 12px; }
+  .hscroll::-webkit-scrollbar { height: 16px; }
   .hscroll::-webkit-scrollbar-track { background: #eef2f7; border-radius: 8px; }
   .hscroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; border: 3px solid #eef2f7; }
   .hscroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
@@ -496,13 +496,21 @@ const GLOBAL_CSS = `
   .mscroll thead th { position: sticky; background: #f8fafc; z-index: 2; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
   .mscroll thead tr:first-child th { top: 0; }
   .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 2; }
+  /* สกรอลบาร์แนวนอนแบบใหญ่ คลิก/ลากง่าย — ใช้กับตารางรายเดือน (กว้างมาก) */
+  .fatscroll { overflow: auto; -webkit-overflow-scrolling: touch; scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
+  .fatscroll::-webkit-scrollbar { height: 20px; width: 20px; }
+  .fatscroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 12px; }
+  .fatscroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 12px; border: 4px solid #e2e8f0; min-width: 48px; }
+  .fatscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .fatscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
   /* เลื่อนลื่นบน iOS */
   .hscroll, .mscroll { -webkit-overflow-scrolling: touch; }
   /* ── มือถือ/จอแคบ: ปุ่มแตะง่ายขึ้น + ช่องกรอกไม่โดน iOS ซูมอัตโนมัติ (ต้อง ≥16px) ── */
   @media (max-width: 640px) {
     .btn-primary, .btn-ghost { min-height: 40px; padding-top: 10px; padding-bottom: 10px; }
     .input-base { font-size: 16px; }
-    .hscroll::-webkit-scrollbar, .mscroll::-webkit-scrollbar { height: 10px; width: 10px; }
+    .hscroll::-webkit-scrollbar, .mscroll::-webkit-scrollbar { height: 12px; width: 12px; }
+    .fatscroll::-webkit-scrollbar { height: 16px; width: 16px; }
   }
 `;
 
@@ -2181,7 +2189,7 @@ export default function App() {
       // ถ้าเริ่มบนเซลล์ข้อความ (รหัสบัญชี/ชื่อรายการ/หัวตาราง) ปล่อยให้เลือก-คัดลอกข้อความได้ตามปกติ
       const startCell = t.closest("td");
       if (!startCell || !/\d[\d,]*\.\d/.test(startCell.textContent || "")) return;
-      d.scrollEl = t.closest(".mscroll") || t.closest(".hscroll") || null;
+      d.scrollEl = t.closest(".mscroll") || t.closest(".hscroll") || t.closest(".fatscroll") || null;
       const s = getScroll();
       d.ax = e.clientX - s.ox + s.x; d.ay = e.clientY - s.oy + s.y; // anchor ในพิกัดเนื้อหา
       d.pending = true; d.active = false; d.lastX = e.clientX; d.lastY = e.clientY;
@@ -4976,7 +4984,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
             <SearchInput value={mSearch} onChange={setMSearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260}/>
             <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownCodes.length}/{codes.length} รายการ</span>
           </div>
-          <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+          <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
             <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
               <thead>
                 <tr>
@@ -6202,7 +6210,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
         <SearchInput value={aSearch} onChange={setASearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260}/>
         <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownRows.length}/{rows.length} รายการ</span>
       </div>
-      <div style={{ overflow: "auto", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+      <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
         <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
           <thead>
             <tr>
