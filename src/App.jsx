@@ -4852,6 +4852,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const takeoffOf = (code) => [...pos, ...list].reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.takeoff) || 0), 0), 0); // Take off (กรอกเอง)
   const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // ยอดที่เหลือต้องสั่ง
+  const balPOof   = (code) => takeoffOf(code) - issuePOof(code);                                    // Balance PO = Take off − Issue PO (เหลือต้องออก PO)
 
   const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
@@ -4891,15 +4892,16 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <th style={{ ...hM(bCost), minWidth: 120 }}>Tender Cost</th>
                   <th style={{ ...hM(bCost), minWidth: 110 }}>Take off</th>
                   <th style={{ ...hM(bCost), minWidth: 90 }}>Stock</th>
-                  <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Cost</th>
                   <th style={{ ...hM(bCost), minWidth: 110 }}>Issue PO</th>
+                  <th style={{ ...hM(bCost), minWidth: 110 }}>Balance Cost</th>
                   {months.map(mk => <th key={mk} style={hM("#eef3ee")}>{monthLbl(mk)}</th>)}
                   <th style={{ ...hM("#eef3ee"), fontWeight: 700 }}>TOTAL</th>
+                  <th style={{ ...hM("#eaeef5"), minWidth: 110 }}>Balance PO</th>
                 </tr>
               </thead>
               <tbody>
                 {codes.map(code => {
-                  const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code);
+                  const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code), bpo = balPOof(code);
                   return (
                     <tr key={code}>
                       <td style={{ ...cM, ...stickyBody0, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
@@ -4907,8 +4909,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
-                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(iss)}{iss ? usdLine(iss, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
                       {months.map(mk => {
                         const c = cellOf(code, mk); const tot = cellTot(c);
                         return (
@@ -4923,6 +4925,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                         );
                       })}
                       <td style={{ ...nM, fontWeight: 600, background: "#f6faf6", color: T.textPrimary }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
+                      <td style={{ ...nM, fontWeight: 600, background: "#eaeef5", color: bpo < 0 ? T.red : T.textPrimary }}>{money(bpo)}{bpo ? usdLine(Math.abs(bpo), usdRate) : null}</td>
                     </tr>
                   );
                 })}
@@ -4933,10 +4936,11 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(budgetOf))}{sum(budgetOf) ? usdLine(sum(budgetOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(takeoffOf))}{sum(takeoffOf) ? usdLine(sum(takeoffOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(stockOf))}{sum(stockOf) ? usdLine(sum(stockOf), usdRate) : null}</td>
-                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(issuePOof))}{sum(issuePOof) ? usdLine(sum(issuePOof), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
                   {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 650, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}{colTot(mk) ? usdLine(colTot(mk), usdRate) : null}</td>)}
                   <td style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}{grand ? usdLine(grand, usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#e2e8f2", color: sum(balPOof) < 0 ? T.red : T.textPrimary }}>{money(sum(balPOof))}{sum(balPOof) ? usdLine(Math.abs(sum(balPOof)), usdRate) : null}</td>
                 </tr>
               </tfoot>
             </table>
