@@ -1223,7 +1223,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
 }
 
 // ─── Procurement: PO tracking export ───────────────────────────────────────
-function exportProcurementExcel(project, poEntries) {
+function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
   const theme = { main:"F59E0B", dark:"B45309" };
   const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
@@ -1275,6 +1275,79 @@ function exportProcurementExcel(project, poEntries) {
     moneyCols:U?[5,6]:[5], usdCols:U?[6]:[], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
   delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
   dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:26},{wch:16},{wch:16},{wch:28}];
+
+  // ─── ชีต "ของเข้ารายเดือน (แผน + PO จริง)" — mirror ตารางหน้าจัดซื้อ ─────────
+  //  ต่อ Acc. Code: ต้นทุน (Tender Cost / Balance Pending PO / Stock / Balance Cost)
+  //  + เดือนเป็นคอลัมน์ แยก "รับจริง / PO รอเข้า / แผน" (⚠ = ล่าช้า) + TOTAL แถว/คอลัมน์
+  {
+    const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
+    const acctList = exportAccountList(extraItems, hiddenAccounts);
+    const nameOf   = (code) => acctList.find(a=>a.code===code)?.name || ACCOUNTS.find(a=>a.code===code)?.name || "";
+    const combinedB = buildCombinedBudget(tenderCosts, additions);
+    const today = todayStr();
+    const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
+    const mEntries = [];
+    plansArr.forEach(pl => poItems(pl).forEach(it => (it.rounds||[]).forEach(r => { const a=parseFloat(r.planAmount)||0; if(!a) return; mEntries.push({code:it.code, mk:(r.planDate||pl.date||"").slice(0,7), amount:a, src:"plan", late:lateOf(r), received:false}); })));
+    poEntries.forEach(p => poItems(p).forEach(it => (it.rounds||[]).forEach(r => {
+      if (roundReceived(r)) { const a=parseFloat(r.actualAmount)||0; if(!a) return; mEntries.push({code:it.code, mk:r.actualDate.slice(0,7), amount:a, src:"po", late:false, received:true}); }
+      else { const a=parseFloat(r.planAmount)||0; if(!a) return; mEntries.push({code:it.code, mk:(r.planDate||p.date||"").slice(0,7), amount:a, src:"po", late:lateOf(r), received:false}); }
+    })));
+    const mMonths = [...new Set(mEntries.map(e=>e.mk).filter(Boolean))].sort();
+    if (mEntries.length && mMonths.length) {
+      const mCell = {};
+      mEntries.forEach(e => { const c=(mCell[e.code]=mCell[e.code]||{}); const cc=(c[e.mk]=c[e.mk]||{rec:0,po:0,poLate:false,plan:0,planLate:false}); if(e.received) cc.rec+=e.amount; else if(e.src==="po"){ cc.po+=e.amount; if(e.late) cc.poLate=true; } else { cc.plan+=e.amount; if(e.late) cc.planLate=true; } });
+      const mCodes = Object.keys(mCell).sort();
+      const cellOf = (code,mk) => mCell[code]?.[mk] || null;
+      const cellTot = (c) => c ? (c.rec+c.po+c.plan) : 0;
+      const budgetOf    = (code) => parseFloat(combinedB[code])||0;
+      const committedOf = (code) => poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
+      const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
+      const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
+      const cellText = (c) => { if(!c) return "-"; const L=[]; if(c.rec>0)L.push(`รับ ${fmt0(c.rec)}`); if(c.po>0)L.push(`PO ${fmt0(c.po)}${c.poLate?" ⚠":""}`); if(c.plan>0)L.push(`แผน ${fmt0(c.plan)}${c.planLate?" ⚠":""}`); return L.length?L.join("\n"):"-"; };
+      const rows = [
+        [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
+        [`รับ = รับจริง · PO = สั่งแล้วรอเข้า · แผน = ยังไม่เป็น PO (⚠ = ล่าช้า) · Balance Cost = งบ − Stock − PO − แผน · Export: ${new Date().toLocaleDateString("th-TH")}`],
+        [],
+        ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost", ...mMonths.map(monthShortLabel), "TOTAL"],
+      ];
+      const dataStart = rows.length, monthColStart = 6, totalCol = 6 + mMonths.length, numCols = 7 + mMonths.length;
+      mCodes.forEach(code => {
+        const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code);
+        const monthCells = mMonths.map(mk => cellText(cellOf(code,mk)));
+        const rowTot = mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0);
+        rows.push([code, nameOf(code), budget, budget-committed, stock, budget-stock-committed-planned, ...monthCells, rowTot]);
+      });
+      const dataEnd = rows.length - 1;
+      const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
+      const colTot = (mk) => mCodes.reduce((s,c)=>s+cellTot(cellOf(c,mk)),0);
+      const grand = mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0);
+      rows.push(["","TOTAL", sumOf(budgetOf), sumOf(c=>budgetOf(c)-committedOf(c)), sumOf(stockOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c)), ...mMonths.map(mk=>colTot(mk)), grand]);
+      const totalRow = rows.length - 1;
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{wch:12},{wch:30},{wch:16},{wch:18},{wch:12},{wch:16}, ...mMonths.map(()=>({wch:16})), {wch:16}];
+      styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
+        moneyCols:[2,3,4,5, ...mMonths.map((_,i)=>monthColStart+i), totalCol], theme });
+      // เดือน = ข้อความหลายบรรทัด → ตั้ง wrapText + สีแดงถ้าเป็น "แผนล้วน" (ยังไม่มีจริง/PO) + ขยายสูงแถว
+      for (let r=dataStart; r<=dataEnd; r++) {
+        const code = mCodes[r-dataStart];
+        let maxLines = 1;
+        for (let ci=0; ci<mMonths.length; ci++) {
+          const c = cellOf(code, mMonths[ci]);
+          const ref = XLSX.utils.encode_cell({r, c:monthColStart+ci});
+          if (!ws[ref]) continue;
+          const lines = c ? Math.max(1, [c.rec>0,c.po>0,c.plan>0].filter(Boolean).length) : 1;
+          if (lines > maxLines) maxLines = lines;
+          const pureplan = c && (c.rec+c.po)===0 && c.plan>0;
+          ws[ref].s = { ...(ws[ref].s||{}), alignment:{ horizontal:"right", vertical:"top", wrapText:true },
+            font:{ sz:9.5, name:"Tahoma", color:{rgb: pureplan ? "DC2626" : "1F2937"} } };
+        }
+        ws["!rows"][r] = { hpx: Math.max(19, maxLines*15) };
+        [3,5].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
+      }
+      xBackLink(ws, 2, numCols-1, "สรุป");
+      XLSX.utils.book_append_sheet(wb, ws, "ของเข้ารายเดือน");
+    }
+  }
 
   // แยกรายเดือนแบบละเอียด (หนึ่งชีตต่อเดือน) — เอา "สรุปสถานะ" และ "รายเดือน (สรุปกลุ่ม)" ออกแล้ว
   const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
@@ -2188,7 +2261,7 @@ export default function App() {
       {screen === "app" && effectiveRole === "procurement" && (
         <ProcurementView {...sharedProps} onExport={() => runExport(() =>
           // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
-          Promise.resolve(exportProcurementExcel(activeProject, poEntries))
+          Promise.resolve(exportProcurementExcel(activeProject, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts))
         )} />
       )}
       {screen === "app" && effectiveRole === "accounting"  && (
