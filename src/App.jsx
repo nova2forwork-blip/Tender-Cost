@@ -427,6 +427,10 @@ const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K
 const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
 const uid  = () => Math.random().toString(36).slice(2,10);
 
+// ป้ายเวอร์ชัน build — โชว์บนแถบหัวทุกหน้า ไว้เช็คว่าเว็บโหลด bundle ตัวล่าสุดแล้วจริง
+// (ถ้ายังไม่เห็นป้ายนี้ = ยังรันไฟล์เก่า/เบราว์เซอร์แคช → redeploy + hard refresh)
+const BUILD_TAG = "v14ส · ต้องสั่งสุทธิหัก store";
+
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
   // Layout
@@ -3093,6 +3097,7 @@ function Shell({ role, color, project, onBack, onHome, children, syncedAt, synci
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
         </div>
+        <span title="เวอร์ชันของโค้ดที่กำลังรัน — ใช้ยืนยันว่าโหลด bundle ล่าสุดแล้ว" style={{fontSize:10,color:"rgba(255,255,255,0.7)",background:"rgba(255,255,255,0.12)",padding:"3px 8px",borderRadius:6,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{BUILD_TAG}</span>
         <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
         {project.area && (
           <div style={{display:"flex",gap:8}}>
