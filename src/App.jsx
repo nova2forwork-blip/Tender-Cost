@@ -427,10 +427,6 @@ const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K
 const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString("th-TH",{month:"short",year:"2-digit"});
 const uid  = () => Math.random().toString(36).slice(2,10);
 
-// ป้ายเวอร์ชัน build — โชว์บนแถบหัวทุกหน้า ไว้เช็คว่าเว็บโหลด bundle ตัวล่าสุดแล้วจริง
-// (ถ้ายังไม่เห็นป้ายนี้ = ยังรันไฟล์เก่า/เบราว์เซอร์แคช → redeploy + hard refresh)
-const BUILD_TAG = "v15 · แจกแจงต้องสั่งสุทธิ";
-
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
   // Layout
@@ -3097,7 +3093,6 @@ function Shell({ role, color, project, onBack, onHome, children, syncedAt, synci
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
         </div>
-        <span title="เวอร์ชันของโค้ดที่กำลังรัน — ใช้ยืนยันว่าโหลด bundle ล่าสุดแล้ว" style={{fontSize:10,color:"rgba(255,255,255,0.7)",background:"rgba(255,255,255,0.12)",padding:"3px 8px",borderRadius:6,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{BUILD_TAG}</span>
         <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
         {project.area && (
           <div style={{display:"flex",gap:8}}>
@@ -5172,7 +5167,6 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                 {form.items.map((it)=>{
                   const budget = budgetForCode(it.code);
                   const net = itemNet(it);
-                  const _fs = parseFloat(it.store)||0, _st = otherStock(it.code), _co = otherCommitted(it.code), _pl = otherPlanned(it.code);
                   const amt = parseFloat(it.amount)||0;
                   const pct = net>0 ? Math.round(amt/net*100) : 0;
                   const prevOrdered = poEntries.reduce((s,p)=> p.id===editId ? s : s + poAmountForCode(p, it.code), 0);
@@ -5204,11 +5198,6 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                           style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:net<0?T.redBg:T.amberBg,color:net<0?T.red:T.amber,borderColor:"transparent"}}/>
                       </label>
                     </div>
-                    {it.code && (
-                      <div style={{fontSize:11,color:T.textMuted,marginTop:-2,marginBottom:8,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.5,background:"#f8fafc",borderRadius:8,padding:"6px 10px"}}>
-                        แจกแจง: งบ {fmt0(budget)} − store(ฟอร์ม) {fmt0(_fs)} − storeเดิม {fmt0(_st)} − PO {fmt0(_co)} − แผน {fmt0(_pl)} = <b style={{color:net<0?T.red:T.amber}}>{fmt0(net)}</b>
-                      </div>
-                    )}
                     {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
