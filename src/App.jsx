@@ -4677,7 +4677,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
 
         {locked && (
           <div style={{display:"flex",alignItems:"center",gap:6,background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:11,color:"#92400e"}}>
-            🔒 รับของและจ่ายเงินครบแล้ว — แก้ไข/ลบได้เฉพาะ Admin
+            🔒 รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)
           </div>
         )}
 
@@ -4752,12 +4752,12 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>ยอดของเข้าจริง (บาท)</span>
-                          <MoneyInput value={r.actualAmount} disabled={locked} placeholder="บาท"
+                          <MoneyInput value={r.actualAmount} placeholder="บาท"
                             onChange={v=>setActualAmount(it.id,r.id,v)}/>
                         </label>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>วันของเข้าจริง</span>
-                          <input type="date" value={r.actualDate} disabled={locked}
+                          <input type="date" value={r.actualDate}
                             onChange={e=>updateRound(it.id,r.id,"actualDate",e.target.value)} className="input-base"/>
                         </label>
                       </div>
@@ -4841,9 +4841,9 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
               if (bad) { setCapWarn(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
               setCapWarn(""); onClose();
             }}
-            disabled={locked || !!overCapItem} className="btn-primary"
+            disabled={!!overCapItem} className="btn-primary"
             title={overCapItem?`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`:undefined}
-            style={{background:(locked||overCapItem)?"#e2e8f0":T.green,color:(locked||overCapItem)?"#94a3b8":"#fff",cursor:(locked||overCapItem)?"not-allowed":"pointer"}}>{locked?"🔒":overCapItem?"⚠":"💾"} บันทึก</button>
+            style={{background:overCapItem?"#e2e8f0":T.green,color:overCapItem?"#94a3b8":"#fff",cursor:overCapItem?"not-allowed":"pointer"}}>{overCapItem?"⚠":"💾"} บันทึก</button>
           {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title="แก้ผู้ขาย / หมวด / ยอดสั่ง">✏️ แก้ไข PO</button>}
           <button onClick={()=>onDelete(po.id)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
           <div style={{flex:1}}/>
