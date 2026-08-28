@@ -253,7 +253,8 @@ const roundPaid     = (p, r) => { if (migratePO(p).status === "Paid") return tru
 const itemOrdered   = (it) => parseFloat(it.amount)||0;
 const itemReceived  = (it) => (it.rounds||[]).filter(roundReceived).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
 const itemEntered   = (it) => (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-const itemRemaining = (it) => Math.max(itemOrdered(it) - itemEntered(it), 0);
+// ปัดเป็นสตางค์ (2 ตำแหน่ง) กันเศษย่อยกว่าสตางค์ทำให้ "เหลือรับ 0.00" แต่ระบบยังคิดว่าไม่ครบ
+const itemRemaining = (it) => Math.max(Math.round((itemOrdered(it) - itemEntered(it)) * 100) / 100, 0);
 
 // ─── Edit history / audit log ──────────────────────────────────────────────
 // Every PO keeps a short log of who changed what and when, so procurement
@@ -379,7 +380,7 @@ const incomingStatus = (p) => {
   // เช็ค "รับครบ" ต่อ item — ถ้ารับเกินใน item หนึ่งจะได้ไม่ไปกลบ item ที่ยังรับไม่ครบ
   // (ก่อนหน้านี้เทียบยอดรวมกับ poTotal จึงล็อก PO เร็วเกินจริง)
   const items = poItems(p).filter(it => itemOrdered(it) > 0);
-  const allReceived = items.length > 0 && items.every(it => itemReceived(it) >= itemOrdered(it) - 0.001);
+  const allReceived = items.length > 0 && items.every(it => Math.round(itemReceived(it)*100) >= Math.round(itemOrdered(it)*100)); // เทียบระดับสตางค์ ให้ตรงกับที่แสดง
   const anyReceived = rounds.some(roundReceived);
   // "ล่าช้า" เฉพาะงวดที่ยังไม่รับ และ "ยังไม่ได้ใส่วันรับ" และเลยวันแผนแล้ว
   // (ถ้าใส่วันรับไว้ล่วงหน้า = นัดไว้แล้ว ยังไม่ถือว่าล่าช้าจนกว่าจะเลยวันรับ)
@@ -401,7 +402,7 @@ const paymentStatus = (p) => {
   // (กันไม่ให้ "จ่ายแล้ว" เกิดขึ้นทั้งที่บาง item ยังจ่ายไม่ครบ)
   const items = poItems(p).filter(it => itemOrdered(it) > 0);
   const itemPaid = (it) => (it.rounds||[]).filter(r => roundReceived(r) && roundPaid(p,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-  const allPaid = items.length > 0 && items.every(it => itemPaid(it) >= itemOrdered(it) - 0.001);
+  const allPaid = items.length > 0 && items.every(it => Math.round(itemPaid(it)*100) >= Math.round(itemOrdered(it)*100)); // เทียบระดับสตางค์
   if (allPaid) return "paid";
   return "pending";
 };
@@ -4612,7 +4613,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   const overCapItem = items.find(it => {
     const o = itemOrdered(it); if (!(o > 0)) return false;
     const recvSum = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-    return recvSum > o + 0.001;
+    return Math.round(recvSum*100) > Math.round(o*100);
   });
 
   // Record actual received / split remaining into a new round, then persist.
@@ -4624,7 +4625,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     const ordered = itemOrdered(it);
     const newVal = parseFloat(val)||0;
     const otherReceived = (it.rounds||[]).filter(r=>r.id!==roundId).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-    if (ordered>0 && (otherReceived + newVal) > ordered + 0.001) {
+    if (ordered>0 && Math.round((otherReceived + newVal)*100) > Math.round(ordered*100)) {
       const maxAllow = Math.max(ordered - otherReceived, 0);
       setCapWarn(`⚠ ${it.code||"รายการนี้"}: ยอดของเข้ารวมห้ามเกินยอดสั่ง ${fmt(ordered)} — งวดนี้กรอกได้ไม่เกิน ${fmt(maxAllow)} (ระบบไม่บันทึกค่าที่เกิน)`);
       return; // บล็อก: ไม่บันทึกค่าที่เกินยอดสั่ง
@@ -4778,7 +4779,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                   <span>ของเข้าแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{fmt(recv)}</b> / {fmt(ordered)}</span>
                   <span>จ่ายแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:paidAmt>0?T.green:T.textMuted}}>{fmt(paidAmt)}</b></span>
                 </div>
-                {overPlanned>0.001 && (
+                {Math.round(overPlanned*100)>0 && (
                   <div style={{marginTop:8,fontSize:11,color:T.red,background:T.redBg,borderRadius:8,padding:"7px 10px",lineHeight:1.4}}>
                     ⚠ ยอดรวมทุกงวด <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
                   </div>
@@ -4837,7 +4838,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           <button
             onClick={()=>{
               // ตรวจอีกครั้งก่อนปิด: ยอดของเข้าจริงรวมของทุกรายการห้ามเกินยอดสั่ง
-              const bad = po.items.find(it => { const o=itemOrdered(it); const rc=(it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0); return o>0 && rc > o + 0.001; });
+              const bad = po.items.find(it => { const o=itemOrdered(it); const rc=(it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0); return o>0 && Math.round(rc*100) > Math.round(o*100); });
               if (bad) { setCapWarn(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
               setCapWarn(""); onClose();
             }}
@@ -5202,7 +5203,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const overItem = validItems.find(it => {
       const o = parseFloat(it.amount)||0; if (!(o>0)) return false;
       const rc = it.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
-      return rc > o + 0.001;
+      return Math.round(rc*100) > Math.round(o*100);
     });
     if (overItem) { alert(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
     // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
