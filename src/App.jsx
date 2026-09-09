@@ -2351,6 +2351,8 @@ export default function App() {
     updateProject,
     onBack: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen(session.role === "admin" ? "roleSelect" : "home"); },
     onHome: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("home"); },   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
+    // ปุ่ม "เลือกแผนก" → หน้าแรกของแต่ละแผนก (เฉพาะ admin ที่สลับแผนกได้)
+    onDept: session.role === "admin" ? () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("roleSelect"); } : null,
     syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
 
   return (
@@ -3358,7 +3360,7 @@ function LangToggle({ dark = true }) {
 }
 
 // ─── Shell ────────────────────────────────────────────────────────────────────
-function Shell({ role, color, project, onBack, onHome, children, syncedAt, syncing, session, onLogout }) {
+function Shell({ role, color, project, onBack, onHome, onDept, children, syncedAt, syncing, session, onLogout }) {
   const labels = {qs:"QS · Quantity Surveyor",procurement:t("จัดซื้อ · Procurement","Procurement"),accounting:t("บัญชี · Accounting","Accounting")};
   const gradients = {
     qs:          "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
@@ -3371,6 +3373,9 @@ function Shell({ role, color, project, onBack, onHome, children, syncedAt, synci
         <button onClick={onBack} title={t("กลับหน้าก่อนหน้า","Go back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
         {onHome && (
           <button onClick={onHome} title={t("ไปหน้าเลือกโครงการ","Go to projects")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>🏠 {t("หน้าโครงการ","Projects")}</button>
+        )}
+        {onDept && (
+          <button onClick={onDept} title={t("ไปหน้าเลือกแผนก","Go to departments")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>🗂 {t("เลือกแผนก","Departments")}</button>
         )}
         <div style={{flex:1,minWidth:140}}>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
@@ -3401,7 +3406,7 @@ function Shell({ role, color, project, onBack, onHome, children, syncedAt, synci
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
+function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
   const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
   const goTab   = (id) => { if (id !== tab) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setTabHist(h => [...h, tab]); setTab(id); } };
@@ -3450,7 +3455,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   const handleRestoreAccount = (code) => saveHiddenAccounts(hiddenAccounts.filter(c => c !== code));
 
   return (
-    <Shell role="qs" color={T.blue} project={project} onBack={backTab} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="qs" color={T.blue} project={project} onBack={backTab} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"20px 28px 0"}}>
         <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
           {[["baseline",t("📐 ราคาเดิม (Baseline)","📐 Baseline")],["monthly",t("📅 รายการเพิ่มรายเดือน","📅 Monthly additions")]].map(([id,label])=>(
@@ -5422,7 +5427,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode, incomingPlan={}, saveIncomingPlan }) {
+function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode, incomingPlan={}, saveIncomingPlan }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [tabHist, setTabHist] = useState([]);   // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
@@ -5675,7 +5680,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const sortedGroupCodes = Object.keys(groupedFiltered).sort();
 
   return (
-    <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       {payModal && (
         <div onClick={()=>setPayModal(null)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,width:"min(380px,100%)",overflow:"hidden",boxShadow:"0 24px 60px rgba(15,23,42,0.3)"}}>
@@ -6612,7 +6617,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
 }
 
 // ─── Accounting View ──────────────────────────────────────────────────────────
-function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], incomingPlan=[] }) {
+function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onDept, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], incomingPlan=[] }) {
   // บัญชี = อ่านอย่างเดียว (RLS ไม่ให้เขียน tcs-projects) → ปุ่มสกุลเงินจึงเป็นค่า
   // "ดูเฉพาะเครื่องนี้" ไม่บันทึกกลับไปที่โครงการร่วม กันไม่ให้บัญชีแก้ข้อมูลโครงการ
   const [curOverride, setCurOverride] = useState({});
@@ -6830,7 +6835,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   };
 
   return (
-    <Shell role="accounting" color={T.green} project={project} onBack={backView} onHome={onHome} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="accounting" color={T.green} project={project} onBack={backView} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
