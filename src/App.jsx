@@ -3821,6 +3821,19 @@ function MonthAxisTick({ x, y, payload, selectedLabel }) {
 }
 
 // ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
+// ── ตรึงคอลัมน์ซ้ายของตารางงบ QS (Acc.Code / Group / Account Name / ยอดก่อนหน้า) ──
+//   4 คอลัมน์แรกไม่เลื่อนซ้าย-ขวา · คอลัมน์รายการที่เหลือเลื่อนได้
+const QSF_W = [120, 118, 320, 150];                 // ความกว้างคงที่ 4 คอลัมน์ที่ตรึง
+const QSF_L = [0, 120, 238, 558];                   // left สะสม (0, 120, 120+118, 238+320)
+const QSF_SPAN3 = QSF_W[0] + QSF_W[1] + QSF_W[2];   // = 558 (สำหรับ footer colSpan=3)
+const qsFrz = (i, bg, z = 3) => ({
+  position: "sticky", left: QSF_L[i], width: QSF_W[i], minWidth: QSF_W[i], maxWidth: QSF_W[i],
+  background: bg, zIndex: z, ...(i === 3 ? { boxShadow: "3px 0 5px -2px rgba(15,23,42,0.13)" } : {}),
+});
+const qsFrzSpan3 = (bg, z = 3) => ({
+  position: "sticky", left: 0, width: QSF_SPAN3, minWidth: QSF_SPAN3, maxWidth: QSF_SPAN3, background: bg, zIndex: z,
+  boxShadow: "3px 0 5px -2px rgba(15,23,42,0.13)",
+});
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project, registerMonthExport }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const thisMonth = new Date().toISOString().slice(0,7);
@@ -4264,16 +4277,16 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             {isMultiCol ? (
               <>
                 <tr style={{background:"#f8fafc"}}>
-                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="code"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="code"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(0,"#f8fafc",7)}}>
                     <span onClick={()=>handleSort("code")} style={{cursor:"pointer",userSelect:"none"}}>Acc. Code{sortKey==="code"?(sortDir===1?" ▲":" ▼"):""}</span>
                   </th>
-                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="group"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="group"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(1,"#f8fafc",7)}}>
                     <span onClick={()=>handleSort("group")} style={{cursor:"pointer",userSelect:"none"}}>Group{sortKey==="group"?(sortDir===1?" ▲":" ▼"):""}</span>
                   </th>
-                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="name"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="name"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(2,"#f8fafc",7)}}>
                     <span onClick={()=>handleSort("name")} style={{cursor:"pointer",userSelect:"none"}}>Account Name{sortKey==="name"?(sortDir===1?" ▲":" ▼"):""}</span>
                   </th>
-                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"right",color:sortKey==="before"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"right",color:sortKey==="before"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(3,"#f8fafc",7)}}>
                     <span onClick={()=>handleSort("before")} style={{cursor:"pointer",userSelect:"none"}}>📐 ยอดก่อนหน้า{sortKey==="before"?(sortDir===1?" ▲":" ▼"):""}</span>
                   </th>
                   <th rowSpan={2} style={{padding:"11px 16px",textAlign:"center",width:20,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>+</th>
@@ -4356,11 +4369,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               const cumBefore = cumBeforeOf(r);
               const thisVal = rowMonthValue(r.code, month, draftAdd);
               const cum = cumBefore + thisVal;
+              const rowBg = i % 2 === 0 ? T.card : "#fafbfd";
               return (
                 <Fragment key={r.code}>
                   <tr onClick={()=>hasKids && setRowCollapsed(c=>({...c,[r.code]:!c[r.code]}))}
                       style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===r.code?"none":"1px solid #f1f5f9",cursor:hasKids?"pointer":"default"}}>
-                    <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:500}}>
+                    <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:500, ...qsFrz(0,rowBg)}}>
                       {hasKids && (
                         <span title={isCollapsed?"ขยายรายการย่อย":"ย่อรายการย่อย"}
                           style={{color:T.textMuted,fontSize:12,marginRight:6,verticalAlign:"middle",display:"inline-block"}}>
@@ -4369,10 +4383,10 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       )}
                       {r.code}
                     </td>
-                    <td style={{padding:"10px 16px"}}>
+                    <td style={{padding:"10px 16px", ...qsFrz(1,rowBg)}}>
                       <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{r.group}</span>
                     </td>
-                    <td style={{padding:"10px 16px",color:T.textPrimary}}>
+                    <td style={{padding:"10px 16px",color:T.textPrimary, ...qsFrz(2,rowBg)}}>
                       {r.name}
                       {r.isExtra && <span style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>งานเพิ่ม</span>}
                       {hasKids && <span style={{marginLeft:7,fontSize:12,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} รายการย่อย</span>}
@@ -4383,7 +4397,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         </button>
                       )}
                     </td>
-                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace", ...qsFrz(3,rowBg)}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                     {isMultiCol ? (
                       hasKids ? (
@@ -4442,11 +4456,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     const kThisVal = parseFloat(draftAdd[k.code]) || 0;
                     const kCum = kCumBefore + kThisVal;
                     const isNewThisMonth = k.addedInMonth === month;
+                    const subBg = isNewThisMonth ? T.greenBg : (i%2===0?T.card:"#fafbfd");
                     return (
-                      <tr key={k.code} style={{background:isNewThisMonth?T.greenBg:i%2===0?T.card:"#fafbfd",borderLeft:`3px solid ${isNewThisMonth?T.green:"#e2e8f0"}`,borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none",transition:"background 0.2s"}}>
-                        <td style={{padding:"7px 16px 7px 27px",color:T.green,fontSize:13}}>↳</td>
-                        <td/>
-                        <td style={{padding:"7px 16px",color:T.green,fontSize:13,fontStyle:"italic"}}>
+                      <tr key={k.code} style={{background:subBg,borderLeft:`3px solid ${isNewThisMonth?T.green:"#e2e8f0"}`,borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none",transition:"background 0.2s"}}>
+                        <td style={{padding:"7px 16px 7px 27px",color:T.green,fontSize:13, ...qsFrz(0,subBg)}}>↳</td>
+                        <td style={qsFrz(1,subBg)}/>
+                        <td style={{padding:"7px 16px",color:T.green,fontSize:13,fontStyle:"italic", ...qsFrz(2,subBg)}}>
                           {k.name}
                           {k.addedInMonth && (
                             isNewThisMonth ? (
@@ -4460,7 +4475,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             )
                           )}
                         </td>
-                        <td style={{padding:"7px 16px",textAlign:"right",color:kCumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{fmt(kCumBefore)}{usdLine(kCumBefore, usdRate)}</td>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:kCumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...qsFrz(3,subBg)}}>{fmt(kCumBefore)}{usdLine(kCumBefore, usdRate)}</td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                         <td style={{padding:"7px 16px",textAlign:"right"}}>
                           {editingUnlocked ? (
@@ -4486,8 +4501,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   {/* Inline "add sub-item" form for this row */}
                   {subFor===r.code && (
                     <tr style={{background:T.greenBg,borderBottom:"1px solid #f1f5f9"}}>
-                      <td/><td/>
-                      <td style={{padding:"7px 16px"}}>
+                      <td style={qsFrz(0,T.greenBg)}/><td style={qsFrz(1,T.greenBg)}/>
+                      <td style={{padding:"7px 16px", ...qsFrz(2,T.greenBg)}}>
                         <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
                           placeholder="ชื่อรายการย่อย เช่น Silicone Structure" style={{width:"100%",fontSize:13}}
                           onKeyDown={e=>e.key==="Enter"&&handleAddSub(r.code)} autoFocus />
@@ -4507,8 +4522,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           </tbody>
           <tfoot>
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{filtered.length} รายการ</td>
-              <td style={{padding:"12px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13}}>
+              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13, ...qsFrzSpan3("#f8fafc")}}>{filtered.length} รายการ</td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13, ...qsFrz(3,"#f8fafc")}}>
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
                 {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r),0), usdRate)}
               </td>
