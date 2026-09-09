@@ -4447,7 +4447,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
                 <div style={{fontSize:15,fontWeight:750,color:active?"#fff":T.textPrimary,marginBottom:3,letterSpacing:0.2}}>{monthShortLabel(m)}</div>
                 <div style={{fontSize:15,fontWeight:650,color:active?"#dbeafe":T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
-                <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} {t("เดือนนี้","this mo.")}</div>
+                <div style={{fontSize:13,fontWeight:700,color:active?"#fff":(add>0?T.amber:T.textMuted),marginTop:3}}>{add>0?"+":""}{fmtK(add)} {t("เดือนนี้","this mo.")}</div>
                 {exists && (
                   <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title={t("ลบเดือนนี้ (มีเตือนก่อนลบ)","Delete this month (asks first)")}
                     style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
