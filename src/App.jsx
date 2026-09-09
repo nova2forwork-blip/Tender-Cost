@@ -276,13 +276,13 @@ const relativeTime = (iso) => {
   if (!iso) return "";
   const diffMs = Date.now() - new Date(iso).getTime();
   const min = Math.floor(diffMs/60000);
-  if (min < 1)  return "เมื่อสักครู่";
-  if (min < 60) return `${min} นาทีที่แล้ว`;
+  if (min < 1)  return t("เมื่อสักครู่","just now");
+  if (min < 60) return `${min} ${t("นาทีที่แล้ว","min ago")}`;
   const hr = Math.floor(min/60);
-  if (hr < 24)  return `${hr} ชม.ที่แล้ว`;
+  if (hr < 24)  return `${hr} ${t("ชม.ที่แล้ว","hr ago")}`;
   const day = Math.floor(hr/24);
-  if (day < 30) return `${day} วันที่แล้ว`;
-  return new Date(iso).toLocaleDateString("th-TH",{day:"numeric",month:"short",year:"2-digit"});
+  if (day < 30) return `${day} ${t("วันที่แล้ว","days ago")}`;
+  return new Date(iso).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{day:"numeric",month:"short",year:"2-digit"});
 };
 const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:"numeric",month:"short",year:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
 
@@ -420,6 +420,13 @@ const PAYMENT_TYPE_CLR   = { cash:"#10b981", credit:"#2563eb", credit30:"#2563eb
 const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit:"#eff6ff", credit30:"#eff6ff" };
 // Label for a PO's payment method including its credit term, e.g. "เครดิต 45 วัน".
 const paymentTypeLabel = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return "เงินสด"; if (P.paymentType==="credit") return `เครดิต ${P.creditDays||DEFAULT_CREDIT_DAYS} วัน`; return "—"; };
+// Bilingual runtime labels for the on-screen UI (the *_LABEL maps above stay Thai
+// for Excel exports). These call t() at render time so they follow the toggle.
+const INCOMING_LABEL_EN = { received:"Received", partial:"Partial", late:"Late", pending:"Awaiting", unset:"Unset" };
+const PAYMENT_LABEL_EN  = { paid:"Paid", late:"Overdue", pending:"Awaiting pay", unset:"Unset" };
+const incLabel = (k) => t(INCOMING_LABEL[k]||k, INCOMING_LABEL_EN[k]||k);
+const payLabel = (k) => t(PAYMENT_LABEL[k]||k, PAYMENT_LABEL_EN[k]||k);
+const payTypeLabelT = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return t("เงินสด","Cash"); if (P.paymentType==="credit") return t(`เครดิต ${P.creditDays||DEFAULT_CREDIT_DAYS} วัน`,`Credit ${P.creditDays||DEFAULT_CREDIT_DAYS}d`); return "—"; };
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 // บาทเต็ม (ไม่มีทศนิยม) — ใช้กับตัวเลขพาดหัวการ์ด/ยอดรวม ให้กวาดตาอ่านง่าย
 const fmt0 = n => new Intl.NumberFormat("th-TH",{maximumFractionDigits:0}).format(Math.round(n||0));
@@ -3233,7 +3240,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
             </div>
             <div style={{display:"flex",gap:10,marginTop:24}}>
               <button onClick={createProject} disabled={!draft.name.trim()} className="btn-primary" style={{opacity:draft.name.trim()?1:0.5}}>สร้างโครงการ</button>
-              <button onClick={()=>setNewProjModal(false)} className="btn-ghost">ยกเลิก</button>
+              <button onClick={()=>setNewProjModal(false)} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
             </div>
           </div>
         </div>
@@ -3349,12 +3356,11 @@ function LangToggle({ dark = true }) {
   const off = dark ? "rgba(255,255,255,0.55)" : T.textMuted;
   const bg  = dark ? "rgba(255,255,255,0.15)" : "#fff";
   const bd  = dark ? "rgba(255,255,255,0.3)"  : T.cardBorder;
+  // ปุ่มสลับภาษาแบบช่องเดียว — โชว์ภาษาที่ใช้อยู่ตอนนี้ (TH หรือ EN) กดแล้วสลับ ตัวหนังสือก็สลับตาม
   return (
-    <button onClick={toggleLang} title={t("สลับภาษา","Switch language")}
-      style={{background:bg,border:`1px solid ${bd}`,borderRadius:8,padding:"5px 11px",fontSize:12,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5,whiteSpace:"nowrap"}}>
-      <span style={{color:_LANG==="th"?on:off,fontWeight:_LANG==="th"?800:600}}>🌐 ไทย</span>
-      <span style={{color:off}}>|</span>
-      <span style={{color:_LANG==="en"?on:off,fontWeight:_LANG==="en"?800:600}}>EN</span>
+    <button onClick={toggleLang} title={_LANG==="th"?"เปลี่ยนเป็น English":"Switch to ไทย"}
+      style={{background:bg,border:`1px solid ${bd}`,borderRadius:8,padding:"5px 13px",fontSize:13,fontWeight:800,color:on,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,whiteSpace:"nowrap",minWidth:66,justifyContent:"center"}}>
+      🌐 {_LANG==="en" ? "EN" : "TH"}
     </button>
   );
 }
@@ -4981,7 +4987,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     // ถ้าวันของเข้าจริงยังมาไม่ถึง (วันในอนาคต) = ยังไม่ถือว่ารับของ แสดงเป็น "นัดรับ"
     if (r.actualDate > todayStr()) return [`นัดรับ ${r.actualDate} (ยังไม่ถึงวัน)`, INCOMING_BG.pending, INCOMING_CLR.pending];
     return roundPaid(po,r) ? ["ถึงกำหนดจ่ายแล้ว", PAYMENT_BG.paid, PAYMENT_CLR.paid]
-                           : ["ของเข้าแล้ว · รอครบกำหนด", INCOMING_BG.partial, INCOMING_CLR.partial];
+                           : [t("ของเข้าแล้ว · รอครบกำหนด","Received · awaiting due"), INCOMING_BG.partial, INCOMING_CLR.partial];
   };
 
   const Row = ({ label, value, mono }) => (
@@ -5004,7 +5010,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
 
         {locked && (
           <div style={{display:"flex",alignItems:"center",gap:6,background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:11,color:"#92400e"}}>
-            🔒 รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)
+            🔒 {t("รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)","Fully received & paid — actual amount/date still editable (delete PO and edit vendor/category/order: Admin only)")}
           </div>
         )}
 
@@ -5012,15 +5018,15 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             update it right after reviewing everything else on the PO. */}
         <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap",alignItems:"center"}}>
           <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)} disabled={locked}/>
-          <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{INCOMING_LABEL[inc]}</span>
-          <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_LABEL[pay]}</span>
+          <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{incLabel(inc)}</span>
+          <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{payLabel(pay)}</span>
           {po.paymentType && (
-            <span style={{background:PAYMENT_TYPE_BG[po.paymentType],color:PAYMENT_TYPE_CLR[po.paymentType],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_TYPE_ICON[po.paymentType]} {paymentTypeLabel(po)}</span>
+            <span style={{background:PAYMENT_TYPE_BG[po.paymentType],color:PAYMENT_TYPE_CLR[po.paymentType],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_TYPE_ICON[po.paymentType]} {payTypeLabelT(po)}</span>
           )}
         </div>
         {lastUpd && (
           <div style={{fontSize:11,color:T.textMuted,marginBottom:4}}>
-            🕓 อัปเดตล่าสุด {relativeTime(lastUpd.at)} โดย <b style={{color:T.textSecondary}}>{lastUpd.user}</b>
+            🕓 {t("อัปเดตล่าสุด","Last updated")} {relativeTime(lastUpd.at)} {t("โดย","by")} <b style={{color:T.textSecondary}}>{lastUpd.user}</b>
           </div>
         )}
 
@@ -5034,15 +5040,15 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
         </div>
 
         <div style={{marginTop:4}}>
-          <Row label="วันเปิด PO" value={po.date} mono />
-          <Row label="วันรับของ" value={receivedDates.length ? receivedDates.join(", ") : "ยังไม่ได้รับ"} mono={receivedDates.length>0} />
-          <Row label="วันจ่ายเงิน" value={paidDate || "ยังไม่ถึงกำหนด"} mono={!!paidDate} />
-          <Row label="วิธีจ่ายเงิน" value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${paymentTypeLabel(po)}` : "—"} />
+          <Row label={t("วันเปิด PO","PO date")} value={po.date} mono />
+          <Row label={t("วันรับของ","Received")} value={receivedDates.length ? receivedDates.join(", ") : t("ยังไม่ได้รับ","Not received")} mono={receivedDates.length>0} />
+          <Row label={t("วันจ่ายเงิน","Payment date")} value={paidDate || t("ยังไม่ถึงกำหนด","Not due yet")} mono={!!paidDate} />
+          <Row label={t("วิธีจ่ายเงิน","Payment method")} value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${payTypeLabelT(po)}` : "—"} />
         </div>
 
         {/* Per account-code: receiving in installments, with auto-pay + split */}
         <div style={{marginTop:12}}>
-          <div style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>📦 ของเข้า / จ่ายเงิน (แบ่งงวดได้)</div>
+          <div style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>📦 {t("ของเข้า / จ่ายเงิน (แบ่งงวดได้)","Incoming / payment (by rounds)")}</div>
           {items.map((it,ii)=>{
             const acc = ACCOUNTS.find(a=>a.code===it.code);
             const ordered = itemOrdered(it), recv = itemReceived(it), remain = itemRemaining(it);
@@ -5091,7 +5097,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                       <div style={{marginTop:6,fontSize:11,color:T.textSecondary}}>
                         💰 วันครบกำหนดจ่าย: <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{payDate||"—"}</span>
                         <span style={{color:T.textMuted}}> ({po.paymentType==="cash"?"เงินสด":po.paymentType==="credit"?`เครดิต ${po.creditDays} วัน`:"ยังไม่ระบุวิธีจ่าย"})</span>
-                        {late && <span style={{color:T.red}}> · ของมาช้า</span>}
+                        {late && <span style={{color:T.red}}> · {t("ของมาช้า","late arrival")}</span>}
                       </div>
                     </div>
                   );
@@ -5102,21 +5108,21 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                   <div style={{height:"100%",width:`${ordered>0?Math.min(recv/ordered*100,100):0}%`,background:remain>0?T.amber:T.green}}/>
                 </div>
                 <div style={{display:"flex",justifyContent:"space-between",marginTop:5,fontSize:11,color:T.textSecondary}}>
-                  <span>ของเข้าแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{fmt(recv)}</b> / {fmt(ordered)}</span>
-                  <span>จ่ายแล้ว <b style={{fontFamily:"'JetBrains Mono',monospace",color:paidAmt>0?T.green:T.textMuted}}>{fmt(paidAmt)}</b></span>
+                  <span>{t("ของเข้าแล้ว","Received")} <b style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{fmt(recv)}</b> / {fmt(ordered)}</span>
+                  <span>{t("จ่ายแล้ว","Paid")} <b style={{fontFamily:"'JetBrains Mono',monospace",color:paidAmt>0?T.green:T.textMuted}}>{fmt(paidAmt)}</b></span>
                 </div>
                 {Math.round(overPlanned*100)>0 && (
                   <div style={{marginTop:8,fontSize:11,color:T.red,background:T.redBg,borderRadius:8,padding:"7px 10px",lineHeight:1.4}}>
-                    ⚠ ยอดรวมทุกงวด <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
+                    ⚠ {t("ยอดรวมทุกงวด","Total all rounds")} <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
                   </div>
                 )}
                 {!locked && ordered>0 && remain>0.001 ? (
                   <button type="button" onClick={()=>splitRound(it.id)} className="btn-ghost"
                     style={{marginTop:8,padding:"6px 12px",fontSize:12,borderColor:T.amber,color:T.amber}}>
-                    ➕ เพิ่มงวดของเข้า — เหลือรับอีก {fmt(remain)}
+                    ➕ {t("เพิ่มงวดของเข้า — เหลือรับอีก","Add round — remaining")} {fmt(remain)}
                   </button>
                 ) : recv>0.001 && remain<=0.001 && ordered>0 ? (
-                  <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ ของเข้าครบตามยอดสั่งแล้ว</div>
+                  <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ {t("ของเข้าครบตามยอดสั่งแล้ว","Fully received")}</div>
                 ) : null}
               </div>
             );
@@ -5125,7 +5131,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
 
         {po.notes && (
           <div style={{padding:"10px 0 0"}}>
-            <div style={{fontSize:12,color:T.textMuted,fontWeight:500,marginBottom:4}}>หมายเหตุ</div>
+            <div style={{fontSize:12,color:T.textMuted,fontWeight:500,marginBottom:4}}>{t("หมายเหตุ","Notes")}</div>
             <div style={{fontSize:13,color:T.textPrimary,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{po.notes}</div>
           </div>
         )}
@@ -5137,7 +5143,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             <button onClick={()=>setHistoryOpen(v=>!v)}
               style={{background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>
               <span style={{transition:"transform 0.15s",transform:historyOpen?"rotate(90deg)":"none",display:"inline-block"}}>▸</span>
-              📜 ประวัติการแก้ไข ({history.length})
+              📜 {t("ประวัติการแก้ไข","Edit history")} ({history.length})
             </button>
             {historyOpen && (
               <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:0}}>
@@ -5171,10 +5177,10 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             disabled={!!overCapItem} className="btn-primary"
             title={overCapItem?`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`:undefined}
             style={{background:overCapItem?"#e2e8f0":T.green,color:overCapItem?"#94a3b8":"#fff",cursor:overCapItem?"not-allowed":"pointer"}}>{overCapItem?"⚠":"💾"} บันทึก</button>
-          {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title="แก้ผู้ขาย / หมวด / ยอดสั่ง">✏️ แก้ไข PO</button>}
+          {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title={t("แก้ผู้ขาย / หมวด / ยอดสั่ง","Edit vendor / category / order")}>✏️ {t("แก้ไข PO","Edit PO")}</button>}
           <button onClick={()=>onDelete(po.id)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
           <div style={{flex:1}}/>
-          <button onClick={onClose} className="btn-ghost">ปิด</button>
+          <button onClick={onClose} className="btn-ghost">{t("ปิด","Close")}</button>
         </div>
       </div>
     </div>
@@ -5188,7 +5194,7 @@ function StatusPicker({ status, onChange, compact, disabled }) {
     <select value={status} disabled={disabled} onClick={e=>e.stopPropagation()} onChange={e=>{ e.stopPropagation(); onChange(e.target.value); }}
       style={{background:STATUS_BG[status],color:STATUS_CLR[status],fontSize:compact?11:12,padding:compact?"3px 8px":"5px 10px",
         borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[status]}40`,cursor:disabled?"not-allowed":"pointer",outline:"none",
-        opacity:disabled?0.65:1}} title={disabled?"รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin":undefined}>
+        opacity:disabled?0.65:1}} title={disabled?t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only"):undefined}>
       {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
     </select>
   );
@@ -5303,23 +5309,23 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ เพิ่ม PO</button>
+        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ {t("เพิ่ม PO","Add PO")}</button>
       </div>
 
       {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📦 รายการของเข้ารายเดือน (แผน + PO จริง)</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📦 {t("รายการของเข้ารายเดือน (แผน + PO จริง)","Monthly incoming (plan + real PO)")}</div>
           <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-            {[["รับแล้ว", T.green, "#eafaf1"], ["ล่าช้า ⚠", T.amber, "#fff6e6"], ["PO รอเข้า", T.textPrimary, "#eef2f7"], ["แผน (มี * ต่อท้าย)", T.red, "#fdecec"]].map(([label, clr, bg]) => (
+            {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
               <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
                 <span style={{ width: 14, height: 14, borderRadius: 4, background: clr, display: "inline-block" }}/>{label}
               </span>
             ))}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-            <SearchInput value={mSearch} onChange={setMSearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260} big/>
-            <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownCodes.length}/{codes.length} รายการ</span>
+            <SearchInput value={mSearch} onChange={setMSearch} placeholder={t("🔍 ค้นหา Acc. Code / ชื่อบัญชี","🔍 Search Acc. Code / account name")} width={260} big/>
+            <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownCodes.length}/{codes.length} {t("รายการ","items")}</span>
           </div>
           <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
             <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
@@ -5402,7 +5408,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
                   <span style={{ background: T.amberBg, color: T.amber, fontWeight: 650, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 ของเข้า {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
                   {pl.supplier?.name && <span style={{ fontSize: 12, color: T.textSecondary }}>· {pl.supplier.name}</span>}
-                  <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} รายการ</span>
+                  <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} {t("รายการ","items")}</span>
                   <span style={{ marginLeft: "auto", textAlign: "right" }}>
                     <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 650, color: T.textPrimary }}>฿{fmt(total)}</span>
                     {total ? usdLine(total, usdRate) : null}
@@ -5513,7 +5519,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const submit = () => {
     // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
     // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
-    if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก"); return; }
+    if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert(t("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก","PO value cannot be negative — please fix before saving")); return; }
     const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
       id: it.id || uid(), code: it.code, takeoff: it.takeoff || "", store: it.store || "", amount: it.amount,
       rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
@@ -5524,16 +5530,16 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         actualDate: r.actualDate || "",
       })),
     }));
-    if (!validItems.length) { alert("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ"); return; }
+    if (!validItems.length) { alert(t("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ","Please select an Account Code and enter at least one value")); return; }
     // กันยอดของเข้าจริงรวมทุกงวดเกินยอดสั่งของแต่ละรายการ (แจ้งเตือน + บันทึกไม่ได้)
     const overItem = validItems.find(it => {
       const o = parseFloat(it.amount)||0; if (!(o>0)) return false;
       const rc = it.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
       return Math.round(rc*100) > Math.round(o*100);
     });
-    if (overItem) { alert(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
+    if (overItem) { alert(t(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`,`⚠ ${overItem.code}: total received across rounds (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) exceeds ordered ${fmt(overItem.amount)} — fix before saving`)); return; }
     // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
-    if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { alert("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก"); return; }
+    if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { alert(t("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก","A real PO needs a PO number before saving")); return; }
     const payload = {
       date: form.date, status: form.status, notes: form.notes || "",
       supplier: { name: form.supplier.name.trim(), poNumber: (form.supplier.poNumber||"").trim() },
@@ -5545,7 +5551,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const prev = editId ? (editingPlan ? plans.find(x=>x.id===editId) : poEntries.find(x=>x.id===editId)) : null;
     const entries = [];
     if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `เปลี่ยนสถานะ: ${prev.status} → ${payload.status}`));
-    entries.push(historyEntry(session, prev ? "edited" : "created", toPlan ? (prev?"แก้ไขแผนของเข้า":"สร้างแผนของเข้า") : (prev?"แก้ไขข้อมูล PO":"สร้างรายการ PO")));
+    entries.push(historyEntry(session, prev ? "edited" : "created", toPlan ? (prev?t("แก้ไขแผนของเข้า","Edited incoming plan"):t("สร้างแผนของเข้า","Created incoming plan")) : (prev?t("แก้ไขข้อมูล PO","Edited PO"):t("สร้างรายการ PO","Created PO"))));
     const withLog = { ...payload, isPlan: toPlan, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
 
     if (editingPlan) {
@@ -5583,11 +5589,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   };
   const changeStatus = (po, newStatus) => {
     if (newStatus === po.status) return;
-    if (!canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin"); return; }
+    if (!canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     // ตั้งเป็น "Paid" → เตือนถ้ายังไม่มีการรับของเลย แล้วให้กรอกวันจ่ายเองก่อน
     if (newStatus === "Paid") {
       const anyReceived = poRounds(po).some(r => roundReceived(r));
-      if (!anyReceived && !window.confirm("PO นี้ยังไม่มีการรับของเลย — ยืนยันว่าจ่ายแล้วจริง?")) return;
+      if (!anyReceived && !window.confirm(t("PO นี้ยังไม่มีการรับของเลย — ยืนยันว่าจ่ายแล้วจริง?","This PO has no received goods yet — confirm it is really paid?"))) return;
       setPayModal({ po, date: po.paidDate || todayStr() });
       return;
     }
@@ -5595,7 +5601,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   };
 
   const openEdit = (p) => {
-    if (!canEditPO(p, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin"); return; }
+    if (!canEditPO(p, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     const P = migratePO(p);
     setForm({
       date: P.date, status: P.status, notes: P.notes || "",
@@ -5632,14 +5638,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const pl = (plans||[]).find(p=>p.id===id);
     const d = pl ? (poRounds(pl).map(r=>r.planDate).filter(Boolean).sort()[0] || pl.date || "") : "";
     const info = pl ? `${d||"(ไม่มีวัน)"}${pl.supplier?.name?` · ${pl.supplier.name}`:""} · ฿${fmt0(poItems(pl).reduce((s,it)=>s+(parseFloat(it.amount)||0),0))}` : "";
-    if (window.confirm(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`)) saveIncomingPlan(plans.filter(pl=>pl.id!==id));
+    if (window.confirm(t(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`,`Delete this incoming plan?${info?`\n\n${info}`:""}\n\n(deletes the "plan" only — real PO unaffected)`))) saveIncomingPlan(plans.filter(pl=>pl.id!==id));
   };
   const deletePO = (id) => {
     const po = poEntries.find(x=>x.id===id);
-    if (po && !canEditPO(po, session)) { alert("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin"); return; }
+    if (po && !canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin","This PO is fully received & paid — Admin only can delete")); return; }
     // ถามยืนยันทุกครั้งก่อนลบ (ลบแล้วย้อนกลับไม่ได้)
     const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ${fmt(poTotal(po))} บาท` : "";
-    if (!window.confirm(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`)) return;
+    if (!window.confirm(t(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`,`Confirm deleting this PO?\n\n${label}\n\n⚠ This cannot be undone`))) return;
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
     if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
   };
@@ -5684,17 +5690,17 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       {payModal && (
         <div onClick={()=>setPayModal(null)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,width:"min(380px,100%)",overflow:"hidden",boxShadow:"0 24px 60px rgba(15,23,42,0.3)"}}>
-            <div style={{background:"linear-gradient(135deg,#065f46,#10b981)",padding:"14px 20px",color:"#fff",fontWeight:650,fontSize:15}}>💵 บันทึกการจ่ายเงิน</div>
+            <div style={{background:"linear-gradient(135deg,#065f46,#10b981)",padding:"14px 20px",color:"#fff",fontWeight:650,fontSize:15}}>💵 {t("บันทึกการจ่ายเงิน","Record payment")}</div>
             <div style={{padding:20,display:"flex",flexDirection:"column",gap:12}}>
               <div style={{fontSize:12,color:T.textSecondary}}>{poSupplierName(payModal.po)} · <b>฿{fmt(poTotal(payModal.po))}</b></div>
               <label style={{fontSize:12,color:T.textSecondary,display:"flex",flexDirection:"column",gap:5}}>
-                วันที่จ่ายเงิน
+                {t("วันที่จ่ายเงิน","Payment date")}
                 <input type="date" value={payModal.date} onChange={e=>setPayModal(m=>({...m,date:e.target.value}))} className="input-base" style={{padding:"8px 10px"}}/>
               </label>
             </div>
             <div style={{display:"flex",justifyContent:"flex-end",gap:10,padding:"14px 20px",borderTop:`1px solid ${T.cardBorder}`}}>
-              <button onClick={()=>setPayModal(null)} className="btn-ghost">ยกเลิก</button>
-              <button onClick={()=>{ if(!payModal.date){alert("เลือกวันที่จ่าย");return;} applyStatus(payModal.po,"Paid",payModal.date); setPayModal(null); }} className="btn-primary" style={{background:T.green}}>บันทึกจ่ายแล้ว</button>
+              <button onClick={()=>setPayModal(null)} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
+              <button onClick={()=>{ if(!payModal.date){alert(t("เลือกวันที่จ่าย","Select a payment date"));return;} applyStatus(payModal.po,"Paid",payModal.date); setPayModal(null); }} className="btn-primary" style={{background:T.green}}>{t("บันทึกจ่ายแล้ว","Save as paid")}</button>
             </div>
           </div>
         </div>
@@ -5715,10 +5721,10 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </div>
         )}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-          <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
-          <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} รายการ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-          <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} รายการ · จ่ายอัตโนมัติ`} color={T.green} icon="✅" accent={T.greenBg}/>
-          <StatCard label="Budget คงเหลือ" value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ใช้ไปแล้ว`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
+          <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t("เดิม + เพิ่มรายเดือนทุกเดือน","Baseline + all monthly additions")} color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} ${t("รายการ","items")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
+          <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} ${t("รายการ","items")} · ${t("จ่ายอัตโนมัติ","auto-paid")}`} color={T.green} icon="✅" accent={T.greenBg}/>
+          <StatCard label={t("Budget คงเหลือ","Budget remaining")} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ${t("ใช้ไปแล้ว","used")}`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
         </div>
 
         {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
@@ -5727,14 +5733,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             <span style={{fontSize:20}}>⚠️</span>
             <div style={{flex:1}}>
               <div style={{fontSize:13,fontWeight:650,color:T.red}}>
-                มีรายการที่ต้องรีบดู
-                {lateIncomingCount>0 && <span> — ของเข้าล่าช้า {lateIncomingCount} รายการ</span>}
+                {t("มีรายการที่ต้องรีบดู","Items that need attention")}
+                {lateIncomingCount>0 && <span> — {t("ของเข้าล่าช้า","late incoming")} {lateIncomingCount} {t("รายการ","items")}</span>}
                 {lateIncomingCount>0 && latePaymentCount>0 && <span>,</span>}
-                {latePaymentCount>0 && <span> จ่ายเงินเกินกำหนด {latePaymentCount} รายการ</span>}
+                {latePaymentCount>0 && <span> {t("จ่ายเงินเกินกำหนด","overdue payments")} {latePaymentCount} {t("รายการ","items")}</span>}
               </div>
-              <div style={{fontSize:11,color:"#b91c1c",marginTop:1}}>คลิกเพื่อดูรายละเอียดทั้งหมด</div>
+              <div style={{fontSize:11,color:"#b91c1c",marginTop:1}}>{t("คลิกเพื่อดูรายละเอียดทั้งหมด","Click to see all details")}</div>
             </div>
-            <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>ดูรายการ →</span>
+            <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>{t("ดูรายการ","View")} →</span>
           </div>
         )}
 
@@ -5742,14 +5748,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:28,maxWidth:680,animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
               <div>
-                <div style={{fontSize:15,fontWeight:650,color:T.textPrimary}}>{(editId||editingPlan) ? (form.isPlan?"แก้ไขแผนของเข้า":"บันทึกเป็น PO จริง") : (form.isPlan?"เพิ่มแผนของเข้า":"เพิ่ม PO ใหม่")}</div>
-                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>เลือกด้านล่างว่าจะบันทึกเป็น PO จริง หรือ แผนของเข้า (ฟอร์มเดียวกัน)</div>
+                <div style={{fontSize:15,fontWeight:650,color:T.textPrimary}}>{(editId||editingPlan) ? (form.isPlan?t("แก้ไขแผนของเข้า","Edit incoming plan"):t("บันทึกเป็น PO จริง","Save as real PO")) : (form.isPlan?t("เพิ่มแผนของเข้า","Add incoming plan"):t("เพิ่ม PO ใหม่","Add new PO"))}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>{t("เลือกด้านล่างว่าจะบันทึกเป็น PO จริง หรือ แผนของเข้า (ฟอร์มเดียวกัน)","Choose below: save as a real PO or an incoming plan (same form)")}</div>
               </div>
               <button onClick={closeForm} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
             </div>
             {/* สวิตช์: PO จริง / แผนของเข้า — ติ๊กแผนจากลิสต์แผนแล้วเปลี่ยนเป็น PO = แปลงเป็น PO จริง */}
             <div style={{display:"flex",gap:6,marginBottom:18,background:T.bg,padding:4,borderRadius:10,width:"fit-content"}}>
-              {[["🧾 PO จริง",false,T.blue],["📅 แผนของเข้า",true,T.amber]].map(([label,val,clr])=>(
+              {[[t("🧾 PO จริง","🧾 Real PO"),false,T.blue],[t("📅 แผนของเข้า","📅 Incoming plan"),true,T.amber]].map(([label,val,clr])=>(
                 <button key={label} onClick={()=>setForm(f=>({...f,isPlan:val}))}
                   style={{border:"none",borderRadius:8,padding:"7px 18px",fontSize:13,fontWeight:600,cursor:"pointer",
                     background: form.isPlan===val ? clr : "transparent", color: form.isPlan===val ? "#fff" : T.textSecondary}}>{label}</button>
@@ -5757,11 +5763,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
-                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วันที่สั่ง PO</span>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("วันที่สั่ง PO","PO order date")}</span>
                 <input type="date" value={form.date} onChange={e=>setForm(f=>({...f, date:e.target.value}))} className="input-base"/>
               </label>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
-                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>สถานะ</span>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("สถานะ","Status")}</span>
                 <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} className="input-base">
                   {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
@@ -5769,18 +5775,18 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
               {/* Supplier — exactly one vendor per PO. */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier · ชื่อไม่บังคับ{!form.isPlan && <span style={{color:T.red}}> · เลข PO บังคับ *</span>}</span>
+                <span style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier · {t("ชื่อไม่บังคับ","name optional")}{!form.isPlan && <span style={{color:T.red}}> · {t("เลข PO บังคับ","PO no. required")} *</span>}</span>
               </div>
               <div style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                <input placeholder="ชื่อ Supplier (ถ้ามี)" value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
-                <input placeholder={form.isPlan ? "เลข PO (ถ้ามี)" : "เลข PO *"} value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"
+                <input placeholder={t("ชื่อ Supplier (ถ้ามี)","Supplier name (optional)")} value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
+                <input placeholder={form.isPlan ? t("เลข PO (ถ้ามี)","PO no. (optional)") : t("เลข PO *","PO no. *")} value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"
                   style={!form.isPlan && !(form.supplier.poNumber||"").trim() ? {borderColor:T.red, background:T.redBg} : undefined}/>
               </div>
 
               {/* Account-code line items — each carries its own store amount and
                   its % of the net-to-purchase (budget − store). */}
               <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
-                <span style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 หมวดต้นทุน * (กรอกของใน store และ % ของยอดสั่ง)</span>
+                <span style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 {t("หมวดต้นทุน * (กรอกของใน store และ % ของยอดสั่ง)","Cost items * (enter store qty and % of order)")}</span>
               </div>
               <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:12}}>
                 {form.items.map((it)=>{
@@ -5794,7 +5800,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
                     <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:12}}>
                       <select value={it.code} onChange={e=>updateItemRow(it.id,"code",e.target.value)} className="input-base">
-                        <option value="">— เลือก Account Code —</option>
+                        <option value="">{t("— เลือก Account Code —","— Select Account Code —")}</option>
                         {ACCOUNTS.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
                       </select>
                       <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
@@ -5803,15 +5809,15 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                     {/* แถวบน: Take off (กรอกเอง) · store · ต้องสั่งสุทธิ (อ่านอย่างเดียว) */}
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>Take off <span style={{color:T.textMuted,fontWeight:400}}>(กรอกเอง)</span></span>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>Take off <span style={{color:T.textMuted,fontWeight:400}}>({t("กรอกเอง","manual")})</span></span>
                         <MoneyInput value={it.takeoff} onChange={v=>updateItemRow(it.id,"takeoff",v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>มีใน store</span>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("มีใน store","In store")}</span>
                         <MoneyInput value={it.store} onChange={v=>updateItemRow(it.id,"store",v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:net<0?T.red:T.amber,fontWeight:500}}>ต้องสั่งสุทธิ {net<0?"(เกิน)":""}</span>
+                        <span style={{fontSize:11,color:net<0?T.red:T.amber,fontWeight:500}}>{t("ต้องสั่งสุทธิ","Net to order")} {net<0?t("(เกิน)","(over)"):""}</span>
                         <input className="input-base" readOnly tabIndex={-1} value={net<0?`-${fmtMoneyInput(Math.abs(net))}`:fmtMoneyInput(net)}
                           style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:net<0?T.redBg:T.amberBg,color:net<0?T.red:T.amber,borderColor:"transparent"}}/>
                       </label>
@@ -5819,11 +5825,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                     {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>มูลค่า PO นี้ (THB)</span>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("มูลค่า PO นี้ (THB)","This PO value (THB)")}</span>
                         <MoneyInput value={it.amount} onChange={v=>setItemAmount(it.id,v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>% ของยอดสั่ง (กรอกเอง)</span>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("% ของยอดสั่ง (กรอกเอง)","% of order (manual)")}</span>
                         <div style={{position:"relative",display:"flex",alignItems:"center"}}>
                           <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)}
                             className="input-base" style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",flex:1,paddingRight:26}}/>
@@ -5831,61 +5837,61 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         </div>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>แผนของเข้า (งวดแรก)</span>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("แผนของเข้า (งวดแรก)","Incoming plan (1st round)")}</span>
                         <input type="date" value={it.rounds?.[0]?.planDate||""} onChange={e=>updateItemPlan(it.id,"planDate",e.target.value)} className="input-base"/>
                       </label>
                     </div>
                     {it.code && ((it.pct??"")!=="" || amt>0) && (
                       <div style={{marginTop:10,fontSize:11,color:T.textSecondary}}>
-                        % ของยอดสั่ง PO นี้: <b style={{color:(parseFloat(it.pct)||0)>100?T.red:T.textPrimary,fontSize:12}}>{(it.pct??"")!=="" ? `${it.pct}%` : "—"}</b> <span style={{color:T.textMuted}}>(ที่กรอกเอง)</span>
-                        {amt>0 && <span style={{color:T.textMuted}}> · ยอดจริง {fmt(amt)} = {budget>0?Math.round(amt/budget*100):0}% ของงบรวม</span>}
+                        {t("% ของยอดสั่ง PO นี้","% of this PO order")}: <b style={{color:(parseFloat(it.pct)||0)>100?T.red:T.textPrimary,fontSize:12}}>{(it.pct??"")!=="" ? `${it.pct}%` : "—"}</b> <span style={{color:T.textMuted}}>({t("ที่กรอกเอง","manual")})</span>
+                        {amt>0 && <span style={{color:T.textMuted}}> · {t("ยอดจริง","actual")} {fmt(amt)} = {budget>0?Math.round(amt/budget*100):0}% {t("ของงบรวม","of total budget")}</span>}
                       </div>
                     )}
                   </div>
                   );
                 })}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ เพิ่ม Account Code</button>
-                  {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>รวม: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
+                  <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ {t("เพิ่ม Account Code","Add Account Code")}</button>
+                  {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>{t("รวม","Total")}: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
                 </div>
               </div>
 
               <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
-                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>วิธีจ่ายเงิน</span>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("วิธีจ่ายเงิน","Payment method")}</span>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                   <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"cash"}))}
                     style={{flex:"1 1 160px",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="cash"?T.green:T.cardBorder}`,background:form.paymentType==="cash"?T.greenBg:T.card,color:form.paymentType==="cash"?T.green:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
-                    💵 เงินสด <span style={{fontWeight:450,fontSize:11,opacity:0.8}}>(จ่ายวันของเข้า)</span>
+                    💵 {t("เงินสด","Cash")} <span style={{fontWeight:450,fontSize:11,opacity:0.8}}>({t("จ่ายวันของเข้า","pay on arrival")})</span>
                   </button>
                   <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"credit",creditDays:f.creditDays||DEFAULT_CREDIT_DAYS}))}
                     style={{flex:"1 1 160px",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="credit"?T.blue:T.cardBorder}`,background:form.paymentType==="credit"?T.blueLight:T.card,color:form.paymentType==="credit"?T.blue:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
-                    💳 เครดิต
+                    💳 {t("เครดิต","Credit")}
                   </button>
                   {form.paymentType==="credit" && (
                     <span style={{display:"flex",alignItems:"center",gap:6}}>
                       <input type="number" value={form.creditDays} onChange={e=>setForm(f=>({...f,creditDays:e.target.value}))} className="input-base" style={{width:76}}/>
-                      <span style={{fontSize:12,color:T.textSecondary}}>วัน</span>
+                      <span style={{fontSize:12,color:T.textSecondary}}>{t("วัน","days")}</span>
                     </span>
                   )}
                 </div>
                 {form.paymentType && (
-                  <span style={{fontSize:11,color:T.blue}}>วันครบกำหนดจ่ายคำนวณอัตโนมัติจาก "วันของเข้าจริง" ของแต่ละงวด{form.paymentType==="credit"?` + ${form.creditDays||DEFAULT_CREDIT_DAYS} วัน`:""} — จ่ายอัตโนมัติเมื่อถึงกำหนด</span>
+                  <span style={{fontSize:11,color:T.blue}}>{t("วันครบกำหนดจ่ายคำนวณอัตโนมัติจาก \"วันของเข้าจริง\" ของแต่ละงวด","Due date is auto-calculated from each round's actual arrival date")}{form.paymentType==="credit"?` + ${form.creditDays||DEFAULT_CREDIT_DAYS} ${t("วัน","days")}`:""} — {t("จ่ายอัตโนมัติเมื่อถึงกำหนด","auto-paid when due")}</span>
                 )}
               </label>
 
               <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
-                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>หมายเหตุ</span>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("หมายเหตุ","Notes")}</span>
                 <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} className="input-base" style={{resize:"vertical"}}/>
               </label>
             </div>
             {/* เว้นที่ด้านล่างให้พ้นแถบ "ย้อนกลับ/ทำซ้ำ" ที่ลอยมุมซ้ายล่าง ไม่ให้ทับปุ่ม */}
             <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap",alignItems:"center"}}>
-              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editingPlan && !form.isPlan ? "แปลงเป็น PO จริง" : form.isPlan ? "บันทึกแผน" : (editId?"บันทึก":"เพิ่ม PO")}</button>
-              <button onClick={closeForm} className="btn-ghost">ยกเลิก</button>
+              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editingPlan && !form.isPlan ? t("แปลงเป็น PO จริง","Convert to real PO") : form.isPlan ? t("บันทึกแผน","Save plan") : (editId?t("บันทึก","Save"):t("เพิ่ม PO","Add PO"))}</button>
+              <button onClick={closeForm} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
               {editId && (
                 <button onClick={()=>{ if (editingPlan) { deletePlan(editId); closeForm(); } else deletePO(editId); }}
                   style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,color:T.red,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-                  🗑 {editingPlan ? "ลบแผนนี้" : "ลบ PO นี้"}
+                  🗑 {editingPlan ? t("ลบแผนนี้","Delete this plan") : t("ลบ PO นี้","Delete this PO")}
                 </button>
               )}
             </div>
@@ -5895,7 +5901,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPO} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
             {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
             <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
-              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14}}>🚚 ติดตามของเข้า / จ่ายเงิน</div>
+              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14}}>🚚 {t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
               <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
                 onStatusChange={changeStatus} session={session} usdRate={usdRate}
                 tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
@@ -5905,7 +5911,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-              <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account, supplier, PO..." width={240}/>
+              <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account, supplier, PO...","🔍 Search Account, supplier, PO...")} width={240}/>
               <div style={{display:"flex",gap:5,flex:1,flexWrap:"wrap"}}>
                 {["All",...PO_STATUS].map(s=>(
                   <button key={s} onClick={()=>setFilter(s)}
@@ -5919,17 +5925,17 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                     setCollapsed(next);
                   }}
                   className="btn-ghost" style={{padding:"7px 14px",fontSize:12}}>
-                  {Object.keys(groupTotals).length>0 && Object.keys(groupTotals).every(c=>collapsed[c]) ? "⬇️ ขยายทั้งหมด" : "⬆️ ย่อทั้งหมด"}
+                  {Object.keys(groupTotals).length>0 && Object.keys(groupTotals).every(c=>collapsed[c]) ? `⬇️ ${t("ขยายทั้งหมด","Expand all")}` : `⬆️ ${t("ย่อทั้งหมด","Collapse all")}`}
                 </button>
               )}
-              <button onClick={openNewPO} className="btn-primary" style={{background:T.amber}}>+ เพิ่ม PO</button>
+              <button onClick={openNewPO} className="btn-primary" style={{background:T.amber}}>+ {t("เพิ่ม PO","Add PO")}</button>
             </div>
 
             {filtered.length===0 ? (
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
                 <div style={{fontSize:32,marginBottom:12}}>📋</div>
-                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{poEntries.length===0?"ยังไม่มีรายการ":"ไม่พบรายการที่ตรงเงื่อนไข"}</div>
-                <div style={{fontSize:12}}>{poEntries.length===0?'กด "+ เพิ่ม PO" เพื่อเริ่มต้น':"ลองล้างตัวกรอง หรือคำค้นหา"}</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{poEntries.length===0?t("ยังไม่มีรายการ","No items yet"):t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
+                <div style={{fontSize:12}}>{poEntries.length===0?t('กด "+ เพิ่ม PO" เพื่อเริ่มต้น','Press "+ Add PO" to start'):t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
               </div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -5950,17 +5956,17 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{code}</span>
                         <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                         <span style={{flex:1}}/>
-                        <span style={{fontSize:11,color:T.textMuted}}>งบ <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
-                        <span style={{fontSize:11,color:T.textMuted}}>ต้องสั่งเพิ่ม <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
-                        <span style={{color:T.textMuted,fontSize:11}}>{rows.length} รายการ</span>
+                        <span style={{fontSize:11,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
+                        <span style={{fontSize:11,color:T.textMuted}}>{t("ต้องสั่งเพิ่ม","To order")} <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
+                        <span style={{color:T.textMuted,fontSize:11}}>{rows.length} {t("รายการ","items")}</span>
                         <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
                       </div>
                       {!isCollapsed && (
                         <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
-                              {["วันเปิด PO","Supplier","PO No.","มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ / จ่ายเงิน","สถานะ",""].map(h=>(
-                                <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                              {[["วันเปิด PO","Open date"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ / จ่ายเงิน","Delivery / Payment"],["สถานะ","Status"],["",""]].map(([h,he],hi)=>(
+                                <th key={hi} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
                               ))}
                             </tr>
                           </thead>
@@ -5982,7 +5988,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                                 <td style={{padding:"10px 16px",textAlign:"right"}}>
                                   <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                                   {usdLine(parseFloat(item.amount)||0, usdRate)}
-                                  {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>จาก {poItems(p).length} รหัส · รวม {fmt(poTotal(p))}</div>}
+                                  {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("จาก","from")} {poItems(p).length} {t("รหัส · รวม","codes · total")} {fmt(poTotal(p))}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
                                   {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
@@ -5992,24 +5998,24 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                                 </td>
                                 <td style={{padding:"10px 16px"}}>
                                   <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                                    <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{INCOMING_LABEL[inc]}</span>
+                                    <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{incLabel(inc)}</span>
                                     {p.status!=="Paid" && (
-                                      <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_LABEL[pay]}</span>
+                                      <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{payLabel(pay)}</span>
                                     )}
                                     {p.paymentType && (
-                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_TYPE_ICON[p.paymentType]} {paymentTypeLabel(p)}</span>
+                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_TYPE_ICON[p.paymentType]} {payTypeLabelT(p)}</span>
                                     )}
                                   </div>
                                 </td>
                                 <td style={{padding:"10px 16px"}}>
                                   <div style={{display:"flex",alignItems:"center",gap:4}}>
                                     <StatusPicker status={p.status} onChange={s=>changeStatus(p,s)} disabled={locked} compact/>
-                                    {locked && <span title="รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin" style={{fontSize:12}}>🔒</span>}
+                                    {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
                                   </div>
-                                  {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
+                                  {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
                                 </td>
                                 <td style={{padding:"10px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข (ลบได้ในหน้านี้)"}
+                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข (ลบได้ในหน้านี้)","Edit (delete available here)")}
                                     style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
                                 </td>
                               </tr>
@@ -6021,7 +6027,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   );
                 })}
                 <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
-                  <span>{filtered.length} รายการทั้งหมด</span>
+                  <span>{filtered.length} {t("รายการทั้งหมด","items total")}</span>
                   <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
                 </div>
               </div>
@@ -6042,7 +6048,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
   const [groupBy, setGroupBy] = useState("code"); // "code" = จัดกลุ่มตาม Acc. Code · "po" = จัดกลุ่มตาม PO
-  const STATUS_FILTERS = [["all","ทั้งหมด"],["pending","รอของเข้า"],["late","ล่าช้า"],["received","รับแล้ว"],["payPending","รอจ่าย"],["paid","จ่ายแล้ว"]];
+  const STATUS_FILTERS = [["all","ทั้งหมด","All"],["pending","รอของเข้า","Awaiting"],["late","ล่าช้า","Late"],["received","รับแล้ว","Received"],["payPending","รอจ่าย","Awaiting pay"],["paid","จ่ายแล้ว","Paid"]];
   const matchesStatus = (p) => {
     const inc = incomingStatus(p), pay = paymentStatus(p);
     switch (statusFilter) {
@@ -6131,7 +6137,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
               {multiSupplier && <span style={{fontSize:12,color:T.textSecondary,fontWeight:600,whiteSpace:"nowrap"}}>{d.supplierName||"—"}:</span>}
               <DateCell value={d.plan} lateTint={st==="late"}/>
               <span style={{color:T.textMuted,fontSize:12}}>→</span>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||"รอ"}</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","wait")}</span>
               {(() => {
                 const received = st === "received";   // รับจริงแล้ว (วันรับมาถึงแล้ว) → เขียว
                 // แสดง "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ให้ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
@@ -6177,7 +6183,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
         <td style={{padding:"9px 16px",textAlign:"right"}}>
           <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
           {usdLine(parseFloat(item.amount)||0, usdRate)}
-          {!showAcc && splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
+          {!showAcc && splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("รวม","total")} {fmt(poTotal(p))}</div>}
         </td>
         <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
           {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
@@ -6190,25 +6196,25 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           <DateCell value={poNextDueDate(pItem)} lateTint={false}/>
           {p.paymentType && (
             <div style={{marginTop:3}}>
-              <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${paymentTypeLabel(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+              <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${payTypeLabelT(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
             </div>
           )}
         </td>
         <td style={{padding:"9px 16px"}}>
           <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
-            <Badge text={INCOMING_LABEL[inc]} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
-            <Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+            <Badge text={incLabel(inc)} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+            <Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
           </div>
         </td>
         <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",alignItems:"center",gap:4}}>
             <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
-            {locked && <span title="รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin" style={{fontSize:12}}>🔒</span>}
+            {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
           </div>
-          {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)}</div>}
+          {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
         </td>
         <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-          <button onClick={()=>onEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข"}
+          <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
             style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
         </td>
       </tr>
@@ -6221,12 +6227,12 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
         <th style={thStyle("left")}>Acc. Code</th>
         <th colSpan={2} style={thStyle("left")}>Account Name</th>
       </>) : (<>
-        <th style={thStyle("left")}>วันเปิด PO</th>
+        <th style={thStyle("left")}>{t("วันเปิด PO","Open date")}</th>
         <th style={thStyle("left")}>Supplier</th>
         <th style={thStyle("left")}>PO No.</th>
       </>)}
-      {["มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ","แผนจ่ายเงิน","ติดตาม","สถานะ",""].map((h,ci)=>(
-        <th key={ci} style={thStyle(h==="มูลค่า (THB)"?"right":"left")}>{h}</th>
+      {[["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ","Delivery"],["แผนจ่ายเงิน","Payment plan"],["ติดตาม","Track"],["สถานะ","Status"],["",""]].map(([h,he],ci)=>(
+        <th key={ci} style={thStyle(h==="มูลค่า (THB)"?"right":"left")}>{t(h,he)}</th>
       ))}
     </tr>
   );
@@ -6234,27 +6240,27 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   return (
     <div>
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Acc. Code, supplier, PO..." width={240}/>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Acc. Code, supplier, PO...","🔍 Search Acc. Code, supplier, PO...")} width={240}/>
         <button onClick={()=>setOnlyIssues(v=>!v)}
           style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
-          ⚠️ แสดงเฉพาะรายการล่าช้า
+          ⚠️ {t("แสดงเฉพาะรายการล่าช้า","Show late only")}
         </button>
         <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
           style={{padding:"7px 12px",border:`1.5px solid ${statusFilter!=="all"?T.amber:T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:statusFilter!=="all"?T.amber:T.textSecondary,background:"#fff",cursor:"pointer"}}>
-          {STATUS_FILTERS.filter(([k])=>k!=="late").map(([k,l])=><option key={k} value={k}>{l}</option>)}
+          {STATUS_FILTERS.filter(([k])=>k!=="late").map(([k,l,e])=><option key={k} value={k}>{t(l,e)}</option>)}
         </select>
         <select value={groupBy} onChange={e=>{ setGroupBy(e.target.value); setCollapsed(new Set()); }}
           style={{padding:"7px 12px",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:T.textSecondary,background:"#fff",cursor:"pointer"}}>
-          <option value="code">จัดกลุ่ม: ตาม Acc. Code</option>
-          <option value="po">จัดกลุ่ม: ตาม PO</option>
+          <option value="code">{t("จัดกลุ่ม: ตาม Acc. Code","Group: by Acc. Code")}</option>
+          <option value="po">{t("จัดกลุ่ม: ตาม PO","Group: by PO")}</option>
         </select>
         <button onClick={()=>setCollapsed(new Set(allGroupKeys))}
           style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
-          ▲ ย่อทั้งหมด
+          ▲ {t("ย่อทั้งหมด","Collapse all")}
         </button>
         <button onClick={()=>setCollapsed(new Set())}
           style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
-          ▼ ขยายทั้งหมด
+          ▼ {t("ขยายทั้งหมด","Expand all")}
         </button>
         <div style={{flex:1}}/>
       </div>
@@ -6262,8 +6268,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
       {filteredEntries.length===0 ? (
         <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
           <div style={{fontSize:32,marginBottom:12}}>🚚</div>
-          <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>ไม่พบรายการที่ตรงเงื่อนไข</div>
-          <div style={{fontSize:13}}>ลองล้างตัวกรอง หรือคำค้นหา</div>
+          <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
+          <div style={{fontSize:13}}>{t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
         </div>
       ) : groupBy==="po" ? (
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -6278,12 +6284,12 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                   <span style={{fontSize:12,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
                   <span style={{color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{poNumbersLabel(p)}</span>
                   <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{poSupplierName(p)}</span>
-                  <span style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>เปิด {p.date}</span>
+                  <span style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>{t("เปิด","Opened")} {p.date}</span>
                   <span style={{flex:1}}/>
-                  <span style={{fontSize:12,color:T.textMuted}}>มูลค่า <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(poTotal(p))}</b></span>
-                  <span style={{color:T.textMuted,fontSize:12}}>{items.length} รายการ</span>
-                  <Badge text={INCOMING_LABEL[inc]} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
-                  <Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("มูลค่า","Value")} <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(poTotal(p))}</b></span>
+                  <span style={{color:T.textMuted,fontSize:12}}>{items.length} {t("รายการ","items")}</span>
+                  <Badge text={incLabel(inc)} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+                  <Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
                 </div>
                 {!isCollapsed && (
                 <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
@@ -6316,17 +6322,17 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                   <span style={{color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{code}</span>
                   <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                   <span style={{flex:1}}/>
-                  <span style={{fontSize:12,color:T.textMuted}}>งบ <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
-                  <span style={{fontSize:12,color:T.textMuted}}>ต้องสั่งเพิ่ม <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("ต้องสั่งเพิ่ม","To order")} <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
                   <span style={{color:T.textMuted,fontSize:12}}>{rows.length} PO</span>
-                  {lateCount>0 && <Badge text={`⚠️ ${lateCount} ล่าช้า`} clr={T.red} bg={T.redBg}/>}
+                  {lateCount>0 && <Badge text={`⚠️ ${lateCount} ${t("ล่าช้า","late")}`} clr={T.red} bg={T.redBg}/>}
                 </div>
                 {!isCollapsed && (
                 <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                   <thead>
                     <tr>
-                      {["วันเปิด PO","Supplier","PO No.","มูลค่า (THB)","วันรับของ","วันจ่าย","การส่งของ","แผนจ่ายเงิน","ติดตาม","สถานะ",""].map(h=>(
-                        <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                      {[["วันเปิด PO","Open date"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ","Delivery"],["แผนจ่ายเงิน","Payment plan"],["ติดตาม","Track"],["สถานะ","Status"],["",""]].map(([h,he])=>(
+                        <th key={h||"x"} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
                       ))}
                     </tr>
                   </thead>
@@ -6350,7 +6356,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                           <td style={{padding:"9px 16px",textAlign:"right"}}>
                             <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
                             {usdLine(parseFloat(item.amount)||0, usdRate)}
-                            {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>รวม {fmt(poTotal(p))}</div>}
+                            {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("รวม","total")} {fmt(poTotal(p))}</div>}
                           </td>
                           <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
                             {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
@@ -6363,25 +6369,25 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                             <DateCell value={poNextDueDate(pItem)} lateTint={false}/>
                             {p.paymentType && (
                               <div style={{marginTop:3}}>
-                                <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${paymentTypeLabel(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+                                <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${payTypeLabelT(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
                               </div>
                             )}
                           </td>
                           <td style={{padding:"9px 16px"}}>
                             <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
-                              <Badge text={INCOMING_LABEL[inc]} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
-                              <Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+                              <Badge text={incLabel(inc)} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+                              <Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
                             </div>
                           </td>
                           <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
                             <div style={{display:"flex",alignItems:"center",gap:4}}>
                               <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
-                              {locked && <span title="รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin" style={{fontSize:12}}>🔒</span>}
+                              {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
                             </div>
-                            {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>อัปเดต {relativeTime(poLastUpdate(p).at)}</div>}
+                            {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
                           </td>
                           <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                            <button onClick={()=>onEdit(p)} disabled={locked} title={locked?"แก้ไขได้เฉพาะ Admin":"แก้ไข"}
+                            <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
                               style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
                           </td>
                         </tr>
@@ -6535,27 +6541,27 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   return (
     <div>
       <div style={{ fontSize:12, color: T.textMuted, marginBottom: 8 }}>
-        โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)
+        {t("โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)","Only months with data · Balance Cost = Budget − Stock − PO − Plan (real remaining to order) · Incoming = Received(green) + PO awaiting(black) + Plan(red) · Total PO = ordered · PO Balance = Budget − Stock − Total PO (plan excluded)")}
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-        {[["รับแล้ว", T.green, "#eafaf1"], ["ล่าช้า ⚠", T.amber, "#fff6e6"], ["PO รอเข้า", T.textPrimary, "#eef2f7"], ["แผน (มี * ต่อท้าย)", T.red, "#fdecec"]].map(([label, clr, bg]) => (
+        {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
           <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
             <span style={{ width: 14, height: 14, borderRadius: 4, background: clr, display: "inline-block" }}/>{label}
           </span>
         ))}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-        <SearchInput value={aSearch} onChange={setASearch} placeholder="🔍 ค้นหา Acc. Code / ชื่อบัญชี" width={260} big/>
-        <span style={{ fontSize: 11, color: T.textMuted }}>คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง {shownRows.length}/{rows.length} รายการ</span>
+        <SearchInput value={aSearch} onChange={setASearch} placeholder={t("🔍 ค้นหา Acc. Code / ชื่อบัญชี","🔍 Search Acc. Code / account name")} width={260} big/>
+        <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownRows.length}/{rows.length} {t("รายการ","items")}</span>
       </div>
       <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
         <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
           <thead>
             <tr>
-              <th colSpan={6} style={{ ...hCell("#eef2f7"), textAlign: "left" }}>ต้นทุน / งบประมาณ</th>
-              <th colSpan={mgM.length + 1} style={hCell(bMg)}>📦 ของเข้า (รับ/PO/แผน)</th>
-              <th colSpan={payM.length + 1} style={hCell(bPy)}>💰 แผนจ่ายเงิน</th>
-              <th colSpan={2} style={hCell(bPO)}>สรุป PO</th>
+              <th colSpan={6} style={{ ...hCell("#eef2f7"), textAlign: "left" }}>{t("ต้นทุน / งบประมาณ","Cost / Budget")}</th>
+              <th colSpan={mgM.length + 1} style={hCell(bMg)}>📦 {t("ของเข้า (รับ/PO/แผน)","Incoming (Recv/PO/Plan)")}</th>
+              <th colSpan={payM.length + 1} style={hCell(bPy)}>💰 {t("แผนจ่ายเงิน","Payment plan")}</th>
+              <th colSpan={2} style={hCell(bPO)}>{t("สรุป PO","PO summary")}</th>
             </tr>
             <tr>
               <th onClick={()=>toggleSort("code")}      style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
@@ -6590,7 +6596,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
               </tr>
             ))}
             {shownRows.length === 0 && (
-              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={mgM.length + payM.length + 10}>{rows.length === 0 ? "— ยังไม่มีข้อมูล —" : "— ไม่พบรายการที่ตรงกับการค้นหา —"}</td></tr>
+              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={mgM.length + payM.length + 10}>{rows.length === 0 ? t("— ยังไม่มีข้อมูล —","— No data —") : t("— ไม่พบรายการที่ตรงกับการค้นหา —","— No matches —")}</td></tr>
             )}
           </tbody>
           {shownRows.length > 0 && (
@@ -6767,7 +6773,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
     const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
     const sum    = cash+credit;
     const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รวมยอดจ่ายจริง (รองรับจ่ายบางส่วน)
-    return { mk, label: mk==="9999-99"?"ยังไม่ระบุวันจ่าย":monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
+    return { mk, label: mk==="9999-99"?t("ยังไม่ระบุวันจ่าย","No pay date"):monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
   });
   // ค้นหาในหน้าแผนจ่าย: กรองงวดตาม Supplier/PO No./Acc/วิธีจ่าย/วันครบกำหนด แล้วคิดยอดใหม่ต่อเดือน
   const pq = planSearch.trim().toLowerCase();
@@ -6826,7 +6832,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:650,minWidth:14}}>#{i+1}</span>}
               <DateCell value={d.plan} lateTint={st==="late"}/>
               <span style={{color:T.textMuted,fontSize:11}}>→</span>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||"รอ"}</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","wait")}</span>
             </div>
           );
         })}
@@ -6850,8 +6856,8 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
         </div>
         {/* คำอธิบายสี (legend) */}
         <div style={{display:"flex",flexWrap:"wrap",gap:16,marginBottom:20,fontSize:11,color:T.textMuted,alignItems:"center"}}>
-          <span style={{fontWeight:650,color:T.textSecondary}}>คำอธิบายสี:</span>
-          {[[T.green,"ปกติ · ใช้งบ <80% · จ่ายแล้ว"],[T.amber,"เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย"],[T.red,"เกินงบ · เกินกำหนดจ่าย"]].map(([c,t])=>(
+          <span style={{fontWeight:650,color:T.textSecondary}}>{t("คำอธิบายสี","Colors")}:</span>
+          {[[T.green,t("ปกติ · ใช้งบ <80% · จ่ายแล้ว","Normal · <80% used · paid")],[T.amber,t("เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย","Watch · 80–100% · awaiting")],[T.red,t("เกินงบ · เกินกำหนดจ่าย","Over · overdue")]].map(([c,t])=>(
             <span key={t} style={{display:"inline-flex",alignItems:"center",gap:6}}>
               <span style={{width:11,height:11,borderRadius:3,background:c,display:"inline-block"}}/>{t}
             </span>
@@ -6860,36 +6866,36 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
 
         {/* 🔔 แจ้งเตือนยอดต้องจ่ายเดือนหน้า — เห็นทุกแท็บ กดแล้วไปหน้าแผนจ่าย */}
         {(dueThisMonth>0 || dueNextMonth>0) && (
-          <div onClick={()=>goView("plan")} title="ดูรายละเอียดในหน้าแผนจ่าย"
+          <div onClick={()=>goView("plan")} title={t("ดูรายละเอียดในหน้าแผนจ่าย","See details in payment plan")}
             style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
               background:"linear-gradient(90deg,#fffbeb,#fff)",border:`1px solid ${T.amber}`,borderLeft:`5px solid ${T.amber}`,
               borderRadius:12,padding:"12px 16px",marginBottom:20}}>
             <span style={{fontSize:22,lineHeight:1}}>🔔</span>
-            <span style={{fontSize:13,color:T.textSecondary,fontWeight:650}}>เตรียมเงินจ่าย</span>
+            <span style={{fontSize:13,color:T.textSecondary,fontWeight:650}}>{t("เตรียมเงินจ่าย","Cash to prepare")}</span>
             {/* เดือนนี้ */}
             <div style={{background:T.redBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
-              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>ครบกำหนดเดือนนี้ · {monthShortLabel(thisMonthKey)}</div>
+              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("ครบกำหนดเดือนนี้","Due this month")} · {monthShortLabel(thisMonthKey)}</div>
               <div style={{fontSize:18,fontWeight:700,color:T.red,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueThisMonth)}</div>
               {usdLine(dueThisMonth, usdRate)}
             </div>
             {/* เดือนหน้า */}
             <div style={{background:T.amberBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
-              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เตรียมเดือนหน้า · {monthShortLabel(nextMonthKey)}</div>
+              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เตรียมเดือนหน้า","Next month")} · {monthShortLabel(nextMonthKey)}</div>
               <div style={{fontSize:18,fontWeight:700,color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueNextMonth)}</div>
               {usdLine(dueNextMonth, usdRate)}
             </div>
             <div style={{flex:1}}/>
-            <span style={{fontSize:12,color:T.amber,fontWeight:650,whiteSpace:"nowrap"}}>ดูแผนจ่าย →</span>
+            <span style={{fontSize:12,color:T.amber,fontWeight:650,whiteSpace:"nowrap"}}>{t("ดูแผนจ่าย","Payment plan")} →</span>
           </div>
         )}
 
         {view==="dashboard" ? (
           <>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-              <StatCard label="งบประมาณ (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub="เดิม + เพิ่มรายเดือนทุกเดือน" color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="ผูกพันแล้ว (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${pct.toFixed(1)}% ของงบ`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label="วางบิลแล้ว" value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate} sub="รอจ่าย + จ่ายแล้ว" color={T.purple} icon="🧾" accent={T.purpleBg}/>
-              <StatCard label="ชำระแล้ว" value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidPOCount} รายการ`} color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t("เดิม + เพิ่มรายเดือนทุกเดือน","Baseline + all monthly additions")} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${pct.toFixed(1)}% ${t("ของงบ","of budget")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label={t("วางบิลแล้ว","Invoiced")} value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate} sub={t("รอจ่าย + จ่ายแล้ว","Awaiting + paid")} color={T.purple} icon="🧾" accent={T.purpleBg}/>
+              <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidPOCount} ${t("รายการ","items")}`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
 
             {/* แถบเตือน "เกินงบ" (เรื่องเงินจ่ายย้ายไปรวมที่แถบ 🔔 ด้านบนแล้ว) */}
@@ -6898,8 +6904,8 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               if (!overCount) return null;
               return (
                 <div style={{display:"flex",flexWrap:"wrap",gap:12,marginBottom:20}}>
-                  <button onClick={()=>handleSort("variance")} title="เรียงตารางตามส่วนต่าง" style={{display:"flex",alignItems:"center",gap:8,background:T.redBg,color:T.red,border:`1px solid ${T.red}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:650,cursor:"pointer"}}>
-                    ⚠ {overCount} หมวดเกินงบ <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· กดเพื่อเรียงดู</span>
+                  <button onClick={()=>handleSort("variance")} title={t("เรียงตารางตามส่วนต่าง","Sort by variance")} style={{display:"flex",alignItems:"center",gap:8,background:T.redBg,color:T.red,border:`1px solid ${T.red}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:650,cursor:"pointer"}}>
+                    ⚠ {overCount} {t("หมวดเกินงบ","categories over budget")} <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· {t("กดเพื่อเรียงดู","tap to sort")}</span>
                   </button>
                 </div>
               );
@@ -6908,9 +6914,9 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
             {/* Progress */}
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22,marginBottom:20}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-                <span style={{fontSize:13,color:T.textPrimary,fontWeight:600}}>สัดส่วนการใช้งบ</span>
+                <span style={{fontSize:13,color:T.textPrimary,fontWeight:600}}>{t("สัดส่วนการใช้งบ","Budget usage")}</span>
                 <span style={{fontSize:13,color:tenderTotal-totalComm<0?T.red:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>
-                  {tenderTotal-totalComm<0?"เกินงบ ":"คงเหลือ "}{fmt(Math.abs(tenderTotal-totalComm))}
+                  {tenderTotal-totalComm<0?t("เกินงบ","Over")+" ":t("คงเหลือ","Remaining")+" "}{fmt(Math.abs(tenderTotal-totalComm))}
                 </span>
               </div>
               <div style={{background:"#f1f5f9",borderRadius:99,height:10,overflow:"hidden"}}>
@@ -6923,9 +6929,9 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
 
             <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
               <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22}}>
-                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>Budget vs Committed ตาม Group</p>
+                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>{t("Budget vs Committed ตาม Group","Budget vs Committed by Group")}</p>
                 {groupData.length===0
-                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>QS ยังไม่ได้ลง Tender Cost</div>
+                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("QS ยังไม่ได้ลง Tender Cost","QS has not entered Tender Cost")}</div>
                   : <ResponsiveContainer width="100%" height={260}>
                       <BarChart data={groupData} margin={{left:0,right:0,top:4,bottom:44}}>
                         <XAxis dataKey="group" tick={{fill:T.textMuted,fontSize:10}} angle={-30} textAnchor="end" interval={0}/>
@@ -6938,9 +6944,9 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                 }
               </div>
               <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22}}>
-                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>สถานะ PO</p>
+                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>{t("สถานะ PO","PO status")}</p>
                 {pieData.length===0
-                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ยังไม่มี PO</div>
+                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ยังไม่มี PO","No PO yet")}</div>
                   : <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
                         <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={78} innerRadius={36}>
@@ -6963,10 +6969,10 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                     {label:"Group", key:"group"},
                     {label:"Budget (QS)", key:"budget"},
                     {label:"Committed (PO)", key:"committed"},
-                    {label:"ส่วนต่าง", key:"variance"},
+                    {label:t("ส่วนต่าง","Variance"), key:"variance"},
                   ].map(({label,key})=>(
                     <th key={label||"__actions"}
-                      style={{padding:"11px 16px",textAlign:["Budget (QS)","Committed (PO)","ส่วนต่าง"].includes(label)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                      style={{padding:"11px 16px",textAlign:["budget","committed","variance"].includes(key)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                       <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                     </th>
                   ))}
@@ -6985,7 +6991,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.budget<=0&&a.committed>0?T.textMuted:variance<0?T.red:T.textSecondary,fontWeight:a.budget<=0&&a.committed>0?500:variance<0?650:500}}>
-                        {a.budget<=0&&a.committed>0 ? "ไม่มีงบ" : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
+                        {a.budget<=0&&a.committed>0 ? t("ไม่มีงบ","No budget") : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
                         {(a.budget>0||a.committed>0)&&!(a.budget<=0&&a.committed>0)&&usdLine(Math.abs(variance), usdRate)}
                       </td>
                     </tr>
@@ -6994,7 +7000,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               </tbody>
               <tfoot>
                 <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-                  <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{accountData.length} รายการ</td>
+                  <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{accountData.length} {t("รายการ","items")}</td>
                   <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:650,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}{usdLine(accountData.reduce((s,a)=>s+a.budget,0), usdRate)}</td>
                   <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.amber,fontWeight:650,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}{usdLine(accountData.reduce((s,a)=>s+a.committed,0), usdRate)}</td>
                   {(() => {
@@ -7015,38 +7021,38 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
           <div>
             {/* Grand totals across every Acc. Code that has a budget or a PO */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-              <StatCard label="งบประมาณรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} thb={dateGroups.reduce((s,a)=>s+a.budget,0)} rate={usdRate} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="PO รวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} thb={dateGroups.reduce((s,a)=>s+a.committed,0)} rate={usdRate} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label="ส่วนต่างรวม" value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))} thb={Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0))} rate={usdRate}
-                sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"เกินงบ":"คงเหลือ"}
+              <StatCard label={t("งบประมาณรวม","Total budget")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} thb={dateGroups.reduce((s,a)=>s+a.budget,0)} rate={usdRate} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("PO รวม","Total PO")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} thb={dateGroups.reduce((s,a)=>s+a.committed,0)} rate={usdRate} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label={t("ส่วนต่างรวม","Total variance")} value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))} thb={Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0))} rate={usdRate}
+                sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?t("เกินงบ","Over"):t("คงเหลือ","Remaining")}
                 color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
                 icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
                 accent={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.redBg:T.greenBg}/>
-              <StatCard label="ต้องเก็บไว้จ่ายรวม" value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))} thb={dateGroups.reduce((s,a)=>s+a.toReserve,0)} rate={usdRate}
-                sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} PO รอจ่าย`} color={T.red} icon="⏳" accent={T.redBg}/>
+              <StatCard label={t("ต้องเก็บไว้จ่ายรวม","Total to reserve")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))} thb={dateGroups.reduce((s,a)=>s+a.toReserve,0)} rate={usdRate}
+                sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} ${t("PO รอจ่าย","PO awaiting pay")}`} color={T.red} icon="⏳" accent={T.redBg}/>
             </div>
 
             {/* ค้นหา + ตัวกรอง */}
             <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
               <input value={dateSearch} onChange={e=>setDateSearch(e.target.value)}
-                placeholder="🔍 ค้นหา: วันที่ / Acc. Code / ชื่อรายการ / เลข PO"
+                placeholder={t("🔍 ค้นหา: วันที่ / Acc. Code / ชื่อรายการ / เลข PO","🔍 Search: date / Acc. Code / name / PO no.")}
                 style={{flex:1,minWidth:240,maxWidth:420,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
-              <button onClick={()=>setOnlyWithPO(v=>!v)} title="แสดงเฉพาะ Acc. Code ที่มี PO"
+              <button onClick={()=>setOnlyWithPO(v=>!v)} title={t("แสดงเฉพาะ Acc. Code ที่มี PO","Show only Acc. Codes with PO")}
                 style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",
                   border:`1.5px solid ${onlyWithPO?T.green:T.cardBorder}`,background:onlyWithPO?T.green:"transparent",color:onlyWithPO?"#fff":T.textSecondary}}>
-                <span style={{fontSize:14}}>{onlyWithPO?"☑":"☐"}</span> เฉพาะที่มี PO ({withPOCount})
+                <span style={{fontSize:14}}>{onlyWithPO?"☑":"☐"}</span> {t("เฉพาะที่มี PO","With PO only")} ({withPOCount})
               </button>
-              <span style={{fontSize:12,color:T.textMuted}}>แสดง {shownDateGroups.length} / {dateGroups.length} หมวด</span>
+              <span style={{fontSize:12,color:T.textMuted}}>{t("แสดง","Showing")} {shownDateGroups.length} / {dateGroups.length} {t("หมวด","categories")}</span>
             </div>
 
             {dateGroups.length===0 ? (
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
                 <div style={{fontSize:32,marginBottom:12}}>📅</div>
-                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>ยังไม่มีงบหรือ PO ให้แสดง</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>{t("ยังไม่มีงบหรือ PO ให้แสดง","No budget or PO to show")}</div>
               </div>
             ) : shownDateGroups.length===0 ? (
               <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>
-                ไม่พบหมวดที่ตรงกับเงื่อนไข {dateSearch.trim() && <>"{dateSearch}"</>} {onlyWithPO && "· (กรองเฉพาะที่มี PO)"}
+                {t("ไม่พบหมวดที่ตรงกับเงื่อนไข","No matching categories")} {dateSearch.trim() && <>"{dateSearch}"</>} {onlyWithPO && ("· "+t("(กรองเฉพาะที่มี PO)","(with PO only)"))}
               </div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -7057,7 +7063,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                   const barPct    = a.committed>0 ? Math.min(paidPct,100) : 0;
                   const statusClr = a.over?T.red:a.committed>0?T.green:T.textMuted;
                   const statusBg  = a.over?T.redBg:a.committed>0?T.greenBg:"#eef1f5";
-                  const statusTxt = a.over?"⚠ เกินงบ":a.committed>0?"✅ OK":a.budget>0?"ยังไม่ PO":"—";
+                  const statusTxt = a.over?t("⚠ เกินงบ","⚠ Over"):a.committed>0?"✅ OK":a.budget>0?t("ยังไม่ PO","No PO"):"—";
                   const varClr    = a.variancePct===null ? T.textMuted : a.variance<0 ? T.red : T.green;
                   return (
                     <div key={a.code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderLeft:`4px solid ${statusClr}`,borderRadius:14,overflow:"hidden"}}>
@@ -7072,46 +7078,46 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                         </div>
                         {/* บรรทัด 2: แถบความคืบหน้าการจ่าย + ยอดที่ต้องเก็บเงินไว้รอจ่าย */}
                         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}} title={`จ่ายแล้ว ${a.committed>0?paidPct.toFixed(0):0}% ของ PO`}>
+                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}} title={`${t("จ่ายแล้ว","Paid")} ${a.committed>0?paidPct.toFixed(0):0}% ${t("ของ PO","of PO")}`}>
                             <div style={{width:`${barPct}%`,background:T.green,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
                           </div>
                           <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:a.toReserve>0?T.amber:a.committed>0?T.green:T.textMuted,textAlign:"right",whiteSpace:"nowrap"}}>
-                            {a.committed>0 ? (a.toReserve>0 ? `เก็บไว้จ่าย ฿${fmt0(a.toReserve)}` : "จ่ายครบแล้ว") : "ยังไม่มี PO"}
+                            {a.committed>0 ? (a.toReserve>0 ? `${t("เก็บไว้จ่าย","Reserve")} ฿${fmt0(a.toReserve)}` : t("จ่ายครบแล้ว","Fully paid")) : t("ยังไม่มี PO","No PO yet")}
                           </span>
                         </div>
                         {/* บรรทัด 3: ตัวเลขสรุป 3 ช่อง — มูลค่า PO · จ่ายแล้ว · ต้องเก็บไว้จ่าย */}
                         <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
                           <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>มูลค่า PO</div>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("มูลค่า PO","PO value")}</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
                             {a.committed>0&&usdLine(a.committed, usdRate)}
                           </div>
                           <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>จ่ายแล้ว</div>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("จ่ายแล้ว","Paid")}</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.green}}>{a.paid>0?fmt(a.paid):"—"}</div>
                             {a.paid>0&&usdLine(a.paid, usdRate)}
                           </div>
                           <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>ต้องเก็บไว้จ่าย</div>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("ต้องเก็บไว้จ่าย","To reserve")}</div>
                             <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:a.toReserve>0?T.amber:T.green}}>{a.committed>0?fmt(a.toReserve):"—"}</div>
                             {a.committed>0&&usdLine(a.toReserve, usdRate)}
                           </div>
                         </div>
                         {/* งบประมาณ / ส่วนต่าง (ข้อมูลงบ ไว้ท้ายสุด) */}
                         <div style={{display:"flex",gap:24,flexWrap:"wrap",marginTop:8,paddingTop:8,borderTop:`1px dashed ${T.cardBorder}`}}>
-                          <div style={{fontSize:11,color:T.textMuted}}>งบประมาณ: <b style={{color:T.blue,fontFamily:"'JetBrains Mono',monospace"}}>{a.budget>0?fmt(a.budget):"—"}</b></div>
-                          <div style={{fontSize:11,color:T.textMuted}}>{a.variance<0?"เกินงบ":"งบคงเหลือ"}: <b style={{color:varClr,fontFamily:"'JetBrains Mono',monospace"}}>{a.variancePct===null ? "ไม่มีงบ" : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}</b></div>
+                          <div style={{fontSize:11,color:T.textMuted}}>{t("งบประมาณ","Budget")}: <b style={{color:T.blue,fontFamily:"'JetBrains Mono',monospace"}}>{a.budget>0?fmt(a.budget):"—"}</b></div>
+                          <div style={{fontSize:11,color:T.textMuted}}>{a.variance<0?t("เกินงบ","Over"):t("งบคงเหลือ","Remaining")}: <b style={{color:varClr,fontFamily:"'JetBrains Mono',monospace"}}>{a.variancePct===null ? t("ไม่มีงบ","No budget") : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}</b></div>
                         </div>
                       </div>
                       {!isCollapsed && (
                         a.rows.length===0 ? (
-                          <div style={{padding:"14px 18px",fontSize:12,color:T.textMuted}}>ยังไม่มี PO ผูกกับ Acc. Code นี้</div>
+                          <div style={{padding:"14px 18px",fontSize:12,color:T.textMuted}}>{t("ยังไม่มี PO ผูกกับ Acc. Code นี้","No PO linked to this Acc. Code")}</div>
                         ) : (
                         <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
-                              {["วันเปิด PO (แพลน)","Supplier","PO No.","มูลค่า (THB)","ของเข้า (แผน→จริง)","ต้องจ่ายเงินวันไหน","สถานะจ่าย"].map(h=>(
-                                <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                              {[["วันเปิด PO (แพลน)","PO date (plan)"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["ของเข้า (แผน→จริง)","Incoming (plan→actual)"],["ต้องจ่ายเงินวันไหน","Due date"],["สถานะจ่าย","Pay status"]].map(([h,he])=>(
+                                <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
                               ))}
                             </tr>
                           </thead>
@@ -7129,7 +7135,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                                   <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}{usdLine(parseFloat(item.amount)||0, usdRate)}</td>
                                   <td style={{padding:"9px 16px"}}><DeliveryDates po={pItem}/></td>
                                   <td style={{padding:"9px 16px"}}><DateCell value={poNextDueDate(pItem)} lateTint={false}/></td>
-                                  <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[pay]} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
+                                  <td style={{padding:"9px 16px"}}><Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
                                 </tr>
                               );
                             })}
@@ -7149,28 +7155,28 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
           <div>
             {/* สรุปยอดที่ต้องเตรียมจ่าย */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-              <StatCard label="ต้องจ่ายทั้งหมด" value={"฿"+fmt0(planTotal)} thb={planTotal} rate={usdRate} sub={`${payLines.length} งวด`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label="จ่ายแล้ว" value={"฿"+fmt0(planPaid)} thb={planPaid} rate={usdRate} sub="ครบกำหนด + ตัดจ่ายแล้ว" color={T.green} icon="✅" accent={T.greenBg}/>
-              <StatCard label="คงเหลือต้องจ่าย" value={"฿"+fmt0(planRemain)} thb={planRemain} rate={usdRate} sub="ยอดที่ยังไม่จ่าย" color={T.amber} icon="⏳" accent={T.amberBg}/>
-              <StatCard label={`ครบกำหนดเดือนนี้ (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} thb={dueThisMonth} rate={usdRate} sub="เตรียมเงินเดือนนี้" color={T.red} icon="💰" accent={T.redBg}/>
-              <StatCard label={`ครบกำหนดเดือนหน้า (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} thb={dueNextMonth} rate={usdRate} sub={dueNextMonth>0?`${nextCount} งวด · เตรียมล่วงหน้า`:"ยังไม่มีที่ครบกำหนด"} color={T.amber} icon="🔔" accent={T.amberBg}/>
+              <StatCard label={t("ต้องจ่ายทั้งหมด","Total to pay")} value={"฿"+fmt0(planTotal)} thb={planTotal} rate={usdRate} sub={`${payLines.length} ${t("งวด","rounds")}`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("จ่ายแล้ว","Paid")} value={"฿"+fmt0(planPaid)} thb={planPaid} rate={usdRate} sub={t("ครบกำหนด + ตัดจ่ายแล้ว","Due + paid")} color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label={t("คงเหลือต้องจ่าย","Remaining to pay")} value={"฿"+fmt0(planRemain)} thb={planRemain} rate={usdRate} sub={t("ยอดที่ยังไม่จ่าย","Unpaid amount")} color={T.amber} icon="⏳" accent={T.amberBg}/>
+              <StatCard label={`${t("ครบกำหนดเดือนนี้","Due this month")} (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} thb={dueThisMonth} rate={usdRate} sub={t("เตรียมเงินเดือนนี้","Prepare this month")} color={T.red} icon="💰" accent={T.redBg}/>
+              <StatCard label={`${t("ครบกำหนดเดือนหน้า","Due next month")} (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} thb={dueNextMonth} rate={usdRate} sub={dueNextMonth>0?`${nextCount} ${t("งวด · เตรียมล่วงหน้า","rounds · prepare ahead")}`:t("ยังไม่มีที่ครบกำหนด","Nothing due")} color={T.amber} icon="🔔" accent={T.amberBg}/>
             </div>
 
             {/* ค้นหา: Supplier / PO No. / Acc. Code / วิธีจ่าย / วันครบกำหนด */}
             {payByMonth.length>0 && (
               <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
-                <SearchInput value={planSearch} onChange={setPlanSearch} placeholder="🔍 ค้นหา Supplier / PO No. / Acc. Code / วิธีจ่าย / วันจ่าย" width={340}/>
-                <span style={{fontSize:12,color:T.textMuted}}>แสดง {shownPayByMonth.length} / {payByMonth.length} เดือน · {shownPayByMonth.reduce((s,m)=>s+m.lines.length,0)} งวด</span>
+                <SearchInput value={planSearch} onChange={setPlanSearch} placeholder={t("🔍 ค้นหา Supplier / PO No. / Acc. Code / วิธีจ่าย / วันจ่าย","🔍 Search Supplier / PO No. / Acc. Code / method / date")} width={340}/>
+                <span style={{fontSize:12,color:T.textMuted}}>{t("แสดง","Showing")} {shownPayByMonth.length} / {payByMonth.length} {t("เดือน","months")} · {shownPayByMonth.reduce((s,m)=>s+m.lines.length,0)} {t("งวด","rounds")}</span>
               </div>
             )}
             {payByMonth.length===0 ? (
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
                 <div style={{fontSize:32,marginBottom:12}}>💰</div>
-                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>ยังไม่มีงวดจ่ายให้แสดง</div>
-                <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>วันครบกำหนดจ่ายมาจากวันรับของ (แผน/จริง) + เทอมเครดิตของ PO</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>{t("ยังไม่มีงวดจ่ายให้แสดง","No payment rounds to show")}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>{t("วันครบกำหนดจ่ายมาจากวันรับของ (แผน/จริง) + เทอมเครดิตของ PO","Due date = arrival date (plan/actual) + PO credit term")}</div>
               </div>
             ) : shownPayByMonth.length===0 ? (
-              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ไม่พบงวดที่ตรงกับ "{planSearch}"</div>
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบงวดที่ตรงกับ","No rounds match")} "{planSearch}"</div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 {shownPayByMonth.map(m => {
@@ -7183,27 +7189,27 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                         <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
                         <div style={{minWidth:150}}>
                           <span style={{color:T.textPrimary,fontSize:14,fontWeight:650}}>{m.label}</span>
-                          {isThis && <span style={{marginLeft:8,background:T.amber,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>เดือนนี้</span>}
-                          <span style={{marginLeft:8,color:T.textMuted,fontSize:12}}>{m.lines.length} งวด</span>
+                          {isThis && <span style={{marginLeft:8,background:T.amber,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{t("เดือนนี้","This month")}</span>}
+                          <span style={{marginLeft:8,color:T.textMuted,fontSize:12}}>{m.lines.length} {t("งวด","rounds")}</span>
                         </div>
                         <div style={{flex:1}}/>
                         <div style={{textAlign:"right",minWidth:88}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เงินสด</div>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เงินสด","Cash")}</div>
                           <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.green}}>{m.cash>0?fmt(m.cash):"—"}</div>
                           {m.cash>0&&usdLine(m.cash, usdRate)}
                         </div>
                         <div style={{textAlign:"right",minWidth:88}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>เครดิต</div>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เครดิต","Credit")}</div>
                           <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{m.credit>0?fmt(m.credit):"—"}</div>
                           {m.credit>0&&usdLine(m.credit, usdRate)}
                         </div>
                         <div style={{textAlign:"right",minWidth:100}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>รวมต้องจ่าย</div>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("รวมต้องจ่าย","Total due")}</div>
                           <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.textPrimary}}>{fmt(m.sum)}</div>
                           {usdLine(m.sum, usdRate)}
                         </div>
                         <div style={{textAlign:"right",minWidth:100}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>คงเหลือ</div>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("คงเหลือ","Remaining")}</div>
                           <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:m.remain>0?T.amber:T.green}}>{fmt(m.remain)}</div>
                           {usdLine(m.remain, usdRate)}
                         </div>
@@ -7212,8 +7218,8 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                         <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
                           <thead>
                             <tr>
-                              {["ครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","วิธีจ่าย","วันรับของ","ยอดต้องจ่าย (THB)","สถานะ"].map(h=>(
-                                <th key={h} style={{padding:"9px 16px",textAlign:h==="ยอดต้องจ่าย (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>{h}</th>
+                              {[["ครบกำหนดจ่าย","Due date"],["Supplier","Supplier"],["PO No.","PO No."],["Acc. Code","Acc. Code"],["วิธีจ่าย","Method"],["วันรับของ","Received"],["ยอดต้องจ่าย (THB)","Amount due (THB)"],["สถานะ","Status"]].map(([h,he])=>(
+                                <th key={h} style={{padding:"9px 16px",textAlign:h==="ยอดต้องจ่าย (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>{t(h,he)}</th>
                               ))}
                             </tr>
                           </thead>
@@ -7232,7 +7238,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                                   {l.incomingType && <span style={{marginLeft:5,fontSize:12,color:T.textMuted}}>({l.incomingType})</span>}
                                 </td>
                                 <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(l.amount)}{usdLine(l.amount, usdRate)}</td>
-                                <td style={{padding:"9px 16px"}}><Badge text={PAYMENT_LABEL[l.status]} clr={PAYMENT_CLR[l.status]} bg={PAYMENT_BG[l.status]}/></td>
+                                <td style={{padding:"9px 16px"}}><Badge text={payLabel(l.status)} clr={PAYMENT_CLR[l.status]} bg={PAYMENT_BG[l.status]}/></td>
                               </tr>
                             ))}
                           </tbody>
