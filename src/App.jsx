@@ -613,20 +613,21 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
                            rowGroups = null, groupDisplayCol = null }) {
   ws["!rows"]   = ws["!rows"] || [];
   ws["!merges"] = ws["!merges"] || [];
-  // ── โทนมินิมอล: พื้นขาว ไม่มีเส้นตาราง มีแค่เส้นคั่นบาง ๆ ระหว่างแถว ──
-  const HFILL = lighten(theme.main, 0.90); // หัวตาราง พื้นอ่อนมาก
-  const HRULE = lighten(theme.main, 0.45); // เส้นใต้หัวตาราง (บาง)
-  const BAND  = "FAFBFC";                  // แถบสลับสีจาง ๆ แบบเทากลาง
-  const ROWLN = "EEF1F4";                  // เส้นคั่นแถว (บางมาก)
-  const TFILL = lighten(theme.main, 0.90); // แถวรวม พื้นอ่อน
-  const TRULE = lighten(theme.main, 0.40); // เส้นเหนือแถวรวม (บาง)
-  const GLINE = lighten(theme.main, 0.70); // เส้นแบ่งกลุ่ม (บาง)
+  // ── ตารางสะอาด: เส้นตารางบาง ๆ สีเทาอ่อนทุกช่อง หัวตารางพื้นอ่อน (แบบรูปตัวอย่าง) ──
+  const HFILL = lighten(theme.main, 0.88); // หัวตาราง พื้นอ่อน
+  const GRID  = "E3E8EF";                  // เส้นตารางบาง ๆ สีเทาอ่อน (ทุกช่อง)
+  const HRULE = "C3CFDD";                  // เส้นใต้หัวตาราง (ชัดขึ้นเล็กน้อย)
+  const BAND  = lighten(theme.main, 0.955);// แถบสลับสีจาง ๆ (โทนธีม)
+  const TFILL = lighten(theme.main, 0.86); // แถวรวม พื้นอ่อน
+  const TRULE = "C3CFDD";                  // เส้นเหนือแถวรวม
+  const GLINE = lighten(theme.main, 0.60); // เส้นแบ่งกลุ่ม (ชัดขึ้น)
+  const gridAll = { top:BORDER_THIN(GRID), bottom:BORDER_THIN(GRID), left:BORDER_THIN(GRID), right:BORDER_THIN(GRID) };
 
   ws["!merges"].push({ s:{r:titleRow,c:0}, e:{r:titleRow,c:numCols-1} });
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:titleRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    // หัวเรื่อง: ตัวหนาใหญ่ พื้นขาว (มินิมอล) ไม่มีแถบสี
+    // หัวเรื่อง: ตัวหนาใหญ่ พื้นขาว ไม่มีแถบสี
     ws[ref].s = { font:{bold:true,sz:15,color:{rgb:theme.dark},name:"Tahoma"},
       alignment:{vertical:"center",horizontal:"left"} };
   }
@@ -647,8 +648,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
     ws[ref].s = { font:{bold:true,sz:10,color:{rgb:theme.dark},name:"Tahoma"},
       fill:{fgColor:{rgb:HFILL}},
       alignment:{vertical:"center",horizontal:isMoney||isPct?"right":isCenter?"center":"left",wrapText:true,indent:(isMoney||isPct||isCenter)?0:1},
-      // มินิมอล: มีแค่เส้นใต้บาง ๆ ไม่มีขอบซ้าย/ขวา/บน
-      border:{ bottom:BORDER_THIN(HRULE) } };
+      // เส้นตารางบางทุกด้าน + เส้นใต้หัวตารางเข้มขึ้นนิด
+      border:{ ...gridAll, bottom:BORDER_THIN(HRULE) } };
   }
   ws["!rows"][headerRow] = { hpx:30 };
   ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s:{r:headerRow,c:0}, e:{r:headerRow,c:numCols-1} }) };
@@ -678,8 +679,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
           ? {sz:10,name:"Tahoma",bold:true,color:{rgb:theme.dark}}
           : {sz:10,name:"Tahoma",color:{rgb: isText ? "334155" : "475569"}},
         alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true, indent: isText?1:0 },
-        // มินิมอล: ไม่มีเส้นตั้ง มีแค่เส้นคั่นแถวบาง ๆ ด้านล่าง · ขึ้นกลุ่มใหม่ใช้เส้นบางกว่าเดิม
-        border:{ bottom:BORDER_THIN(ROWLN), ...(isGroupStart?{ top:BORDER_THIN(GLINE) }:{}) } };
+        // เส้นตารางบาง ๆ ทุกด้าน · ขึ้นกลุ่มใหม่ใช้เส้นบนเข้มขึ้นเป็นตัวแบ่ง
+        border:{ ...gridAll, ...(isGroupStart?{ top:BORDER_THIN(GLINE) }:{}) } };
       if (zebra)   s.fill   = { fgColor:{rgb:BAND} };
       if (isMoney) s.numFmt = usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0';   // แยกสัญลักษณ์ $ / ฿
       if (isPct)   s.numFmt = "0.0%";
@@ -704,8 +705,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       const isText = !isMoney && !isPct && !isCenter;
       ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:TFILL}},
         alignment:{vertical:"center",horizontal:isMoney||isPct?"right":isCenter?"center":"left",indent:isText?1:0},
-        // มินิมอล: เส้นเหนือแถวรวมบาง ๆ (ไม่หนา)
-        border:{ top:BORDER_THIN(TRULE) },
+        // เส้นตารางบางทุกด้าน + เส้นเหนือแถวรวมเข้มขึ้นนิด
+        border:{ ...gridAll, top:BORDER_THIN(TRULE) },
         numFmt: isMoney ? (usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0') : isPct?"0.0%":undefined };
     }
     ws["!rows"][totalRow] = { hpx:26 };
@@ -855,9 +856,10 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
   setS(1,0,{ font:{italic:true,sz:10,color:{rgb:"64748B"},name:"Tahoma"} });
   setS(chartTitleRow,0,{ font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
   // การ์ดสรุป 4 ใบ (แต่ละใบกว้าง 2 คอลัมน์)
+  // สีการ์ดมาตรฐาน; แต่ละการ์ดกำหนดสีเองได้ผ่าน cd.acc (["bg","fg"]) เช่น ให้ตรงกับหน้าจอ
   const ACC = [["DBEAFE","1D4ED8"],["D1FAE5","047857"],["FEF3C7","92400E"],["EDE9FE","6D28D9"]];
   cards.slice(0,4).forEach((cd, i) => {
-    const c0 = i*2, c1 = c0+1, [bg,fg] = ACC[i%4];
+    const c0 = i*2, c1 = c0+1, [bg,fg] = cd.acc || ACC[i%4];
     ws["!merges"].push({ s:{r:cardLabelRow,c:c0}, e:{r:cardLabelRow,c:c1} });
     ws["!merges"].push({ s:{r:cardValRow,c:c0}, e:{r:cardValRow,c:c1} });
     setS(cardLabelRow, c0, { font:{bold:true,sz:9.5,color:{rgb:fg},name:"Tahoma"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"} }, cd.label);
@@ -1072,10 +1074,10 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     theme,
     // 4 การ์ดให้ตรงกับหน้า Baseline แบบใหม่: ราคาเดิม · เผื่อเศษ 3% · งานเพิ่ม · รวมทั้งหมด
     cards: [
-      { label:"ราคาเดิม (Tender Cost)",       value: dashBase, money:true, f:`'งบประมาณ'!D${TR}` },
-      { label:"เผื่อเศษ/สูญเสีย 3% (อ้างอิง)", value: dashBase*0.03, money:true },
-      { label:"งานเพิ่ม (รวมทุกเดือน)",         value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}` },
-      { label:"รวมทั้งหมด",                    value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}` },
+      { label:"ราคาเดิม (Tender Cost)",       value: dashBase, money:true, f:`'งบประมาณ'!D${TR}`, acc:["DBEAFE","1D4ED8"] },
+      { label:"เผื่อเศษ/สูญเสีย 3% (อ้างอิง)", value: dashBase*0.03, money:true,                    acc:["FEF3C7","92400E"] },
+      { label:"งานเพิ่ม (รวมทุกเดือน)",         value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}`, acc:["EDE9FE","6D28D9"] },
+      { label:"รวมทั้งหมด",                    value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}`, acc:["D1FAE5","047857"] },
     ],
     chartTitle: "กราฟ: ยอดเพิ่มรายเดือน (THB)",
     items: dashItemsF,
