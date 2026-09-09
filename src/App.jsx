@@ -616,11 +616,11 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   ws["!merges"] = ws["!merges"] || [];
   // ── ตารางสะอาด: เส้นตารางบาง ๆ สีเทาอ่อนทุกช่อง หัวตารางพื้นอ่อน (แบบรูปตัวอย่าง) ──
   const HFILL = lighten(theme.main, 0.88); // หัวตาราง พื้นอ่อน
-  const GRID  = "E3E8EF";                  // เส้นตารางบาง ๆ สีเทาอ่อน (ทุกช่อง)
-  const HRULE = "C3CFDD";                  // เส้นใต้หัวตาราง (ชัดขึ้นเล็กน้อย)
+  const GRID  = "CBD5E1";                  // เส้นตารางสีเทา (เข้มขึ้นให้เห็นชัด)
+  const HRULE = "9AA7BA";                  // เส้นใต้หัวตาราง (เข้มกว่าเส้นทั่วไป)
   const BAND  = lighten(theme.main, 0.955);// แถบสลับสีจาง ๆ (โทนธีม)
   const TFILL = lighten(theme.main, 0.86); // แถวรวม พื้นอ่อน
-  const TRULE = "C3CFDD";                  // เส้นเหนือแถวรวม
+  const TRULE = "9AA7BA";                  // เส้นเหนือแถวรวม
   const GLINE = lighten(theme.main, 0.60); // เส้นแบ่งกลุ่ม (ชัดขึ้น)
   const gridAll = { top:BORDER_THIN(GRID), bottom:BORDER_THIN(GRID), left:BORDER_THIN(GRID), right:BORDER_THIN(GRID) };
 
