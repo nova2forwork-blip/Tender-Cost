@@ -4416,7 +4416,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                               <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
                                 style={{width:104,fontSize:13,background:cv!==0?T.amberBg:T.bg}}/>
                             ) : (
-                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:cv!==0?T.textPrimary:T.textMuted}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
+                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(cv!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
                             )}
                           </td>
                         );
@@ -4432,7 +4432,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                           <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
                             style={{width:130,background:thisVal!==0?T.amberBg:T.bg}}/>
                         ) : (
-                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:thisVal!==0?T.textPrimary:T.textMuted}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
+                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(thisVal!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
                         )}
                       </td>
                     )}
@@ -4482,7 +4482,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             <MoneyInput value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
                               style={{width:130,fontSize:13,background:kThisVal!==0?T.greenBg:T.bg}}/>
                           ) : (
-                            <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:kThisVal!==0?T.textPrimary:T.textMuted}}>{fmt(kThisVal)}{usdLine(kThisVal, usdRate)}</div>
+                            <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(kThisVal!==0?{background:T.greenBg,color:T.green,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(kThisVal)}{usdLine(kThisVal, usdRate)}</div>
                           )}
                         </td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
@@ -4521,31 +4521,33 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             )}
           </tbody>
           <tfoot>
-            <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13, ...qsFrzSpan3("#f8fafc")}}>{filtered.length} รายการ</td>
-              <td style={{padding:"12px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,fontSize:13, ...qsFrz(3,"#f8fafc")}}>
+            <tr style={{background:"#eef2f7",borderTop:`2px solid ${T.textMuted}`}}>
+              <td colSpan={3} style={{padding:"14px 16px",color:T.textSecondary,fontSize:13,fontWeight:700, ...qsFrzSpan3("#eef2f7")}}>รวม {filtered.length} รายการ</td>
+              <td style={{padding:"14px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14, ...qsFrz(3,"#eef2f7")}}>
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
                 {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r),0), usdRate)}
               </td>
               <td/>
               {isMultiCol
                 ? columns.map(c => { const ct = filtered.reduce((s,r)=> s + (parseFloat(draftAdd[`${r.code}:${c.id}`])||0), 0); return (
-                    <td key={c.id} style={{padding:"12px 18px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:13,whiteSpace:"nowrap"}}>
-                      {fmt(ct)}
+                    <td key={c.id} style={{padding:"10px 14px",textAlign:"right",whiteSpace:"nowrap"}}>
+                      <span style={{display:"inline-block",fontFamily:"'JetBrains Mono',monospace",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
                       {usdLine(ct, usdRate)}
                     </td>
                   ); })
-                : (
-                    <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:13}}>
-                      {fmt(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0))}
-                      {usdLine(filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0), usdRate)}
+                : (() => { const ct = filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0); return (
+                    <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap"}}>
+                      <span style={{display:"inline-block",fontFamily:"'JetBrains Mono',monospace",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
+                      {usdLine(ct, usdRate)}
                     </td>
-                  )
+                  ); })()
               }
               <td/>
-              <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
-                {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0))}
-                {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0), usdRate)}
+              <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap"}}>
+                {(() => { const g = filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0); return (<>
+                  <span style={{display:"inline-block",background:T.green,color:"#fff",fontWeight:800,padding:"5px 11px",borderRadius:8,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(g)}</span>
+                  {usdLine(g, usdRate)}
+                </>); })()}
               </td>
               <td/>
             </tr>
