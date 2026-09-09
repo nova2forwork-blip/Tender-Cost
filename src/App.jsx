@@ -297,9 +297,22 @@ const poPaidDate = (p) => {
   const paid = poRounds(P).filter(r=>roundPaid(P,r)).map(r=>roundPayDate(P,r)).filter(Boolean).sort();
   return paid.length ? paid[paid.length-1] : null;
 };
-// Earliest upcoming/known payment due date across all rounds (for list/export).
+// วันครบกำหนดจ่าย "แบบพยากรณ์" ของงวด — ใช้วันรับจริงถ้ามี ไม่มีก็ใช้วันแผน (+เทอมเครดิต)
+// ต่างจาก roundPayDate (ที่ใช้วันจริงเท่านั้น เพื่อคุมตรรกะ "จ่ายแล้ว") — อันนี้ใช้ "แสดงผล"
+// เท่านั้น (หน้าติดตาม/Export) ให้ตรงกับหน้าแผนจ่ายเงินที่คิดจากวันแผนด้วย
+const roundDueForecast = (p, r) => {
+  const P = migratePO(p);
+  const incoming = r.actualDate || r.planDate;
+  if (!incoming) return "";
+  if (P.paymentType === "cash") return incoming;
+  const d = parseInt(P.creditDays,10);
+  return addDays(incoming, isNaN(d) ? DEFAULT_CREDIT_DAYS : d);
+};
+// Earliest upcoming/known payment due date across all rounds (for list/export display).
+// Falls back to the plan date so a PO that only has a plan (no actual receipt yet)
+// still shows its forecast due date, matching the Payment-plan page.
 const poNextDueDate = (p) => {
-  const due = poRounds(p).map(r=>roundPayDate(p,r)).filter(Boolean).sort();
+  const due = poRounds(p).map(r=>roundDueForecast(p,r)).filter(Boolean).sort();
   return due.length ? due[0] : "";
 };
 
@@ -1420,18 +1433,18 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
   const payM = monthsOf(payplan);
   const rowsData = accounts.map(a => {
     const budget = parseFloat(combined[a.code])||0, committed = committedByCode[a.code]||0, stock = stockByCode[a.code]||0, planned = plannedByCode[a.code]||0;
-    const mgRow = mgM.map(mk => { const av=actual[a.code]?.[mk]||0, pv=incoming[a.code]?.[mk]||0; return { eff: av+pv, real: pv===0 }; }); // รวมรับจริง+ยังไม่เข้า (ไม่ให้ตกหล่นเมื่อเดือนเดียวมีทั้งคู่) · ดำ=รับครบ, แดง=ยังมีค้าง
+    const mgRow = mgM.map(mk => { const av=actual[a.code]?.[mk]||0, pv=incoming[a.code]?.[mk]||0; return { eff: av+pv, real: pv===0, hasRecv: av>0 }; }); // รวมรับจริง+ยังไม่เข้า (ไม่ให้ตกหล่นเมื่อเดือนเดียวมีทั้งคู่) · เขียว=รับครบ, เหลือง=รับบางส่วน, แดง=ยังไม่เข้า
     const pyRow = payM.map(mk => payplan[a.code]?.[mk]||0);
     return { a, budget, committed, stock, planned, balPO:budget-committed, balCost:budget-stock-committed-planned, balPOout:budget-stock-committed,
       mgRow, pyRow, mgTot:mgRow.reduce((s,c)=>s+c.eff,0), pyTot:pyRow.reduce((s,x)=>s+x,0) };
   }).filter(r => r.budget||r.committed||r.stock||r.mgTot||r.pyTot);
   if (!rowsData.length) return;
-  const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Balance Cost",
+  const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Pending PO",
     ...mgM.map(mk=>`${monthShortLabel(mk)} (เข้า)`), "รวมเข้า",
-    ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "PO Balance"];
+    ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "Balance Cost"];
   const rows = [
     [`ตารางรวมเดือน — ${project.name}`],
-    [`Incoming: รับจริง=ดำ · แผน/PO รอเข้า=แดง · Balance Cost = งบ − Stock − PO − แผน · PO Balance = งบ − Stock − PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [`Incoming: รับแล้ว=เขียว · แผน/PO รอเข้า=แดง · Pending PO = งบ − Stock − PO − แผน · Balance Cost = งบ − Stock − PO (ตรงกับหน้าจัดซื้อ) · Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
     header,
   ];
@@ -1459,7 +1472,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
   const setColor = (r, col, rgb, bold) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb}, ...(bold?{bold:true}:{}) } }; };
   for (let r=dataStart; r<=dataEnd; r++) {
     const rd = rowsData[r-dataStart];
-    rd.mgRow.forEach((c,i)=>{ if (c.eff) setColor(r, mgStart+i, c.real ? "1F2937" : "EF4444"); }); // รับจริง=ดำ · แผน/PO=แดง
+    rd.mgRow.forEach((c,i)=>{ if (c.eff) setColor(r, mgStart+i, c.real ? "059669" : (c.hasRecv ? "D97706" : "EF4444"), c.real || c.hasRecv); }); // เขียว=รับครบ · เหลือง=รับบางส่วน · แดง=ยังไม่เข้า (ให้ตรงกับสีในแอป)
     [5, poBalCol].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) setColor(r, cc, "DC2626", true); });
   }
   xBackLink(ws, 2, numCols-1, backSheet);
@@ -2500,7 +2513,7 @@ function LoginScreen({ onLogin }) {
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           <label style={{display:"flex",flexDirection:"column",gap:6}}>
             <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Username</span>
-            <input className="input-base" autoFocus value={username} onChange={e=>setUsername(e.target.value)} placeholder="เช่น qs, procurement, accounting, admin" />
+            <input className="input-base" autoFocus value={username} onChange={e=>setUsername(e.target.value)} placeholder={t("เช่น qs, procurement, accounting, admin","e.g. qs, procurement, accounting, admin")} />
           </label>
           <label style={{display:"flex",flexDirection:"column",gap:6}}>
             <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Password</span>
@@ -2508,7 +2521,7 @@ function LoginScreen({ onLogin }) {
           </label>
           {error && <div style={{background:T.redBg,color:T.red,fontSize:12,padding:"9px 12px",borderRadius:8,fontWeight:500}}>{error}</div>}
           <button className="btn-primary" type="submit" disabled={busy} style={{marginTop:6,opacity:busy?0.7:1}}>
-            {busy ? "กำลังตรวจสอบ..." : "เข้าสู่ระบบ"}
+            {busy ? t("กำลังตรวจสอบ...","Signing in...") : t("เข้าสู่ระบบ","Sign in")}
           </button>
         </div>
       </form>
@@ -2522,28 +2535,28 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
   const [pw, setPw] = useState("");
   return (
     <tr style={{borderBottom:`1px solid #f1f5f9`}}>
-      <td style={{padding:"10px 14px",color:T.textPrimary,fontWeight:600}}>{u.username}{isSelf && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>(คุณ)</span>}</td>
+      <td style={{padding:"10px 14px",color:T.textPrimary,fontWeight:600}}>{u.username}{isSelf && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>({t("คุณ","you")})</span>}</td>
       <td style={{padding:"10px 14px",color:T.textSecondary}}>{u.name}</td>
       <td style={{padding:"10px 14px"}}>
         <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{ROLE_LABELS[u.role]}</span>
       </td>
       <td style={{padding:"10px 14px"}}>
         <span style={{background:u.active?T.greenBg:T.redBg,color:u.active?T.green:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>
-          {u.active ? "ใช้งานได้" : "ระงับแล้ว"}
+          {u.active ? t("ใช้งานได้","Active") : t("ระงับแล้ว","Suspended")}
         </span>
       </td>
       <td style={{padding:"10px 14px"}}>
         {resetting ? (
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <input className="input-base" type="password" autoComplete="new-password" placeholder="รหัสผ่านใหม่ (≥ 8 ตัว)" value={pw} onChange={e=>setPw(e.target.value)} style={{width:150,padding:"6px 10px"}} />
+            <input className="input-base" type="password" autoComplete="new-password" placeholder={t("รหัสผ่านใหม่ (≥ 8 ตัว)","New password (≥ 8 chars)")} value={pw} onChange={e=>setPw(e.target.value)} style={{width:150,padding:"6px 10px"}} />
             <button className="btn-primary" style={{padding:"6px 12px"}} onClick={()=>{ if(pw.trim().length<8){ alert("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร"); return; } onReset(u.id,pw); setPw(""); setResetting(false); }}>บันทึก</button>
-            <button className="btn-ghost" style={{padding:"6px 10px"}} onClick={()=>{setResetting(false);setPw("");}}>ยกเลิก</button>
+            <button className="btn-ghost" style={{padding:"6px 10px"}} onClick={()=>{setResetting(false);setPw("");}}>{t("ยกเลิก","Cancel")}</button>
           </div>
         ) : (
           <div style={{display:"flex",gap:8}}>
-            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>รีเซ็ตรหัส</button>
-            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>onToggle(u.id)}>{u.active?"ระงับ":"เปิดใช้"}</button>
-            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`)) onDelete(u.id);}}>ลบ</button>}
+            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>{t("รีเซ็ตรหัส","Reset password")}</button>
+            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>onToggle(u.id)}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>
+            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`))) onDelete(u.id);}}>ลบ</button>}
           </div>
         )}
       </td>
@@ -2573,18 +2586,18 @@ function AdminRestoreTab() {
   useEffect(() => { load(); }, [load]);
 
   const keyLabel = (key) => {
-    if (key === "tcs-projects") return "📁 รายชื่อโครงการ";
+    if (key === "tcs-projects") return t("📁 รายชื่อโครงการ","📁 Project list");
     const m = key.match(/^tcs-(tenders|po|additions|extra|hidden|inplan)-(.+)$/);
     if (m) {
-      const t = { tenders:"Tender Cost", po:"PO / จัดซื้อ", additions:"ยอดเพิ่มรายเดือน", extra:"รายการเพิ่ม", hidden:"หมวดที่ซ่อน", inplan:"แผนของเข้า" }[m[1]] || m[1];
-      return `${t} — ${projMap[m[2]] || m[2]}`;
+      const kt = { tenders:"Tender Cost", po:t("PO / จัดซื้อ","PO / Procurement"), additions:t("ยอดเพิ่มรายเดือน","Monthly additions"), extra:t("รายการเพิ่ม","Extra items"), hidden:t("หมวดที่ซ่อน","Hidden categories"), inplan:t("แผนของเข้า","Incoming plan") }[m[1]] || m[1];
+      return `${kt} — ${projMap[m[2]] || m[2]}`;
     }
-    if (key === "tcs-users") return "ผู้ใช้ (คีย์เก่า)";
-    if (key === "tcs-logs")  return "Log (คีย์เก่า)";
+    if (key === "tcs-users") return t("ผู้ใช้ (คีย์เก่า)","Users (legacy key)");
+    if (key === "tcs-logs")  return t("Log (คีย์เก่า)","Log (legacy key)");
     return key;
   };
   const preview = (v) => {
-    if (v == null) return "(ว่าง)";
+    if (v == null) return t("(ว่าง)","(empty)");
     const s = String(v);
     return s.length > 90 ? s.slice(0, 90) + "…" : s;
   };
@@ -2596,8 +2609,8 @@ function AdminRestoreTab() {
     if (/^tcs-(po|inplan)-/.test(key)) return "procurement";
     return "central"; // tcs-projects, tcs-users, tcs-logs, อื่น ๆ
   };
-  const DEPTS = [["all","ทั้งหมด"],["qs","QS"],["procurement","จัดซื้อ"],["central","ส่วนกลาง"]];
-  const deptTag = { qs:{label:"QS",color:T.blue,bg:T.blueLight}, procurement:{label:"จัดซื้อ",color:T.amber,bg:T.amberBg}, central:{label:"ส่วนกลาง",color:T.purple,bg:T.purpleBg} };
+  const DEPTS = [["all",t("ทั้งหมด","All")],["qs","QS"],["procurement",t("จัดซื้อ","Procurement")],["central",t("ส่วนกลาง","Central")]];
+  const deptTag = { qs:{label:"QS",color:T.blue,bg:T.blueLight}, procurement:{label:t("จัดซื้อ","Procurement"),color:T.amber,bg:T.amberBg}, central:{label:t("ส่วนกลาง","Central"),color:T.purple,bg:T.purpleBg} };
 
   // นับจำนวนไฟล์ข้อมูล (คีย์) ต่อแผนก — ใช้โชว์บนแท็บ
   const allKeys = [...new Set(snaps.map(s => s.key))];
@@ -2617,13 +2630,13 @@ function AdminRestoreTab() {
   });
   const rounds = Object.values(roundMap).sort((a,b) => b.taken_at.localeCompare(a.taken_at));
   const roundDateLabel = (r) => new Date(r.taken_at).toLocaleDateString("th-TH",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
-  const deptLabelOf = (id) => (DEPTS.find(([d])=>d===id)||[])[1] || "ข้อมูล";
+  const deptLabelOf = (id) => (DEPTS.find(([d])=>d===id)||[])[1] || t("ข้อมูล","Data");
 
   // กู้คืนทั้งชุดของแผนกที่เลือก กลับไปยังรอบเวลาที่กด — ย้อนทุกไฟล์พร้อมกัน
   const doRestoreRound = async (round) => {
     const rows = Object.values(round.byKey);
     const dl = deptLabelOf(dept);
-    if (!window.confirm(`กู้คืน "${dl}" ทั้งชุด (${rows.length} รายการ)\nกลับเป็นสแนปช็อต ${roundDateLabel(round)} · ${round.slot}?\n\nข้อมูลปัจจุบันของทุกไฟล์ในชุดนี้จะถูกแทนที่ด้วยข้อมูลจากรอบที่เลือก`)) return;
+    if (!window.confirm(t(`กู้คืน "${dl}" ทั้งชุด (${rows.length} รายการ)\nกลับเป็นสแนปช็อต ${roundDateLabel(round)} · ${round.slot}?\n\nข้อมูลปัจจุบันของทุกไฟล์ในชุดนี้จะถูกแทนที่ด้วยข้อมูลจากรอบที่เลือก`,`Restore the whole "${dl}" set (${rows.length} items)\nback to snapshot ${roundDateLabel(round)} · ${round.slot}?\n\nCurrent data for every file in this set will be replaced with the selected round`))) return;
     setBusy(true); setMsg("");
     let ok = 0, fail = 0;
     for (const row of rows) {
@@ -2631,18 +2644,18 @@ function AdminRestoreTab() {
       catch (e) { fail++; }
     }
     setMsg(fail === 0
-      ? `✅ กู้คืน ${dl} สำเร็จ ${ok} รายการ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน`
-      : `⚠️ กู้คืนสำเร็จ ${ok} รายการ · ไม่สำเร็จ ${fail} รายการ`);
+      ? t(`✅ กู้คืน ${dl} สำเร็จ ${ok} รายการ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน`,`✅ Restored ${dl}: ${ok} items — go back to the main page to see restored data`)
+      : t(`⚠️ กู้คืนสำเร็จ ${ok} รายการ · ไม่สำเร็จ ${fail} รายการ`,`⚠️ Restored ${ok} items · failed ${fail} items`));
     await load();
     setBusy(false);
   };
 
-  if (loading) return <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลดสแนปช็อต...</div>;
+  if (loading) return <div style={{color:T.textMuted,fontSize:13}}>{t("กำลังโหลดสแนปช็อต...","Loading snapshots...")}</div>;
 
   if (!snaps.length) return (
     <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textSecondary,lineHeight:1.7}}>
-      ยังไม่มีสแนปช็อต<br/>
-      <span style={{color:T.textMuted}}>ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์ <b>kv-snapshots.sql</b> ใน Supabase</span>
+      {t("ยังไม่มีสแนปช็อต","No snapshots yet")}<br/>
+      <span style={{color:T.textMuted}}>{t("ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์","Auto snapshots run twice a day (12:00 and 18:00) after running")} <b>kv-snapshots.sql</b> ใน Supabase</span>
     </div>
   );
 
@@ -2654,7 +2667,7 @@ function AdminRestoreTab() {
           color:msg.startsWith("✅")?T.green:msg.startsWith("⚠️")?T.amber:T.red}}>{msg}</div>
       )}
       <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>
-        สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · เลือกแผนก แล้วกด "กู้คืนทั้งชุด" กลับไปยังรอบเวลาที่ต้องการ — ทุกไฟล์ของแผนกนั้นจะย้อนกลับพร้อมกัน
+        {t('สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · เลือกแผนก แล้วกด "กู้คืนทั้งชุด" กลับไปยังรอบเวลาที่ต้องการ — ทุกไฟล์ของแผนกนั้นจะย้อนกลับพร้อมกัน','Auto snapshots twice a day — 12:00 and 18:00 · pick a department and press "Restore set" to roll back to a chosen round — all its files roll back together')}
       </div>
       <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
         {DEPTS.map(([id,label])=>{
@@ -2671,12 +2684,12 @@ function AdminRestoreTab() {
 
       {!rounds.length ? (
         <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textMuted}}>
-          แผนก "{deptLabelOf(dept)}" ยังไม่มีสแนปช็อตให้กู้คืน
+          {t("แผนก","Department")} "{deptLabelOf(dept)}" {t("ยังไม่มีสแนปช็อตให้กู้คืน","has no snapshots to restore")}
         </div>
       ) : (
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{fontSize:12,fontWeight:650,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>
-            รอบสแนปช็อตของ {deptLabelOf(dept)} ({rounds.length} รอบ)
+            {t("รอบสแนปช็อตของ","Snapshot rounds of")} {deptLabelOf(dept)} ({rounds.length} {t("รอบ","rounds")})
           </div>
           {rounds.map(round => {
             const rows = Object.values(round.byKey);
@@ -2685,11 +2698,11 @@ function AdminRestoreTab() {
                 <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                   <span style={{flexShrink:0,fontSize:11,fontWeight:650,padding:"3px 11px",borderRadius:8,background:T.blueLight,color:T.blue}}>{round.slot}</span>
                   <div style={{fontSize:14,fontWeight:650,color:T.textPrimary}}>{roundDateLabel(round)}</div>
-                  <span style={{fontSize:12,color:T.textMuted}}>· {rows.length} ไฟล์ในชุดนี้</span>
+                  <span style={{fontSize:12,color:T.textMuted}}>· {rows.length} {t("ไฟล์ในชุดนี้","files in this set")}</span>
                   <div style={{flex:1,minWidth:12}}/>
                   <button onClick={()=>doRestoreRound(round)} disabled={busy}
                     className="btn-primary" style={{flexShrink:0,padding:"8px 18px",fontSize:13,opacity:busy?0.5:1,cursor:busy?"default":"pointer"}}>
-                    ↩︎ กู้คืนทั้งชุด ({rows.length})
+                    ↩︎ {t("กู้คืนทั้งชุด","Restore set")} ({rows.length})
                   </button>
                 </div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:12}}>
@@ -2725,22 +2738,22 @@ function AdminAccountsTab() {
 
   const save = async () => {
     const clean = rows.map(r => ({ ...r, code: (r.code || "").trim(), name: (r.name || "").trim(), group: (r.group || "Other").trim() }));
-    if (clean.some(r => !r.code)) { setMsg("⚠ มีรหัสว่าง — กรอกรหัสให้ครบ"); return; }
-    if (clean.some(r => !r.name)) { setMsg("⚠ มีชื่อว่าง — กรอกชื่อให้ครบ"); return; }
+    if (clean.some(r => !r.code)) { setMsg(t("⚠ มีรหัสว่าง — กรอกรหัสให้ครบ","⚠ Some codes are empty — fill them in")); return; }
+    if (clean.some(r => !r.name)) { setMsg(t("⚠ มีชื่อว่าง — กรอกชื่อให้ครบ","⚠ Some names are empty — fill them in")); return; }
     const codes = clean.map(r => r.code);
     if (new Set(codes).size !== codes.length) { setMsg("⚠ มีรหัสซ้ำกัน — Acc code ห้ามซ้ำ"); return; }
     const renameMap = {}; clean.forEach(r => { if (r.orig && r.orig !== r.code) renameMap[r.orig] = r.code; });
     const nRen = Object.keys(renameMap).length;
-    if (!window.confirm(`บันทึกรายการบัญชี ${clean.length} รายการ?` + (nRen ? `\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ` : "") + `\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`)) return;
-    setBusy(true); setMsg("กำลังบันทึก…");
+    if (!window.confirm((t(`บันทึกรายการบัญชี ${clean.length} รายการ?`,`Save ${clean.length} account codes?`)) + (nRen ? t(`\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ`,`\n\n${nRen} codes changed — existing data (Tender Cost / PO / monthly / plan) for all projects will be migrated automatically`) : "") + t(`\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`,`\n\nThe page will refresh when done`))) return;
+    setBusy(true); setMsg(t("กำลังบันทึก…","Saving…"));
     try {
-      if (nRen) { setMsg("กำลังย้ายข้อมูลข้ามทุกโครงการ…"); await migrateAccountCodes(renameMap); }
+      if (nRen) { setMsg(t("กำลังย้ายข้อมูลข้ามทุกโครงการ…","Migrating data across all projects…")); await migrateAccountCodes(renameMap); }
       const list = clean.map(r => ({ code: r.code, name: r.name, group: r.group }));
       await ss("tcs-accounts", list);
       applyAccountList(list);
-      setMsg("✓ บันทึกเรียบร้อย กำลังรีเฟรช…");
+      setMsg(t("✓ บันทึกเรียบร้อย กำลังรีเฟรช…","✓ Saved, refreshing…"));
       setTimeout(() => { if (typeof window !== "undefined") window.location.reload(); }, 700);
-    } catch (e) { console.warn("save accounts failed", e); setBusy(false); setMsg("บันทึกไม่สำเร็จ: " + (e.message || "ลองใหม่อีกครั้ง")); }
+    } catch (e) { console.warn("save accounts failed", e); setBusy(false); setMsg(t("บันทึกไม่สำเร็จ: ","Save failed: ") + (e.message || t("ลองใหม่อีกครั้ง","try again"))); }
   };
 
   const inp = { padding: "6px 8px", fontSize:12, border: `1px solid ${T.cardBorder}`, borderRadius: 8, width: "100%", fontFamily: "inherit" };
@@ -2748,21 +2761,21 @@ function AdminAccountsTab() {
     <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${T.cardBorder}`, flexWrap: "wrap", gap: 10 }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: T.textPrimary }}>รหัสบัญชีทั้งหมด ({rows.length})</div>
-          <div style={{ fontSize:11, color: T.textMuted, marginTop: 2 }}>แก้รหัส/ชื่อได้ · รหัสห้ามซ้ำ · เปลี่ยนรหัสแล้วระบบย้ายข้อมูลเดิมให้ทุกโครงการ · ใช้ร่วมกันทุกโครงการ</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.textPrimary }}>{t("รหัสบัญชีทั้งหมด","All account codes")} ({rows.length})</div>
+          <div style={{ fontSize:11, color: T.textMuted, marginTop: 2 }}>{t("แก้รหัส/ชื่อได้ · รหัสห้ามซ้ำ · เปลี่ยนรหัสแล้วระบบย้ายข้อมูลเดิมให้ทุกโครงการ · ใช้ร่วมกันทุกโครงการ","Edit code/name · codes must be unique · changing a code migrates existing data across projects · shared by all projects")}</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={addRow} className="btn-ghost">+ เพิ่มรหัส</button>
-          <button onClick={save} disabled={busy || dupCodes.size > 0} className="btn-primary" style={{ background: dupCodes.size ? T.textMuted : T.blue }}>{busy ? "⏳ กำลังบันทึก…" : "💾 บันทึก"}</button>
+          <button onClick={addRow} className="btn-ghost">+ {t("เพิ่มรหัส","Add code")}</button>
+          <button onClick={save} disabled={busy || dupCodes.size > 0} className="btn-primary" style={{ background: dupCodes.size ? T.textMuted : T.blue }}>{busy ? t("⏳ กำลังบันทึก…","⏳ Saving…") : t("💾 บันทึก","💾 Save")}</button>
         </div>
       </div>
-      {msg && <div style={{ padding: "10px 18px", fontSize:12, fontWeight: 600, color: msg.startsWith("✓") ? T.green : (msg.startsWith("⚠") || msg.startsWith("บันทึกไม่")) ? T.red : T.textSecondary, background: "#f8fafc" }}>{msg}</div>}
+      {msg && <div style={{ padding: "10px 18px", fontSize:12, fontWeight: 600, color: msg.startsWith("✓") ? T.green : (msg.startsWith("⚠") || msg.startsWith("บันทึกไม่") || msg.startsWith("Save failed")) ? T.red : T.textSecondary, background: "#f8fafc" }}>{msg}</div>}
       <div style={{ maxHeight: "58vh", overflow: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize:12 }}>
           <thead>
             <tr>
-              {["Acc. Code", "ชื่อ / คำอธิบาย", "กลุ่ม", ""].map((h, i) => (
-                <th key={h + i} style={{ position: "sticky", top: 0, background: "#f1f5f9", textAlign: "left", padding: "9px 12px", fontSize: 11, color: T.textMuted, fontWeight: 650, borderBottom: `1px solid ${T.cardBorder}`, width: h === "" ? 40 : (h === "Acc. Code" ? 130 : (h === "กลุ่ม" ? 160 : "auto")) }}>{h}</th>
+              {[["Acc. Code","Acc. Code"], ["ชื่อ / คำอธิบาย","Name / description"], ["กลุ่ม","Group"], ["",""]].map(([h,he], i) => (
+                <th key={h + i} style={{ position: "sticky", top: 0, background: "#f1f5f9", textAlign: "left", padding: "9px 12px", fontSize: 11, color: T.textMuted, fontWeight: 650, borderBottom: `1px solid ${T.cardBorder}`, width: h === "" ? 40 : (h === "Acc. Code" ? 130 : (h === "กลุ่ม" ? 160 : "auto")) }}>{t(h,he)}</th>
               ))}
             </tr>
           </thead>
@@ -2773,14 +2786,14 @@ function AdminAccountsTab() {
                 <tr key={r.rid} style={{ borderBottom: `1px solid ${T.cardBorder}` }}>
                   <td style={{ padding: "5px 10px" }}>
                     <input value={r.code} onChange={e => setCell(r.rid, "code", e.target.value)} style={{ ...inp, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, borderColor: isDup ? T.red : T.cardBorder, background: isDup ? T.redBg : "#fff" }} />
-                    {r.orig && r.orig !== (r.code || "").trim() && <div style={{ fontSize: 10, color: T.amber, marginTop: 2 }}>เดิม {r.orig}</div>}
+                    {r.orig && r.orig !== (r.code || "").trim() && <div style={{ fontSize: 10, color: T.amber, marginTop: 2 }}>{t("เดิม","was")} {r.orig}</div>}
                   </td>
                   <td style={{ padding: "5px 10px" }}><input value={r.name} onChange={e => setCell(r.rid, "name", e.target.value)} style={inp} /></td>
                   <td style={{ padding: "5px 10px" }}>
                     <input list="acc-groups" value={r.group} onChange={e => setCell(r.rid, "group", e.target.value)} style={inp} />
                   </td>
                   <td style={{ padding: "5px 10px", textAlign: "center" }}>
-                    <button onClick={() => delRow(r.rid)} title="ลบรหัสนี้" style={{ background: "none", border: "none", color: T.red, cursor: "pointer", fontSize: 14 }}>🗑</button>
+                    <button onClick={() => delRow(r.rid)} title={t("ลบรหัสนี้","Delete this code")} style={{ background: "none", border: "none", color: T.red, cursor: "pointer", fontSize: 14 }}>🗑</button>
                   </td>
                 </tr>
               );
@@ -2789,7 +2802,7 @@ function AdminAccountsTab() {
         </table>
         <datalist id="acc-groups">{groupOptions.map(g => <option key={g} value={g} />)}</datalist>
       </div>
-      {dupCodes.size > 0 && <div style={{ padding: "10px 18px", fontSize: 12, color: T.red, fontWeight: 600 }}>⚠ มีรหัสซ้ำ: {[...dupCodes].join(", ")} — แก้ให้ไม่ซ้ำก่อนบันทึก</div>}
+      {dupCodes.size > 0 && <div style={{ padding: "10px 18px", fontSize: 12, color: T.red, fontWeight: 600 }}>⚠ {t("มีรหัสซ้ำ","Duplicate codes")}: {[...dupCodes].join(", ")} — {t("แก้ให้ไม่ซ้ำก่อนบันทึก","make them unique before saving")}</div>}
     </div>
   );
 }
@@ -2822,31 +2835,31 @@ function AdminPanel({ onBack, onLogout, session }) {
   const handleDelete  = async (id)      => setUsers(await deleteUser(users, id));
   const handleCreate  = async () => {
     setErr("");
-    if (!draft.username.trim() || !draft.password) { setErr("กรอก Username และ Password"); return; }
-    if (draft.password.trim().length < 8) { setErr("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร"); return; }
+    if (!draft.username.trim() || !draft.password) { setErr(t("กรอก Username และ Password","Enter Username and Password")); return; }
+    if (draft.password.trim().length < 8) { setErr(t("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร","Password must be at least 8 characters")); return; }
     try {
       const next = await createUser(draft);
       setUsers(next); setAddOpen(false); setDraft({ username:"", name:"", role:"qs", password:"" });
-    } catch (e) { setErr(e.message || "สร้างผู้ใช้ไม่สำเร็จ"); }
+    } catch (e) { setErr(e.message || t("สร้างผู้ใช้ไม่สำเร็จ","Failed to create user")); }
   };
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
-        <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
         <div>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>Admin Panel</div>
         </div>
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
           <span style={{fontSize:12,color:"rgba(255,255,255,0.8)"}}>👤 {session.name} ({ROLE_LABELS[session.role]})</span>
-          <button onClick={onLogout} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>ออกจากระบบ</button>
+          <button onClick={onLogout} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>{t("ออกจากระบบ","Logout")}</button>
         </div>
       </div>
 
       <div style={{padding:"28px 32px"}}>
         <div style={{display:"flex",gap:8,marginBottom:22}}>
-          {[["users","👥 จัดการผู้ใช้"],["accounts","🏷️ รหัสบัญชี"],["logs","📜 Log การเข้าใช้งาน"],["restore","🕘 กู้คืนข้อมูล"]].map(([id,label])=>(
+          {[["users",t("👥 จัดการผู้ใช้","👥 Manage users")],["accounts",t("🏷️ รหัสบัญชี","🏷️ Account codes")],["logs",t("📜 Log การเข้าใช้งาน","📜 Access log")],["restore",t("🕘 กู้คืนข้อมูล","🕘 Restore data")]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
@@ -2855,7 +2868,7 @@ function AdminPanel({ onBack, onLogout, session }) {
         </div>
 
         {!loaded ? (
-          <div style={{color:T.textMuted,fontSize:13}}>กำลังโหลด...</div>
+          <div style={{color:T.textMuted,fontSize:13}}>{t("กำลังโหลด...","Loading...")}</div>
         ) : tab === "restore" ? (
           <AdminRestoreTab />
         ) : tab === "accounts" ? (
@@ -2863,8 +2876,8 @@ function AdminPanel({ onBack, onLogout, session }) {
         ) : tab === "users" ? (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`}}>
-              <div style={{fontSize:13,fontWeight:600,color:T.textPrimary}}>ผู้ใช้ทั้งหมด ({users.length})</div>
-              <button className="btn-primary" onClick={()=>setAddOpen(v=>!v)}>+ เพิ่มผู้ใช้</button>
+              <div style={{fontSize:13,fontWeight:600,color:T.textPrimary}}>{t("ผู้ใช้ทั้งหมด","All users")} ({users.length})</div>
+              <button className="btn-primary" onClick={()=>setAddOpen(v=>!v)}>+ {t("เพิ่มผู้ใช้","Add user")}</button>
             </div>
             {addOpen && (
               <div style={{padding:18,borderBottom:`1px solid ${T.cardBorder}`,background:"#fafbfd"}}>
@@ -2874,23 +2887,23 @@ function AdminPanel({ onBack, onLogout, session }) {
                     <input className="input-base" value={draft.username} onChange={e=>setDraft(d=>({...d,username:e.target.value}))} />
                   </label>
                   <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                    <span style={{fontSize:11,color:T.textSecondary}}>ชื่อที่แสดง</span>
+                    <span style={{fontSize:11,color:T.textSecondary}}>{t("ชื่อที่แสดง","Display name")}</span>
                     <input className="input-base" value={draft.name} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} />
                   </label>
                   <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                    <span style={{fontSize:11,color:T.textSecondary}}>แผนก</span>
+                    <span style={{fontSize:11,color:T.textSecondary}}>{t("แผนก","Department")}</span>
                     <select className="input-base" value={draft.role} onChange={e=>setDraft(d=>({...d,role:e.target.value}))}>
                       <option value="qs">QS</option>
-                      <option value="procurement">จัดซื้อ</option>
-                      <option value="accounting">บัญชี</option>
+                      <option value="procurement">{t("จัดซื้อ","Procurement")}</option>
+                      <option value="accounting">{t("บัญชี","Accounting")}</option>
                       <option value="admin">Admin</option>
                     </select>
                   </label>
                   <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                    <span style={{fontSize:11,color:T.textSecondary}}>Password (≥ 8 ตัว)</span>
+                    <span style={{fontSize:11,color:T.textSecondary}}>Password (≥ 8 {t("ตัว","chars")})</span>
                     <input className="input-base" type="password" autoComplete="new-password" value={draft.password} onChange={e=>setDraft(d=>({...d,password:e.target.value}))} />
                   </label>
-                  <button className="btn-primary" onClick={handleCreate}>สร้าง</button>
+                  <button className="btn-primary" onClick={handleCreate}>{t("สร้าง","Create")}</button>
                 </div>
                 {err && <div style={{color:T.red,fontSize:12,marginTop:8,fontWeight:500}}>{err}</div>}
               </div>
@@ -2898,8 +2911,8 @@ function AdminPanel({ onBack, onLogout, session }) {
             <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
-                  {["Username","ชื่อที่แสดง","แผนก","สถานะ",""].map(h=>(
-                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                  {[["Username","Username"],["ชื่อที่แสดง","Display name"],["แผนก","Department"],["สถานะ","Status"],["",""]].map(([h,he])=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
                   ))}
                 </tr>
               </thead>
@@ -2913,19 +2926,19 @@ function AdminPanel({ onBack, onLogout, session }) {
         ) : (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
             <div style={{padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:600,color:T.textPrimary}}>
-              ประวัติการเข้าใช้งานล่าสุด ({logs.length})
+              {t("ประวัติการเข้าใช้งานล่าสุด","Recent access history")} ({logs.length})
             </div>
             <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
-                  {["เวลา","Username","แผนก","ผลลัพธ์"].map(h=>(
-                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{h}</th>
+                  {[["เวลา","Time"],["Username","Username"],["แผนก","Department"],["ผลลัพธ์","Result"]].map(([h,he])=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {logs.length===0 ? (
-                  <tr><td colSpan={4} style={{padding:"30px",textAlign:"center",color:T.textMuted}}>ยังไม่มีข้อมูล</td></tr>
+                  <tr><td colSpan={4} style={{padding:"30px",textAlign:"center",color:T.textMuted}}>{t("ยังไม่มีข้อมูล","No data")}</td></tr>
                 ) : logs.map(l => (
                   <tr key={l.id} style={{borderBottom:"1px solid #f1f5f9"}}>
                     <td style={{padding:"9px 14px",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{new Date(l.time).toLocaleString("th-TH")}</td>
@@ -2933,7 +2946,7 @@ function AdminPanel({ onBack, onLogout, session }) {
                     <td style={{padding:"9px 14px",color:T.textSecondary}}>{ROLE_LABELS[l.role]||l.role}</td>
                     <td style={{padding:"9px 14px"}}>
                       <span style={{background:l.result==="success"?T.greenBg:T.redBg,color:l.result==="success"?T.green:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>
-                        {l.result==="success"?"สำเร็จ":l.result==="inactive"?"บัญชีถูกระงับ":"ล้มเหลว"}
+                        {l.result==="success"?t("สำเร็จ","Success"):l.result==="inactive"?t("บัญชีถูกระงับ","Suspended"):t("ล้มเหลว","Failed")}
                       </span>
                     </td>
                   </tr>
@@ -2953,7 +2966,7 @@ function Loader() {
     <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:T.bg}}>
       <div style={{textAlign:"center"}}>
         <div style={{width:40,height:40,border:`3px solid ${T.blueMid}`,borderTopColor:T.blue,borderRadius:"50%",animation:"spin 0.7s linear infinite",margin:"0 auto 14px"}}/>
-        <div style={{fontSize:13,color:T.textSecondary}}>กำลังโหลด...</div>
+        <div style={{fontSize:13,color:T.textSecondary}}>{t("กำลังโหลด...","Loading...")}</div>
       </div>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
@@ -2965,7 +2978,7 @@ function SyncBadge({ syncing, syncedAt }) {
   return (
     <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(255,255,255,0.15)",backdropFilter:"blur(8px)",borderRadius:8,padding:"5px 12px",fontSize:11,color:"rgba(255,255,255,0.85)"}}>
       <span style={{width:6,height:6,borderRadius:"50%",background:syncing?"#fbbf24":"#34d399",display:"inline-block",boxShadow:syncing?"0 0 6px #fbbf24":"0 0 6px #34d399",animation:syncing?"pulse 0.8s ease-in-out infinite":"none"}}/>
-      {syncing ? "กำลัง sync..." : syncedAt ? `sync ${syncedAt.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}` : ""}
+      {syncing ? t("กำลัง sync...","Syncing...") : syncedAt ? `sync ${syncedAt.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}` : ""}
     </div>
   );
 }
@@ -2987,7 +3000,7 @@ function SearchInput({ value, onChange, placeholder, width = 240, big = false })
         onFocus={big?(e=>{e.currentTarget.style.borderColor=T.blue;e.currentTarget.style.boxShadow="0 0 0 3px rgba(37,99,235,0.15)";}):undefined}
         onBlur={big?(e=>{e.currentTarget.style.borderColor=value?T.blue:"#94a3b8";e.currentTarget.style.boxShadow="0 1px 4px rgba(15,23,42,0.07)";}):undefined}/>
       {value && (
-        <button type="button" onClick={()=>onChange("")} title="ล้างคำค้นหา"
+        <button type="button" onClick={()=>onChange("")} title={t("ล้างคำค้นหา","Clear search")}
           style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",width:20,height:20,border:"none",
             borderRadius:"50%",background:"transparent",color:T.textMuted,fontSize:15,lineHeight:1,cursor:"pointer",
             display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
@@ -3108,7 +3121,7 @@ function CurrencyControl({ project, updateProject }) {
         <span style={{fontSize:12,fontWeight:650,color:on?T.green:T.textMuted}}>USD</span>
       </button>
       <span style={{fontSize:11,color:T.textMuted,whiteSpace:"nowrap"}}>฿/$</span>
-      <input type="number" step="any" min="0" value={txt} placeholder="อัตรา"
+      <input type="number" step="any" min="0" value={txt} placeholder={t("อัตรา","Rate")}
         onChange={e=>setTxt(e.target.value)} onBlur={commitRate}
         onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); }}
         style={{width:64,fontSize:12,padding:"4px 6px",border:`1px solid ${T.cardBorder}`,borderRadius:7,fontFamily:"'JetBrains Mono',monospace",textAlign:"right"}}/>
@@ -3141,8 +3154,8 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px",flexWrap:"wrap",gap:12}}>
           <div>
             <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600,marginBottom:4}}>TENDER COST SYSTEM</div>
-            <div style={{fontSize:22,fontWeight:700,color:"#fff",letterSpacing:"-0.5px"}}>ระบบบริหารต้นทุนโครงการ</div>
-            <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · จัดซื้อ · บัญชี — Real-time sync</div>
+            <div style={{fontSize:22,fontWeight:700,color:"#fff",letterSpacing:"-0.5px"}}>{t("ระบบบริหารต้นทุนโครงการ","Project Cost Management")}</div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · {t("จัดซื้อ · บัญชี","Procurement · Accounting")} — Real-time sync</div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
             <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
@@ -3155,7 +3168,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
             {session?.role !== "accounting" && (
               <button className="btn-primary" onClick={()=>setNewProjModal(true)}
                 style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:16,lineHeight:1}}>+</span> โครงการใหม่
+                <span style={{fontSize:16,lineHeight:1}}>+</span> {t("โครงการใหม่","New project")}
               </button>
             )}
             <div style={{width:1,alignSelf:"stretch",background:"rgba(255,255,255,0.2)"}}/>
@@ -3163,16 +3176,16 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
               <div style={{fontSize:12,color:"#fff",fontWeight:600}}>{session?.name}</div>
               <div style={{fontSize:10,color:"rgba(255,255,255,0.6)"}}>{ROLE_LABELS[session?.role]}</div>
             </div>
-            <button onClick={onLogout} title="ออกจากระบบ"
+            <button onClick={onLogout} title={t("ออกจากระบบ","Logout")}
               style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600}}>
-              ออกจากระบบ
+              {t("ออกจากระบบ","Logout")}
             </button>
           </div>
         </div>
         {/* Summary row */}
         <div style={{display:"flex",gap:24,paddingBottom:20}}>
           {[
-            {label:"โครงการทั้งหมด",value:projects.length,icon:"🏗"},
+            {label:t("โครงการทั้งหมด","All projects"),value:projects.length,icon:"🏗"},
             {label:"Active Projects",value:projects.length,icon:"📊"},
           ].map(s=>(
             <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.12)",borderRadius:10,padding:"8px 16px"}}>
@@ -3188,21 +3201,21 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
         {projects.length === 0 ? (
           <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
             <div style={{fontSize:52,marginBottom:14}}>🏗</div>
-            <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>ยังไม่มีโครงการ</div>
-            <div style={{fontSize:13,marginBottom:20}}>กด "โครงการใหม่" เพื่อเริ่มต้น</div>
-            <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ สร้างโครงการแรก</button>
+            <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>{t("ยังไม่มีโครงการ","No projects yet")}</div>
+            <div style={{fontSize:13,marginBottom:20}}>{t('กด "โครงการใหม่" เพื่อเริ่มต้น','Press "New project" to start')}</div>
+            <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ {t("สร้างโครงการแรก","Create first project")}</button>
           </div>
         ) : (
           <>
             <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
-              <input value={projSearch} onChange={e=>setProjSearch(e.target.value)} placeholder="🔍 ค้นหาโครงการ / ชื่อลูกค้า…"
+              <input value={projSearch} onChange={e=>setProjSearch(e.target.value)} placeholder={t("🔍 ค้นหาโครงการ / ชื่อลูกค้า…","🔍 Search project / client…")}
                 style={{flex:1,minWidth:220,maxWidth:360,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
               <span style={{fontSize:12,color:T.textMuted,fontWeight:500}}>
-                {projSearch.trim() ? `พบ ${shownProjects.length} จาก ${projects.length} โครงการ` : `${projects.length} โครงการทั้งหมด`}
+                {projSearch.trim() ? `${t("พบ","Found")} ${shownProjects.length} ${t("จาก","of")} ${projects.length} ${t("โครงการ","projects")}` : `${projects.length} ${t("โครงการทั้งหมด","projects total")}`}
               </span>
             </div>
             {shownProjects.length === 0 ? (
-              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>ไม่พบโครงการที่ตรงกับ "{projSearch}"</div>
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบโครงการที่ตรงกับ","No projects match")} "{projSearch}"</div>
             ) : (
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
                 {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={session?.role==="accounting" ? null : ()=>deleteProject(p.id)} />)}
@@ -3218,19 +3231,19 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
           <div style={{background:T.card,borderRadius:20,padding:32,width:500,maxWidth:"90vw",boxShadow:"0 24px 60px rgba(0,0,0,0.15)",animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
               <div>
-                <div style={{fontSize:16,fontWeight:650,color:T.textPrimary}}>สร้างโครงการใหม่</div>
-                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>กรอกข้อมูลโครงการเพื่อเริ่มต้น</div>
+                <div style={{fontSize:16,fontWeight:650,color:T.textPrimary}}>{t("สร้างโครงการใหม่","Create new project")}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>{t("กรอกข้อมูลโครงการเพื่อเริ่มต้น","Fill in project details to start")}</div>
               </div>
               <button onClick={()=>setNewProjModal(false)} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               {[
-                ["ชื่อโครงการ *","name","text","1/-1"],
-                ["ลูกค้า / Client","client","text","1/-1"],
-                ["พื้นที่รวม (ft²)","area","number","auto"],
-                ["จำนวน Panels","panels","number","auto"],
-                ["สกุลเงิน","currency","text","auto"],
-                ["อัตราแลกเปลี่ยน (บาท/USD)","usdRate","number","auto"],
+                [t("ชื่อโครงการ *","Project name *"),"name","text","1/-1"],
+                [t("ลูกค้า / Client","Client"),"client","text","1/-1"],
+                [t("พื้นที่รวม (ft²)","Total area (ft²)"),"area","number","auto"],
+                [t("จำนวน Panels","Panels"),"panels","number","auto"],
+                [t("สกุลเงิน","Currency"),"currency","text","auto"],
+                [t("อัตราแลกเปลี่ยน (บาท/USD)","FX rate (THB/USD)"),"usdRate","number","auto"],
               ].map(([label,key,type,col]) => (
                 <label key={key} style={{display:"flex",flexDirection:"column",gap:6,gridColumn:col}}>
                   <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{label}</span>
@@ -3239,7 +3252,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
               ))}
             </div>
             <div style={{display:"flex",gap:10,marginTop:24}}>
-              <button onClick={createProject} disabled={!draft.name.trim()} className="btn-primary" style={{opacity:draft.name.trim()?1:0.5}}>สร้างโครงการ</button>
+              <button onClick={createProject} disabled={!draft.name.trim()} className="btn-primary" style={{opacity:draft.name.trim()?1:0.5}}>{t("สร้างโครงการ","Create project")}</button>
               <button onClick={()=>setNewProjModal(false)} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
             </div>
           </div>
@@ -3253,7 +3266,7 @@ function ProjectCard({ project, onOpen, onDelete }) {
   const ageRaw = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
   const age = Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : null;
   return (
-    <div className="card-hover" onClick={onOpen} title="เปิดโครงการ"
+    <div className="card-hover" onClick={onOpen} title={t("เปิดโครงการ","Open project")}
       style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
       <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:T.headerGrad,borderRadius:"16px 16px 0 0"}}/>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,paddingTop:2}}>
@@ -3271,8 +3284,8 @@ function ProjectCard({ project, onOpen, onDelete }) {
         {project.currency && <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div style={{fontSize:11,color:T.textMuted}}>{age === null ? "—" : age === 0 ? "สร้างวันนี้" : `${age} วันที่แล้ว`}</div>
-        <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>เปิดโครงการ →</button>
+        <div style={{fontSize:11,color:T.textMuted}}>{age === null ? "—" : age === 0 ? t("สร้างวันนี้","Created today") : `${age} ${t("วันที่แล้ว","days ago")}`}</div>
+        <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>{t("เปิดโครงการ","Open")} →</button>
       </div>
     </div>
   );
@@ -3285,15 +3298,15 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
   useEffect(() => setDraft(project), [project]);
 
   const ROLES = [
-    {id:"qs",label:"QS",sub:"Quantity Surveyor",desc:"ลงราคา Tender Cost\nประมาณการต้นทุนโครงการ",color:T.blue,bg:T.blueLight,icon:"📐"},
-    {id:"procurement",label:"จัดซื้อ",sub:"Procurement",desc:"ลงราคาจริงที่ซื้อ + วันที่\nออก PO และติดตามสถานะ",color:"#d97706",bg:"#fffbeb",icon:"📦"},
-    {id:"accounting",label:"บัญชี",sub:"Accounting",desc:"Dashboard ต้นทุน\nBudget vs Actual + Export Excel",color:T.green,bg:T.greenBg,icon:"📊"},
+    {id:"qs",label:"QS",sub:"Quantity Surveyor",desc:t("ลงราคา Tender Cost\nประมาณการต้นทุนโครงการ","Enter Tender Cost\nestimate project cost"),color:T.blue,bg:T.blueLight,icon:"📐"},
+    {id:"procurement",label:t("จัดซื้อ","Procurement"),sub:"Procurement",desc:t("ลงราคาจริงที่ซื้อ + วันที่\nออก PO และติดตามสถานะ","Enter actual prices + dates\nissue POs and track status"),color:"#d97706",bg:"#fffbeb",icon:"📦"},
+    {id:"accounting",label:t("บัญชี","Accounting"),sub:"Accounting",desc:t("Dashboard ต้นทุน\nBudget vs Actual + Export Excel","Cost dashboard\nBudget vs Actual + Export Excel"),color:T.green,bg:T.greenBg,icon:"📊"},
   ];
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
-        <button onClick={onBack} title="กลับ" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
         <div>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>{project.name}</div>
@@ -3310,9 +3323,9 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
       <div style={{padding:"32px"}}>
         {editing ? (
           <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,marginBottom:28,maxWidth:640}}>
-            <div style={{fontSize:14,fontWeight:600,color:T.textPrimary,marginBottom:16}}>แก้ไขข้อมูลโครงการ</div>
+            <div style={{fontSize:14,fontWeight:600,color:T.textPrimary,marginBottom:16}}>{t("แก้ไขข้อมูลโครงการ","Edit project details")}</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
-              {[["ชื่อโครงการ","name","text"],["ลูกค้า","client","text"],["สกุลเงิน","currency","text"],["อัตราแลกเปลี่ยน (บาท/USD)","usdRate","number"],["พื้นที่ (ft²)","area","number"],["Panels","panels","number"]].map(([l,k,t]) => (
+              {[[t("ชื่อโครงการ","Project name"),"name","text"],[t("ลูกค้า","Client"),"client","text"],[t("สกุลเงิน","Currency"),"currency","text"],[t("อัตราแลกเปลี่ยน (บาท/USD)","FX rate (THB/USD)"),"usdRate","number"],[t("พื้นที่ (ft²)","Area (ft²)"),"area","number"],["Panels","panels","number"]].map(([l,k,t]) => (
                 <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
                   <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
                   <input type={t} step={t==="number"?"any":undefined} value={draft[k]||""} onChange={e=>setDraft(d=>({...d,[k]:e.target.value}))} className="input-base"/>
@@ -3321,14 +3334,14 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
             </div>
             <div style={{display:"flex",gap:10,marginTop:16}}>
               <button className="btn-primary" onClick={()=>{updateProject(draft);setEditing(false);}}>บันทึก</button>
-              <button className="btn-ghost" onClick={()=>setEditing(false)}>ยกเลิก</button>
+              <button className="btn-ghost" onClick={()=>setEditing(false)}>{t("ยกเลิก","Cancel")}</button>
             </div>
           </div>
         ) : (
-          <button onClick={()=>setEditing(true)} className="btn-ghost" style={{marginBottom:24,fontSize:12}}>✏️ แก้ไขข้อมูลโครงการ</button>
+          <button onClick={()=>setEditing(true)} className="btn-ghost" style={{marginBottom:24,fontSize:12}}>✏️ {t("แก้ไขข้อมูลโครงการ","Edit project details")}</button>
         )}
 
-        <div style={{fontSize:13,color:T.textSecondary,marginBottom:20,fontWeight:500}}>เลือก Role การทำงาน</div>
+        <div style={{fontSize:13,color:T.textSecondary,marginBottom:20,fontWeight:500}}>{t("เลือก Role การทำงาน","Choose your role")}</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:20,maxWidth:800}}>
           {ROLES.map(r => (
             <button key={r.id} onClick={()=>onSelect(r.id)} className="card-hover"
@@ -3340,7 +3353,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
                 <div style={{fontSize:11,color:T.textMuted,marginTop:2,letterSpacing:0.5}}>{r.sub}</div>
               </div>
               <p style={{margin:0,fontSize:12,color:T.textSecondary,lineHeight:1.7,whiteSpace:"pre-line"}}>{r.desc}</p>
-              <div style={{display:"flex",alignItems:"center",gap:4,fontSize:12,color:r.color,fontWeight:600,marginTop:4}}>เข้าใช้งาน <span>→</span></div>
+              <div style={{display:"flex",alignItems:"center",gap:4,fontSize:12,color:r.color,fontWeight:600,marginTop:4}}>{t("เข้าใช้งาน","Enter")} <span>→</span></div>
             </button>
           ))}
         </div>
@@ -3838,7 +3851,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                         {k.name}
                         {k.addedInMonth && (
                           <span title={t("เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น","Added later, not from the start")} style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
-                            เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
+                            {t("เพิ่มเมื่อ","Added")} {monthShortLabel(k.addedInMonth)}
                           </span>
                         )}
                       </td>
@@ -4599,7 +4612,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     <th key={c.id} style={{padding:"6px 18px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:12,borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:5}}>
                         <span>{c.name}</span>
-                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title="ลบรายการนี้ (เฉพาะเดือนนี้)" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:12,padding:0}}>✕</button>}
+                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title={t("ลบรายการนี้ (เฉพาะเดือนนี้)","Delete this item (this month only)")} style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:12,padding:0}}>✕</button>}
                       </div>
                     </th>
                   ))}
@@ -4979,14 +4992,14 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   const removeRound = (itemId, roundId) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
     if ((it.rounds||[]).length <= 1) return;
-    if (!confirm("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)")) return;
+    if (!confirm(t("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)","Delete this round? (its entered amount/date will be removed)"))) return;
     setItemRounds(itemId, it.rounds.filter(r => r.id !== roundId));
   };
   const roundBadge = (r) => {
     if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
     // ถ้าวันของเข้าจริงยังมาไม่ถึง (วันในอนาคต) = ยังไม่ถือว่ารับของ แสดงเป็น "นัดรับ"
-    if (r.actualDate > todayStr()) return [`นัดรับ ${r.actualDate} (ยังไม่ถึงวัน)`, INCOMING_BG.pending, INCOMING_CLR.pending];
-    return roundPaid(po,r) ? ["ถึงกำหนดจ่ายแล้ว", PAYMENT_BG.paid, PAYMENT_CLR.paid]
+    if (r.actualDate > todayStr()) return [t(`นัดรับ ${r.actualDate} (ยังไม่ถึงวัน)`,`Due ${r.actualDate} (not yet)`), INCOMING_BG.pending, INCOMING_CLR.pending];
+    return roundPaid(po,r) ? [t("ถึงกำหนดจ่ายแล้ว","Payment due"), PAYMENT_BG.paid, PAYMENT_CLR.paid]
                            : [t("ของเข้าแล้ว · รอครบกำหนด","Received · awaiting due"), INCOMING_BG.partial, INCOMING_CLR.partial];
   };
 
@@ -5077,26 +5090,26 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
                           {!locked && it.rounds.length>1 && (
-                            <button type="button" onClick={()=>removeRound(it.id,r.id)} title="ลบงวดนี้"
+                            <button type="button" onClick={()=>removeRound(it.id,r.id)} title={t("ลบงวดนี้","Delete round")}
                               style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13,padding:"2px 4px",borderRadius:6,lineHeight:1}}>🗑</button>
                           )}
                         </div>
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                          <span style={{fontSize:10,color:T.textSecondary}}>ยอดของเข้าจริง (บาท)</span>
-                          <MoneyInput value={r.actualAmount} placeholder="บาท"
+                          <span style={{fontSize:10,color:T.textSecondary}}>{t("ยอดของเข้าจริง (บาท)","Actual received (THB)")}</span>
+                          <MoneyInput value={r.actualAmount} placeholder={t("บาท","THB")}
                             onChange={v=>setActualAmount(it.id,r.id,v)}/>
                         </label>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                          <span style={{fontSize:10,color:T.textSecondary}}>วันของเข้าจริง</span>
+                          <span style={{fontSize:10,color:T.textSecondary}}>{t("วันของเข้าจริง","Actual date")}</span>
                           <input type="date" value={r.actualDate}
                             onChange={e=>updateRound(it.id,r.id,"actualDate",e.target.value)} className="input-base"/>
                         </label>
                       </div>
                       <div style={{marginTop:6,fontSize:11,color:T.textSecondary}}>
-                        💰 วันครบกำหนดจ่าย: <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{payDate||"—"}</span>
-                        <span style={{color:T.textMuted}}> ({po.paymentType==="cash"?"เงินสด":po.paymentType==="credit"?`เครดิต ${po.creditDays} วัน`:"ยังไม่ระบุวิธีจ่าย"})</span>
+                        💰 {t("วันครบกำหนดจ่าย","Payment due")}: <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{payDate||"—"}</span>
+                        <span style={{color:T.textMuted}}> ({po.paymentType==="cash"?t("เงินสด","Cash"):po.paymentType==="credit"?t(`เครดิต ${po.creditDays} วัน`,`Credit ${po.creditDays}d`):t("ยังไม่ระบุวิธีจ่าย","No method")})</span>
                         {late && <span style={{color:T.red}}> · {t("ของมาช้า","late arrival")}</span>}
                       </div>
                     </div>
@@ -5175,10 +5188,10 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
               setCapWarn(""); onClose();
             }}
             disabled={!!overCapItem} className="btn-primary"
-            title={overCapItem?`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`:undefined}
-            style={{background:overCapItem?"#e2e8f0":T.green,color:overCapItem?"#94a3b8":"#fff",cursor:overCapItem?"not-allowed":"pointer"}}>{overCapItem?"⚠":"💾"} บันทึก</button>
+            title={overCapItem?t(`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`,`${overCapItem.code||"item"}: total across rounds exceeds order — fix before saving`):undefined}
+            style={{background:overCapItem?"#e2e8f0":T.green,color:overCapItem?"#94a3b8":"#fff",cursor:overCapItem?"not-allowed":"pointer"}}>{overCapItem?"⚠":"💾"} {t("บันทึก","Save")}</button>
           {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title={t("แก้ผู้ขาย / หมวด / ยอดสั่ง","Edit vendor / category / order")}>✏️ {t("แก้ไข PO","Edit PO")}</button>}
-          <button onClick={()=>onDelete(po.id)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 ลบ</button>
+          <button onClick={()=>onDelete(po.id)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 {t("ลบ","Delete")}</button>
           <div style={{flex:1}}/>
           <button onClick={onClose} className="btn-ghost">{t("ปิด","Close")}</button>
         </div>
@@ -5392,10 +5405,10 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
         </div>
       )}
 
-      <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary, marginBottom: 10 }}>📝 จัดการแผน</div>
+      <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary, marginBottom: 10 }}>📝 {t("จัดการแผน","Manage plans")}</div>
       {sorted.length === 0 ? (
         <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
-          <div style={{ fontSize:32,marginBottom:10 }}>📅</div>ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม
+          <div style={{ fontSize:32,marginBottom:10 }}>📅</div>{t("ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม","No incoming plans — press “+ Add plan” to start")}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -5406,7 +5419,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
             return (
               <div key={pl.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 18px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
-                  <span style={{ background: T.amberBg, color: T.amber, fontWeight: 650, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 ของเข้า {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
+                  <span style={{ background: T.amberBg, color: T.amber, fontWeight: 650, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 {t("ของเข้า","Incoming")} {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
                   {pl.supplier?.name && <span style={{ fontSize: 12, color: T.textSecondary }}>· {pl.supplier.name}</span>}
                   <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} {t("รายการ","items")}</span>
                   <span style={{ marginLeft: "auto", textAlign: "right" }}>
@@ -5550,7 +5563,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
     const prev = editId ? (editingPlan ? plans.find(x=>x.id===editId) : poEntries.find(x=>x.id===editId)) : null;
     const entries = [];
-    if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `เปลี่ยนสถานะ: ${prev.status} → ${payload.status}`));
+    if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `${t("เปลี่ยนสถานะ","Status change")}: ${prev.status} → ${payload.status}`));
     entries.push(historyEntry(session, prev ? "edited" : "created", toPlan ? (prev?t("แก้ไขแผนของเข้า","Edited incoming plan"):t("สร้างแผนของเข้า","Created incoming plan")) : (prev?t("แก้ไขข้อมูล PO","Edited PO"):t("สร้างรายการ PO","Created PO"))));
     const withLog = { ...payload, isPlan: toPlan, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
 
@@ -5583,7 +5596,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const applyStatus = (po, newStatus, paidDate) => {
     const patch = { ...po, status: newStatus };
     if (newStatus === "Paid") patch.paidDate = paidDate || todayStr();   // จำวันจ่ายที่กำหนดเอง
-    const label = `เปลี่ยนสถานะ: ${po.status} → ${newStatus}` + (newStatus === "Paid" && patch.paidDate ? ` (จ่าย ${patch.paidDate})` : "");
+    const label = `${t("เปลี่ยนสถานะ","Status change")}: ${po.status} → ${newStatus}` + (newStatus === "Paid" && patch.paidDate ? ` (${t("จ่าย","paid")} ${patch.paidDate})` : "");
     const updated = withHistory(patch, historyEntry(session, "status", label));
     savePO(poEntries.map(x=>x.id===po.id?updated:x));
   };
@@ -6541,7 +6554,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   return (
     <div>
       <div style={{ fontSize:12, color: T.textMuted, marginBottom: 8 }}>
-        {t("โชว์เฉพาะเดือนที่มีข้อมูล · Balance Cost = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว · PO Balance = งบ − Stock − Total PO (ยังไม่คิดแผน)","Only months with data · Balance Cost = Budget − Stock − PO − Plan (real remaining to order) · Incoming = Received(green) + PO awaiting(black) + Plan(red) · Total PO = ordered · PO Balance = Budget − Stock − Total PO (plan excluded)")}
+        {t("โชว์เฉพาะเดือนที่มีข้อมูล · Pending PO = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Balance Cost = งบ − Stock − PO (ตรงกับหน้าจัดซื้อ) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว","Only months with data · Pending PO = Budget − Stock − PO − Plan (real remaining to order) · Balance Cost = Budget − Stock − PO (matches Procurement) · Incoming = Received(green) + PO awaiting(black) + Plan(red) · Total PO = ordered")}
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
         {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
@@ -6569,13 +6582,13 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
               <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("budget")}</th>
               <th onClick={()=>toggleSort("balPO")}     style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Pending PO{arrow("balPO")}</th>
               <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
-              <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balCost")}</th>
+              <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("balCost")}</th>
               {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell(bMg), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("im:"+i)}</th>)}
               <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("mgTot")}</th>
               {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell(bPy), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("pm:"+i)}</th>)}
               <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("pyTot")}</th>
               <th onClick={()=>toggleSort("committed")} style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Total PO{arrow("committed")}</th>
-              <th onClick={()=>toggleSort("balPOout")}  style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>PO Balance{arrow("balPOout")}</th>
+              <th onClick={()=>toggleSort("balPOout")}  style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balPOout")}</th>
             </tr>
           </thead>
           <tbody>
