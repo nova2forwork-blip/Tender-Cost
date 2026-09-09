@@ -2457,14 +2457,14 @@ function LoginScreen({ onLogin }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!username.trim() || !password) { setError("กรอก Username และ Password ให้ครบ"); return; }
+    if (!username.trim() || !password) { setError(t("กรอก Username และ Password ให้ครบ","Please enter both Username and Password")); return; }
     setBusy(true); setError("");
     try {
       const user = await verifyLogin(username, password);
-      if (!user) { setError("Username หรือ Password ไม่ถูกต้อง หรือบัญชีถูกระงับ"); setBusy(false); return; }
+      if (!user) { setError(t("Username หรือ Password ไม่ถูกต้อง หรือบัญชีถูกระงับ","Incorrect Username or Password, or the account is suspended")); setBusy(false); return; }
       onLogin(user);
     } catch (err) {
-      setError("เกิดข้อผิดพลาด ลองใหม่อีกครั้ง");
+      setError(t("เกิดข้อผิดพลาด ลองใหม่อีกครั้ง","An error occurred, please try again"));
       setBusy(false);
     }
   };
@@ -2475,8 +2475,8 @@ function LoginScreen({ onLogin }) {
         <div style={{textAlign:"center",marginBottom:28}}>
           <div style={{fontSize:34,marginBottom:8}}>🏗</div>
           <div style={{fontSize:11,letterSpacing:3,color:T.textMuted,textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
-          <div style={{fontSize:19,fontWeight:700,color:T.textPrimary,marginTop:4}}>เข้าสู่ระบบ</div>
-          <div style={{fontSize:12,color:T.textMuted,marginTop:4}}>ล็อกอินตามแผนก: QS · จัดซื้อ · บัญชี · Admin</div>
+          <div style={{fontSize:19,fontWeight:700,color:T.textPrimary,marginTop:4}}>{t("เข้าสู่ระบบ","Sign in")}</div>
+          <div style={{fontSize:12,color:T.textMuted,marginTop:4}}>{t("ล็อกอินตามแผนก: QS · จัดซื้อ · บัญชี · Admin","Login by department: QS · Procurement · Accounting · Admin")}</div>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           <label style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -2995,13 +2995,13 @@ function GroupFilter({ selected, onChange, options = GROUPS, color = T.blue }) {
   }, [open]);
   const toggle = (g) => onChange(selected.includes(g) ? selected.filter(x => x !== g) : [...selected, g]);
   const has = selected.length > 0;
-  const label = !has ? "ทุกหมวด" : selected.length === 1 ? selected[0] : `${selected.length} หมวด`;
+  const label = !has ? t("ทุกหมวด","All groups") : selected.length === 1 ? selected[0] : `${selected.length} ${t("หมวด","groups")}`;
   const rowStyle = (on) => ({ display:"flex",alignItems:"center",gap:8,width:"100%",textAlign:"left",border:"none",
     background: on ? T.blueLight : "transparent", color: on ? color : T.textSecondary, cursor:"pointer",
     padding:"7px 10px", borderRadius:8, fontSize:12, fontWeight: on ? 650 : 500 });
   return (
     <div ref={ref} style={{position:"relative",flexShrink:0}}>
-      <button onClick={()=>setOpen(o=>!o)} title="กรองตามหมวด (เลือกได้หลายหมวด)"
+      <button onClick={()=>setOpen(o=>!o)} title={t("กรองตามหมวด (เลือกได้หลายหมวด)","Filter by group (multi-select)")}
         style={{display:"flex",alignItems:"center",gap:7,padding:"6px 12px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap",
           border:`1.5px solid ${has?color:T.cardBorder}`, background: has?color:T.card, color: has?"#fff":T.textSecondary}}>
         🏷 {label}
@@ -3012,7 +3012,7 @@ function GroupFilter({ selected, onChange, options = GROUPS, color = T.blue }) {
         <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:60,background:T.card,border:`1px solid ${T.cardBorder}`,
           borderRadius:12,boxShadow:"0 10px 32px rgba(15,23,42,0.18)",padding:6,minWidth:210,maxHeight:340,overflowY:"auto"}}>
           <button onClick={()=>{ onChange([]); }} style={rowStyle(!has)}>
-            <span style={{fontSize:13}}>{!has?"◉":"◯"}</span> ทุกหมวด
+            <span style={{fontSize:13}}>{!has?"◉":"◯"}</span> {t("ทุกหมวด","All groups")}
           </button>
           <div style={{height:1,background:T.cardBorder,margin:"4px 2px"}}/>
           {options.map(g => {
@@ -3027,7 +3027,7 @@ function GroupFilter({ selected, onChange, options = GROUPS, color = T.blue }) {
             <>
               <div style={{height:1,background:T.cardBorder,margin:"4px 2px"}}/>
               <button onClick={()=>onChange([])} style={{...rowStyle(false),color:T.red,justifyContent:"center",fontWeight:600}}>
-                ✕ ล้างตัวเลือก
+                ✕ {t("ล้างตัวเลือก","Clear selection")}
               </button>
             </>
           )}
@@ -3421,7 +3421,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   };
 
   const handleDeleteExtraItem = (code) => {
-    if (!confirm("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย")) return;
+    if (!confirm(t("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย","Delete this item? All its amounts (baseline + every month) will be deleted too"))) return;
     saveExtraItems(extraItems.filter(e => e.code !== code));
     const nextTenders = { ...tenderCosts }; delete nextTenders[code];
     saveTenders(nextTenders);
@@ -3434,7 +3434,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   // numbers — it's reversible — it just removes it from the QS entry list and from
   // downstream totals, in case a project doesn't use that code at all.
   const handleHideAccount = (code) => {
-    if (!confirm("นำ Acc. Code นี้ออกจากรายการหลัก? (กู้คืนได้ภายหลัง ตัวเลขที่เคยกรอกไว้จะยังไม่หาย)")) return;
+    if (!confirm(t("นำ Acc. Code นี้ออกจากรายการหลัก? (กู้คืนได้ภายหลัง ตัวเลขที่เคยกรอกไว้จะยังไม่หาย)","Remove this Acc. Code from the main list? (restorable later; entered numbers are kept)"))) return;
     saveHiddenAccounts([...hiddenAccounts, code]);
   };
   const handleRestoreAccount = (code) => saveHiddenAccounts(hiddenAccounts.filter(c => c !== code));
@@ -3602,7 +3602,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
     const code = addDraft.code.trim();
     if (code) {
       const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
-      if (taken) { alert(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`); return; }
+      if (taken) { alert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
     }
     onAddExtra({ name:addDraft.name, group:addDraft.group, code: code || undefined });
     setAddDraft({ code:"", name:"", group:GROUPS[0] }); setAddOpen(false);
@@ -3835,7 +3835,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
           </tbody>
           <tfoot>
             <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{filtered.length} รายการ</td>
+              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{filtered.length} {t("รายการ","items")}</td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
                 {fmt(filtered.reduce((s,a)=>s+effectiveValue(a),0))}
                 {usdLine(filtered.reduce((s,a)=>s+effectiveValue(a),0), usdRate)}
@@ -4014,7 +4014,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // month before) + "added" (that month's increment) in a different color,
   // so growth is visible within a single bar instead of a smooth area line.
   const chartData = [
-    { label:"เริ่มต้น", cumulative: baseTotal, previous: baseTotal, added: 0 },
+    { label:t("เริ่มต้น","Start"), cumulative: baseTotal, previous: baseTotal, added: 0 },
     ...sortedMonths.map(m => {
       const added = monthTotalLive(m);
       const cumulative = cumulativeLive(m);
@@ -4027,7 +4027,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // BEFORE the one currently selected — not the fixed original baseline —
   // so it moves forward as prior months get their additions saved.
   const priorMonths      = sortedMonths.filter(m => m < month);
-  const prevMonthLabel   = priorMonths.length ? monthShortLabel(priorMonths[priorMonths.length-1]) : "เริ่มต้น";
+  const prevMonthLabel   = priorMonths.length ? monthShortLabel(priorMonths[priorMonths.length-1]) : t("เริ่มต้น","Start");
   const baselineForMonth = baseTotal + priorMonths.reduce((s,m)=>s+monthTotalLive(m),0);
 
   const filtered = allRows.filter(r => {
@@ -4129,7 +4129,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const code = extraDraft.code.trim();
     if (code) {
       const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
-      if (taken) { alert(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`); return; }
+      if (taken) { alert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
     }
     onAddExtra({ name:extraDraft.name, group:extraDraft.group, code: code || undefined });
     setExtraDraft({ code:"", name:"", group:GROUPS[0] }); setAddExtraOpen(false);
@@ -4156,7 +4156,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const newCol = { id: uid(), name };
     const nextDraft = { ...draftAdd };
     if (columns.length === 0) {
-      const seedCol = { id: "legacy", name: "รายการหลัก" };
+      const seedCol = { id: "legacy", name: t("รายการหลัก","Main item") };
       allRows.forEach(r => {
         const v = nextDraft[r.code];
         if (v !== undefined && v !== "" && parseFloat(v)) nextDraft[`${r.code}:legacy`] = v;
@@ -4174,7 +4174,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // ถ้ากด "ยกเลิก" คอลัมน์และค่าที่กรอกไว้จะกลับคืนมา (ไม่โดนลบ) และคอลัมน์ที่ลบ
   // ไปแล้วจะไม่ถูกนำไปคิดยอด (เพราะยอด roll-up ตอนบันทึกจะไม่รวมคอลัมน์นั้น)
   const handleRemoveColumn = (colId) => {
-    if (!confirm("ลบคอลัมน์นี้เฉพาะเดือนนี้?\n\n• จะมีผลจริงเมื่อกด \"บันทึก\"\n• กด \"ยกเลิก\" เพื่อคืนคอลัมน์และค่าที่กรอกไว้")) return;
+    if (!confirm(t("ลบคอลัมน์นี้เฉพาะเดือนนี้?\n\n• จะมีผลจริงเมื่อกด \"บันทึก\"\n• กด \"ยกเลิก\" เพื่อคืนคอลัมน์และค่าที่กรอกไว้","Delete this column for this month only?\n\n• Takes effect when you press \"Save\"\n• Press \"Cancel\" to restore the column and entered values"))) return;
     const nextCols = columns.filter(c => c.id !== colId);
     const nextDraft = { ...draftAdd };
     Object.keys(nextDraft).forEach(k => { if (k.endsWith(`:${colId}`)) delete nextDraft[k]; });
@@ -4183,18 +4183,56 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     // ไม่ saveAdditions ที่นี่ — รอกด "บันทึก" (handleSave) เท่านั้น เพื่อให้ยกเลิกได้
   };
 
+  // Excel-style block paste: paste a copied range from Excel/Sheets straight into
+  // the grid. Starting from the focused cell, values flow down (rows) and right
+  // (columns), matching whatever the user copied. Only leaf rows take a value —
+  // parent rows (with sub-items) show a roll-up total and are skipped. Blank
+  // cells in the pasted block are left untouched so pasting one column can't wipe
+  // the others. Values land in the draft; the user still presses "Save this month".
+  const handleGridPaste = (startRowIdx, startColIdx, raw) => {
+    if (!editingUnlocked) return;
+    const grid = String(raw ?? "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n+$/, "")
+      .split("\n")
+      .map(line => line.split("\t"));
+    if (!grid.length) return;
+    setDraftAdd(d => {
+      const next = { ...d };
+      grid.forEach((cells, ri) => {
+        const row = displayRows[startRowIdx + ri];
+        if (!row) return;
+        if (kidsAsOf(row.code, month).length > 0) return; // parent roll-up row — no direct input
+        cells.forEach((cellRaw, ci) => {
+          if (String(cellRaw).trim() === "") return; // don't overwrite with blanks
+          const val = evalMoney(cellRaw);
+          if (val === "") return;
+          if (isMultiCol) {
+            const col = columns[startColIdx + ci];
+            if (!col) return; // ignore columns beyond the current ones
+            next[`${row.code}:${col.id}`] = val;
+          } else {
+            if (ci > 0) return; // single-column grid — only first pasted column applies
+            next[row.code] = val;
+          }
+        });
+      });
+      return next;
+    });
+  };
+
   return (
     <div style={{padding:"4px 28px 24px"}}>
       {/* Trend chart — the whole project's cost growth over time, at a glance */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
-          <span style={{fontSize:13,fontWeight:650,color:T.textPrimary}}>📈 แนวโน้มต้นทุนสะสม</span>
-          <span style={{fontSize:12,color:T.textMuted}}>รวมล่าสุดทั้งโปรเจกต์: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b className="usd-sub" style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
+          <span style={{fontSize:13,fontWeight:650,color:T.textPrimary}}>📈 {t("แนวโน้มต้นทุนสะสม","Cumulative cost trend")}</span>
+          <span style={{fontSize:12,color:T.textMuted}}>{t("รวมล่าสุดทั้งโปรเจกต์","Project latest total")}: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b className="usd-sub" style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
         </div>
         <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap",alignItems:"center"}}>
-          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.blue,display:"inline-block"}}/>ยอดก่อนหน้า (สะสม)</span>
-          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.amber,display:"inline-block"}}/>เพิ่มเดือนนี้</span>
-          <span style={{color:T.textMuted,fontSize:11}}>· คลิกที่แท่งเพื่อเลือกเดือน (เดือนที่เลือกจะมีกรอบ)</span>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.blue,display:"inline-block"}}/>{t("ยอดก่อนหน้า (สะสม)","Previous (cumulative)")}</span>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.amber,display:"inline-block"}}/>{t("เพิ่มเดือนนี้","Added this month")}</span>
+          <span style={{color:T.textMuted,fontSize:11}}>· {t("คลิกที่แท่งเพื่อเลือกเดือน (เดือนที่เลือกจะมีกรอบ)","Click a bar to select a month (selected has an outline)")}</span>
         </div>
         <ResponsiveContainer width="100%" height={280}>
           <BarChart data={chartData} margin={{top:14,right:8,left:-14,bottom:6}} barCategoryGap="22%"
@@ -4205,10 +4243,10 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             <YAxis tick={{fontSize:10,fill:T.textMuted}} axisLine={false} tickLine={false} tickFormatter={fmtK}/>
             <Tooltip cursor={{fill:"rgba(37,99,235,0.06)"}} formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
               contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
-            <Bar dataKey="previous" stackId="cum" name="ยอดก่อนหน้า" radius={[0,0,0,0]}>
+            <Bar dataKey="previous" stackId="cum" name={t("ยอดก่อนหน้า","Previous")} radius={[0,0,0,0]}>
               {chartData.map((e,i)=>{ const sel = e.monthKey===month; return <Cell key={i} fill={T.blue} stroke={sel?"#0f172a":"none"} strokeWidth={sel?2.5:0} cursor="pointer"/>; })}
             </Bar>
-            <Bar dataKey="added" stackId="cum" name="เพิ่มเดือนนี้" radius={[5,5,0,0]}>
+            <Bar dataKey="added" stackId="cum" name={t("เพิ่มเดือนนี้","Added this month")} radius={[5,5,0,0]}>
               {chartData.map((e,i)=>{ const sel = e.monthKey===month; return <Cell key={i} fill={T.amber} stroke={sel?"#0f172a":"none"} strokeWidth={sel?2.5:0} cursor="pointer"/>; })}
             </Bar>
           </BarChart>
@@ -4294,6 +4332,13 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           </button>
         )}
       </div>
+
+      {editingUnlocked && (
+        <div style={{display:"flex",alignItems:"center",gap:7,margin:"-6px 2px 14px",fontSize:12,color:T.textMuted}}>
+          <span style={{background:T.greenBg,color:T.green,fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:6,whiteSpace:"nowrap"}}>📋 Excel</span>
+          <span>{t("ก็อปช่วงเซลล์จาก Excel แล้ววางในช่องเริ่มต้น ระบบจะเติมลงทั้งบล็อก (ลงล่าง = แถว, ไปขวา = คอลัมน์)","Copy a range from Excel and paste it into a starting cell — it fills the whole block (down = rows, right = columns)")}</span>
+        </div>
+      )}
 
       {addExtraOpen && (
         <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:10,alignItems:"end"}}>
@@ -4453,13 +4498,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             {usdLine(thisVal, usdRate)}
                           </div>
                         </td>
-                      ) : columns.map(c=>{
+                      ) : columns.map((c,ci)=>{
                         const ck = `${r.code}:${c.id}`;
                         const cv = parseFloat(draftAdd[ck])||0;
                         return (
                           <td key={c.id} style={{padding:"8px 10px",textAlign:"right"}}>
                             {editingUnlocked ? (
                               <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
+                                onPaste={raw=>handleGridPaste(i,ci,raw)}
                                 style={{width:104,fontSize:13,background:cv!==0?T.amberBg:T.bg}}/>
                             ) : (
                               <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(cv!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
@@ -4476,6 +4522,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                           </div>
                         ) : editingUnlocked ? (
                           <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
+                            onPaste={raw=>handleGridPaste(i,0,raw)}
                             style={{width:130,background:thisVal!==0?T.amberBg:T.bg}}/>
                         ) : (
                           <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(thisVal!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
@@ -4624,7 +4671,7 @@ const fmtMoneyInput = (v) => {
   if (v === "" || v == null || isNaN(Number(v))) return "";
   return Number(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
 };
-function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style }) {
+function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style, onPaste }) {
   const [focused, setFocused] = useState(false);
   const [text, setText] = useState("");
   const commit = () => { onChange(evalMoney(text)); setFocused(false); };
@@ -4642,7 +4689,18 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
       onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s]/g, ""))}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); e.currentTarget.blur(); } }}
       onBlur={commit}
-      title="พิมพ์บวก/ลบได้ เช่น 20000+10000 แล้วกด Enter เพื่อรวมยอด"
+      onPaste={(e) => {
+        // Excel-style block paste: if the clipboard holds a grid (tabs / newlines),
+        // let the parent distribute it across many cells instead of pasting into one.
+        if (!onPaste) return;
+        const raw = e.clipboardData?.getData("text") ?? "";
+        if (/[\t\n\r]/.test(raw.replace(/\s+$/, ""))) {
+          e.preventDefault();
+          e.currentTarget.blur();
+          onPaste(raw);
+        }
+      }}
+      title={t("พิมพ์บวก/ลบได้ เช่น 20000+10000 แล้วกด Enter เพื่อรวมยอด · วางจาก Excel ได้ทั้งบล็อก","Type +/- e.g. 20000+10000 then Enter to sum · paste a whole block from Excel")}
     />
   );
 }
