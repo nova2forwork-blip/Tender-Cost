@@ -3624,48 +3624,48 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
     <div style={{padding:"4px 28px 24px"}}>
       {/* Stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-        <StatCard label="ราคาเดิมรวม (Tender Cost)" value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub="ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง" color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label="เผื่อเศษ/สูญเสีย 3%" value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub="ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)" color={T.amber} icon="⚙️" accent={T.amberBg}/>
-        <StatCard label="รวมเผื่อ 3% (อ้างอิง)" value={"฿"+fmt0(total)} thb={total} rate={usdRate} sub="ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม" color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label={t("ราคาเดิมรวม (Tender Cost)","Total Tender Cost")} value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub={t("ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง","All baseline prices — used as the real budget")} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label={t("เผื่อเศษ/สูญเสีย 3%","Wastage allowance 3%")} value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub={t("ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)","Reference only (not in budget)")} color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label={t("รวมเผื่อ 3% (อ้างอิง)","Total incl. 3% (ref.)")} value={"฿"+fmt0(total)} thb={total} rate={usdRate} sub={t("ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม","Estimate with wastage — actual budget uses baseline")} color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       {/* Filters + Add row + Save */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <SearchInput value={search} onChange={setSearch} placeholder="🔍 ค้นหา Account Code / ชื่อ..." width={240}/>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account Code / ชื่อ...","🔍 Search Account Code / name...")} width={240}/>
         <button onClick={()=>setHideEmpty(v=>!v)}
-          title="ซ่อน/แสดงแถวที่ไม่มีค่า (ราคาเดิม = 0)"
+          title={t("ซ่อน/แสดงแถวที่ไม่มีค่า (ราคาเดิม = 0)","Hide/show empty rows (baseline = 0)")}
           style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",
             border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
-          {hideEmpty ? `✓ เฉพาะที่มีค่า${hiddenEmptyCount?` (ซ่อน ${hiddenEmptyCount})`:""}` : "⚡ เฉพาะที่มีค่า"}
+          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : `⚡ ${t("เฉพาะที่มีค่า","With value only")}`}
         </button>
         <GroupFilter selected={filter} onChange={setFilter}/>
         <div style={{flex:1}}/>
         {hiddenList.length > 0 && (
           <button className="btn-ghost" onClick={()=>setShowHidden(v=>!v)} style={{color:T.textMuted}}>
-            🗂 ที่ซ่อนไว้ ({hiddenList.length})
+            🗂 {t("ที่ซ่อนไว้","Hidden")} ({hiddenList.length})
           </button>
         )}
         <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)} disabled={!editingUnlocked}
-          style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ เพิ่มรายการหลักใหม่</button>
+          style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ {t("เพิ่มรายการหลักใหม่","Add new main item")}</button>
         {!editingUnlocked && (
           <span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.textMuted,background:"#f1f5f9",padding:"6px 12px",borderRadius:8,fontWeight:600}}>
-            🔒 บันทึกแล้ว
+            🔒 {t("บันทึกแล้ว","Saved")}
           </span>
         )}
         {editingUnlocked ? (
           <>
             <button onClick={handleSave} className="btn-primary"
               style={{background:saved?T.green:T.blue,minWidth:140}}>
-              {saved?"✓ บันทึกแล้ว":"บันทึก Tender Cost"}
+              {saved?t("✓ บันทึกแล้ว","✓ Saved"):t("บันทึก Tender Cost","Save Tender Cost")}
             </button>
             {canCancel && (
-              <button onClick={handleCancel} className="btn-ghost" title="ยกเลิกการแก้ไข (Esc)"
-                style={{color:T.red,borderColor:T.red}}>✕ ยกเลิก</button>
+              <button onClick={handleCancel} className="btn-ghost" title={t("ยกเลิกการแก้ไข (Esc)","Cancel editing (Esc)")}
+                style={{color:T.red,borderColor:T.red}}>✕ {t("ยกเลิก","Cancel")}</button>
             )}
           </>
         ) : (
           <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:140}}>
-            ✏️ แก้ไข Tender Cost
+            ✏️ {t("แก้ไข Tender Cost","Edit Tender Cost")}
           </button>
         )}
       </div>
@@ -3673,13 +3673,13 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
       {/* Hidden accounts panel */}
       {showHidden && hiddenList.length > 0 && (
         <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:14,marginBottom:16}}>
-          <div style={{fontSize:11,color:T.textSecondary,marginBottom:8}}>Acc. Code ที่ซ่อนไว้ — ตัวเลขที่เคยกรอกยังอยู่ กด "กู้คืน" เพื่อนำกลับมาแสดง</div>
+          <div style={{fontSize:11,color:T.textSecondary,marginBottom:8}}>{t('Acc. Code ที่ซ่อนไว้ — ตัวเลขที่เคยกรอกยังอยู่ กด "กู้คืน" เพื่อนำกลับมาแสดง','Hidden Acc. Codes — entered values are kept; click "Restore" to bring them back')}</div>
           <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
             {hiddenList.map(a=>(
               <div key={a.code} style={{display:"flex",alignItems:"center",gap:8,background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"6px 10px"}}>
                 <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:T.textMuted}}>{a.code}</span>
                 <span style={{fontSize:12,color:T.textPrimary}}>{a.name}</span>
-                <button onClick={()=>onRestoreAccount(a.code)} className="btn-ghost" style={{padding:"3px 9px",fontSize:11}}>↺ กู้คืน</button>
+                <button onClick={()=>onRestoreAccount(a.code)} className="btn-ghost" style={{padding:"3px 9px",fontSize:11}}>↺ {t("กู้คืน","Restore")}</button>
               </div>
             ))}
           </div>
@@ -3690,15 +3690,15 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
       {addOpen && (
         <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:10,alignItems:"end"}}>
           <label style={{display:"flex",flexDirection:"column",gap:5}}>
-            <span style={{fontSize:11,color:T.textSecondary}}>Acc. Code (ถ้ามี)</span>
+            <span style={{fontSize:11,color:T.textSecondary}}>{t("Acc. Code (ถ้ามี)","Acc. Code (if any)")}</span>
             <input className="input-base" value={addDraft.code} onChange={e=>setAddDraft(d=>({...d,code:e.target.value}))}
-              placeholder="เช่น 511099" style={{fontFamily:"'JetBrains Mono',monospace"}}
+              placeholder={t("เช่น 511099","e.g. 511099")} style={{fontFamily:"'JetBrains Mono',monospace"}}
               onKeyDown={e=>e.key==="Enter"&&handleAddRow()} />
           </label>
           <label style={{display:"flex",flexDirection:"column",gap:5}}>
-            <span style={{fontSize:11,color:T.textSecondary}}>ชื่อรายการใหม่ (งานที่ไม่มี Acc. Code เดิมรองรับ)</span>
+            <span style={{fontSize:11,color:T.textSecondary}}>{t("ชื่อรายการใหม่ (งานที่ไม่มี Acc. Code เดิมรองรับ)","New item name (work without an existing Acc. Code)")}</span>
             <input className="input-base" value={addDraft.name} onChange={e=>setAddDraft(d=>({...d,name:e.target.value}))}
-              placeholder="พิมพ์ชื่อรายการที่ต้องการเพิ่ม" onKeyDown={e=>e.key==="Enter"&&handleAddRow()} autoFocus />
+              placeholder={t("พิมพ์ชื่อรายการที่ต้องการเพิ่ม","Type the item name to add")} onKeyDown={e=>e.key==="Enter"&&handleAddRow()} autoFocus />
           </label>
           <label style={{display:"flex",flexDirection:"column",gap:5}}>
             <span style={{fontSize:11,color:T.textSecondary}}>Group</span>
@@ -3706,7 +3706,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
               {GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
             </select>
           </label>
-          <button className="btn-primary" onClick={handleAddRow}>+ เพิ่ม</button>
+          <button className="btn-primary" onClick={handleAddRow}>+ {t("เพิ่ม","Add")}</button>
         </div>
       )}
 
@@ -3753,7 +3753,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                     </td>
                     <td style={{padding:"10px 16px",color:T.textPrimary}}>
                       {a.name}
-                      {a.isExtra && <span style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>รายการใหม่</span>}
+                      {a.isExtra && <span style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{t("รายการใหม่","New item")}</span>}
                       {hasKids && <span style={{marginLeft:7,fontSize:12,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} {t("รายการย่อย","sub-items")}</span>}
                       {!a.isExtra && editingUnlocked && (
                         <button onClick={(e)=>{e.stopPropagation(); setSubFor(subFor===a.code?null:a.code); setSubName(""); setCollapsed(c=>({...c,[a.code]:false}));}} title={t("เพิ่มรายการย่อยใต้ Acc. Code นี้","Add a sub-item under this Acc. Code")}
@@ -3777,9 +3777,9 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                     </td>
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
                       {editingUnlocked && (a.isExtra
-                        ? <button onClick={(e)=>{e.stopPropagation(); handleDeleteRow(a.code);}} title="ลบรายการนี้"
+                        ? <button onClick={(e)=>{e.stopPropagation(); handleDeleteRow(a.code);}} title={t("ลบรายการนี้","Delete this item")}
                             style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
-                        : <button onClick={(e)=>{e.stopPropagation(); onHideAccount(a.code);}} title="นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)"
+                        : <button onClick={(e)=>{e.stopPropagation(); onHideAccount(a.code);}} title={t("นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)","Remove this Acc. Code from the main list (restorable)")}
                             style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14}}>✕</button>)}
                     </td>
                   </tr>
@@ -3792,7 +3792,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                       <td style={{padding:"6px 16px",color:T.green,fontSize:13,fontStyle:"italic"}}>
                         {k.name}
                         {k.addedInMonth && (
-                          <span title="เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น" style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
+                          <span title={t("เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น","Added later, not from the start")} style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
                             เพิ่มเมื่อ {monthShortLabel(k.addedInMonth)}
                           </span>
                         )}
@@ -3807,7 +3807,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                       </td>
                       <td style={{padding:"6px 16px",textAlign:"center"}}>
                         {editingUnlocked && (
-                          <button onClick={()=>handleDeleteRow(k.code)} title="ลบรายการย่อยนี้"
+                          <button onClick={()=>handleDeleteRow(k.code)} title={t("ลบรายการย่อยนี้","Delete this sub-item")}
                             style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
                         )}
                       </td>
@@ -3820,12 +3820,12 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                       <td/><td/>
                       <td style={{padding:"7px 16px"}} colSpan={1}>
                         <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
-                          placeholder="ชื่อรายการย่อย เช่น Silicone Structure" style={{width:"100%",fontSize:13}}
+                          placeholder={t("ชื่อรายการย่อย เช่น Silicone Structure","Sub-item name e.g. Silicone Structure")} style={{width:"100%",fontSize:13}}
                           onKeyDown={e=>e.key==="Enter"&&handleAddSub(a.code)} autoFocus />
                       </td>
                       <td colSpan={2} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
-                        <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(a.code)}>+ เพิ่ม</button>
-                        <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>ยกเลิก</button>
+                        <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(a.code)}>+ {t("เพิ่ม","Add")}</button>
+                        <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>{t("ยกเลิก","Cancel")}</button>
                       </td>
                     </tr>
                   )}
@@ -3878,6 +3878,8 @@ const qsFrzSpan3 = (bg, z = 3) => ({
   position: "sticky", left: 0, width: QSF_SPAN3, minWidth: QSF_SPAN3, maxWidth: QSF_SPAN3, background: bg, zIndex: z,
   boxShadow: "3px 0 5px -2px rgba(15,23,42,0.13)",
 });
+// แถวรวมด้านล่าง: ตรึงไว้ (sticky bottom) ไม่ต้องเลื่อนลงไปดู
+const QSF_FOOT = { position: "sticky", bottom: 0, zIndex: 5, background: "#eef2f7" };
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project, registerMonthExport }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const thisMonth = new Date().toISOString().slice(0,7);
@@ -4566,34 +4568,34 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           </tbody>
           <tfoot>
             <tr style={{background:"#eef2f7",borderTop:`2px solid ${T.textMuted}`}}>
-              <td colSpan={3} style={{padding:"14px 16px",color:T.textSecondary,fontSize:13,fontWeight:700, ...qsFrzSpan3("#eef2f7")}}>{t("รวม","Total")} {filtered.length} {t("รายการ","items")}</td>
-              <td style={{padding:"14px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14, ...qsFrz(3,"#eef2f7")}}>
+              <td colSpan={3} style={{padding:"14px 16px",color:T.textSecondary,fontSize:13,fontWeight:700, ...qsFrzSpan3("#eef2f7"), bottom:0, zIndex:6}}>{t("รวม","Total")} {filtered.length} {t("รายการ","items")}</td>
+              <td style={{padding:"14px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14, ...qsFrz(3,"#eef2f7"), bottom:0, zIndex:6}}>
                 {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
                 {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r),0), usdRate)}
               </td>
-              <td/>
+              <td style={QSF_FOOT}/>
               {isMultiCol
                 ? columns.map(c => { const ct = filtered.reduce((s,r)=> s + (parseFloat(draftAdd[`${r.code}:${c.id}`])||0), 0); return (
-                    <td key={c.id} style={{padding:"10px 14px",textAlign:"right",whiteSpace:"nowrap"}}>
+                    <td key={c.id} style={{padding:"10px 14px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
                       <span style={{display:"inline-block",fontFamily:"'JetBrains Mono',monospace",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
                       {usdLine(ct, usdRate)}
                     </td>
                   ); })
                 : (() => { const ct = filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0); return (
-                    <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap"}}>
+                    <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
                       <span style={{display:"inline-block",fontFamily:"'JetBrains Mono',monospace",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
                       {usdLine(ct, usdRate)}
                     </td>
                   ); })()
               }
-              <td/>
-              <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap"}}>
+              <td style={QSF_FOOT}/>
+              <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
                 {(() => { const g = filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0); return (<>
                   <span style={{display:"inline-block",background:T.green,color:"#fff",fontWeight:800,padding:"5px 11px",borderRadius:8,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(g)}</span>
                   {usdLine(g, usdRate)}
                 </>); })()}
               </td>
-              <td/>
+              <td style={QSF_FOOT}/>
             </tr>
           </tfoot>
         </table>
@@ -5437,7 +5439,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
-            {[["list","📋 รายการ PO"],["inplan","📅 แผนของเข้า"]].map(([id,label])=>(
+            {[["list",t("📋 รายการ PO","📋 PO List")],["inplan",t("📅 แผนของเข้า","📅 Incoming plan")]].map(([id,label])=>(
               <button key={id} onClick={()=>goTab(id)}
                 style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
                 {label}
@@ -6574,7 +6576,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
-          {[["dashboard","📊 ภาพรวมงบ","ภาพรวม: งบประมาณ vs ที่ผูกพันแล้ว (PO) ทั้งโครงการ"],["dates","📅 ราย Acc. Code","รายหมวด: PO + วันของเข้า/วันครบกำหนดจ่าย + ยอดที่ต้องเก็บไว้จ่าย"],["plan","💰 แผนจ่ายรายเดือน","รายเดือน: เงินที่ต้องเตรียมจ่ายแยกตามเดือนครบกำหนด"],["matrix","📄 ตารางรวมเดือน","ตารางรวม: ต้นทุน + Incoming Plan / Actual Received / Payment Plan รายเดือน (เฉพาะเดือนที่มีข้อมูล)"]].map(([v,l,tip])=>(
+          {[["dashboard",t("📊 ภาพรวมงบ","📊 Budget overview"),t("ภาพรวม: งบประมาณ vs ที่ผูกพันแล้ว (PO) ทั้งโครงการ","Overview: budget vs committed (PO) for the whole project")],["dates",t("📅 ราย Acc. Code","📅 By Acc. Code"),t("รายหมวด: PO + วันของเข้า/วันครบกำหนดจ่าย + ยอดที่ต้องเก็บไว้จ่าย","By code: PO + delivery/due dates + amount to reserve")],["plan",t("💰 แผนจ่ายรายเดือน","💰 Monthly payment plan"),t("รายเดือน: เงินที่ต้องเตรียมจ่ายแยกตามเดือนครบกำหนด","Monthly: cash to prepare by due month")],["matrix",t("📄 ตารางรวมเดือน","📄 Monthly matrix"),t("ตารางรวม: ต้นทุน + Incoming Plan / Actual Received / Payment Plan รายเดือน (เฉพาะเดือนที่มีข้อมูล)","Matrix: cost + Incoming/Received/Payment per month (only months with data)")]].map(([v,l,tip])=>(
             <button key={v} onClick={()=>goView(v)} title={tip}
               style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
           ))}
