@@ -3463,7 +3463,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
         </div>
       </div>
       {tab === "baseline"
-        ? <QSBaselineTab project={project} tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems}
+        ? <QSBaselineTab project={project} tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems} additions={additions}
                          onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
                          hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
@@ -3474,7 +3474,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
 }
 
 // ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
-function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
+function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, additions = {}, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
@@ -3564,6 +3564,16 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
     else { setSortKey(key); setSortDir(1); }
   };
   const hiddenEmptyCount = hideEmpty ? filtered.length - filtered.filter(a => effectiveValue(a) !== 0).length : 0;
+
+  // ── Monthly additions rolled up per Acc. Code (read-only on the Baseline tab) ──
+  // Additions are entered on the "Monthly additions" tab; the monthly Save rolls a
+  // code's sub-items and per-item columns into its plain `code` key each month, so
+  // the all-time total for a code is just the sum of that key across every month
+  // (skip the "$…" meta keys). Same rule buildCombinedBudget() uses, so
+  // Baseline + Additions here matches the grand total shown elsewhere.
+  const rowAddTotal = (row) => Object.keys(additions).reduce((s,m)=> m.startsWith("$") ? s : s + monthAddValue(additions, m, row.code), 0);
+  const rowGrand    = (row) => effectiveValue(row) + rowAddTotal(row);
+
   const displayRows = (() => {
     // ซ่อนแถวที่ไม่มีค่า = ราคาเดิม (รวมรายการย่อย) เป็น 0
     const baseRows = hideEmpty ? filtered.filter(a => effectiveValue(a) !== 0) : filtered;
@@ -3574,6 +3584,8 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
       if (sortKey === "code")       { av = a.code; bv = b.code; }
       else if (sortKey === "group") { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
       else if (sortKey === "name")  { av = a.name; bv = b.name; }
+      else if (sortKey === "add")   { av = rowAddTotal(a); bv = rowAddTotal(b); }
+      else if (sortKey === "grand") { av = rowGrand(a); bv = rowGrand(b); }
       else                          { av = effectiveValue(a); bv = effectiveValue(b); }
       if (typeof av === "string") return av.localeCompare(bv) * sortDir;
       return (av - bv) * sortDir;
@@ -3713,18 +3725,20 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
 
       {/* Table */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+        <div className="hscroll"><table style={{width:"100%",minWidth:980,borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
               {[
-                {label:"Acc. Code", key:"code"},
-                {label:"Group", key:"group"},
-                {label:"Account Name", key:"name"},
-                {label:"Tender Cost (THB)", key:"value"},
-                {label:"", key:null},
-              ].map(({label,key})=>(
+                {label:"Acc. Code", key:"code", align:"left"},
+                {label:"Group", key:"group", align:"left"},
+                {label:"Account Name", key:"name", align:"left"},
+                {label:t("ราคาเดิม (THB)","Tender Cost (THB)"), key:"value", align:"right"},
+                {label:t("เพิ่มรายเดือน (รวม)","Monthly add. (total)"), key:"add", align:"right"},
+                {label:t("รวมทั้งหมด","Grand total"), key:"grand", align:"right"},
+                {label:"", key:null, align:"center"},
+              ].map(({label,key,align})=>(
                 <th key={label||"__actions"}
-                  style={{padding:"11px 16px",textAlign:label.includes("Cost")?"right":"left",color:sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  style={{padding:"11px 16px",textAlign:align,color:sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
                   <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
                 </th>
               ))}
@@ -3776,6 +3790,14 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                         <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}{usdLine(rowVal, usdRate)}</div>
                       )}
                     </td>
+                    {(() => { const addV = rowAddTotal(a); const grandV = rowVal + addV; return (<>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      <div style={{width:150,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(addV>0?{background:T.amberBg,color:T.amber,fontWeight:650,borderRadius:8}:{color:T.textMuted})}}>{fmt(addV)}{usdLine(addV, usdRate)}</div>
+                    </td>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:700, ...(grandV>0?{background:T.greenBg,color:T.green,borderRadius:8}:{color:T.textMuted})}}>{fmt(grandV)}{usdLine(grandV, usdRate)}</div>
+                    </td>
+                    </>); })()}
                     <td style={{padding:"8px 16px",textAlign:"center"}}>
                       {editingUnlocked && (a.isExtra
                         ? <button onClick={(e)=>{e.stopPropagation(); handleDeleteRow(a.code);}} title={t("ลบรายการนี้","Delete this item")}
@@ -3806,6 +3828,14 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                           <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}{usdLine(parseFloat(draft[k.code])||0, usdRate)}</div>
                         )}
                       </td>
+                      {(() => { const kBase = parseFloat(draft[k.code])||0; const kAdd = rowAddTotal(k); const kGrand = kBase + kAdd; return (<>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <div style={{width:150,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(kAdd>0?{color:T.amber,fontWeight:600}:{color:T.textMuted})}}>{fmt(kAdd)}{usdLine(kAdd, usdRate)}</div>
+                      </td>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:650, ...(kGrand>0?{color:T.green}:{color:T.textMuted})}}>{fmt(kGrand)}{usdLine(kGrand, usdRate)}</div>
+                      </td>
+                      </>); })()}
                       <td style={{padding:"6px 16px",textAlign:"center"}}>
                         {editingUnlocked && (
                           <button onClick={()=>handleDeleteRow(k.code)} title={t("ลบรายการย่อยนี้","Delete this sub-item")}
@@ -3824,7 +3854,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
                           placeholder={t("ชื่อรายการย่อย เช่น Silicone Structure","Sub-item name e.g. Silicone Structure")} style={{width:"100%",fontSize:13}}
                           onKeyDown={e=>e.key==="Enter"&&handleAddSub(a.code)} autoFocus />
                       </td>
-                      <td colSpan={2} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                      <td colSpan={4} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
                         <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(a.code)}>+ {t("เพิ่ม","Add")}</button>
                         <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>{t("ยกเลิก","Cancel")}</button>
                       </td>
@@ -3840,6 +3870,14 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, onAddExt
               <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
                 {fmt(filtered.reduce((s,a)=>s+effectiveValue(a),0))}
                 {usdLine(filtered.reduce((s,a)=>s+effectiveValue(a),0), usdRate)}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+rowAddTotal(a),0))}
+                {usdLine(filtered.reduce((s,a)=>s+rowAddTotal(a),0), usdRate)}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+rowGrand(a),0))}
+                {usdLine(filtered.reduce((s,a)=>s+rowGrand(a),0), usdRate)}
               </td>
               <td/>
             </tr>
