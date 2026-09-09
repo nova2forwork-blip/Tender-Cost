@@ -3573,6 +3573,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   // Baseline + Additions here matches the grand total shown elsewhere.
   const rowAddTotal = (row) => Object.keys(additions).reduce((s,m)=> m.startsWith("$") ? s : s + monthAddValue(additions, m, row.code), 0);
   const rowGrand    = (row) => effectiveValue(row) + rowAddTotal(row);
+  const addAll      = allRows.reduce((s,r)=> s + rowAddTotal(r), 0);   // งานเพิ่มรวมทุก Code ทุกเดือน
 
   const displayRows = (() => {
     // ซ่อนแถวที่ไม่มีค่า = ราคาเดิม (รวมรายการย่อย) เป็น 0
@@ -3639,7 +3640,8 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
         <StatCard label={t("ราคาเดิมรวม (Tender Cost)","Total Tender Cost")} value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub={t("ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง","All baseline prices — used as the real budget")} color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label={t("เผื่อเศษ/สูญเสีย 3%","Wastage allowance 3%")} value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub={t("ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)","Reference only (not in budget)")} color={T.amber} icon="⚙️" accent={T.amberBg}/>
-        <StatCard label={t("รวมเผื่อ 3% (อ้างอิง)","Total incl. 3% (ref.)")} value={"฿"+fmt0(total)} thb={total} rate={usdRate} sub={t("ประมาณการเผื่อเศษ — งบจริงใช้ราคาเดิม","Estimate with wastage — actual budget uses baseline")} color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label={t("งานเพิ่ม (รวมทุกเดือน)","Additions (all months)")} value={"฿"+fmt0(addAll)} thb={addAll} rate={usdRate} sub={t("รวมยอดที่เพิ่มจากแท็บรายเดือน","Total added from the Monthly tab")} color={T.purple} icon="➕" accent={T.purpleBg}/>
+        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(base+addAll)} thb={base+addAll} rate={usdRate} sub={t("ราคาเดิม + งานเพิ่ม (งบจริง)","Baseline + additions (actual budget)")} color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       {/* Filters + Add row + Save */}
