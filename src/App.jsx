@@ -613,37 +613,44 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
                            rowGroups = null, groupDisplayCol = null }) {
   ws["!rows"]   = ws["!rows"] || [];
   ws["!merges"] = ws["!merges"] || [];
-  // โทนพาสเทลนุ่ม ๆ ที่ได้จากสีธีม
-  const HFILL = lighten(theme.main, 0.82); // หัวตาราง พื้นอ่อน
-  const BAND  = lighten(theme.main, 0.95); // แถบสลับสีจาง ๆ
-  const TFILL = lighten(theme.main, 0.75); // แถวรวม
-  const GLINE = lighten(theme.main, 0.55); // เส้นแบ่งกลุ่ม
+  // ── โทนมินิมอล: พื้นขาว ไม่มีเส้นตาราง มีแค่เส้นคั่นบาง ๆ ระหว่างแถว ──
+  const HFILL = lighten(theme.main, 0.90); // หัวตาราง พื้นอ่อนมาก
+  const HRULE = lighten(theme.main, 0.45); // เส้นใต้หัวตาราง (บาง)
+  const BAND  = "FAFBFC";                  // แถบสลับสีจาง ๆ แบบเทากลาง
+  const ROWLN = "EEF1F4";                  // เส้นคั่นแถว (บางมาก)
+  const TFILL = lighten(theme.main, 0.90); // แถวรวม พื้นอ่อน
+  const TRULE = lighten(theme.main, 0.40); // เส้นเหนือแถวรวม (บาง)
+  const GLINE = lighten(theme.main, 0.70); // เส้นแบ่งกลุ่ม (บาง)
 
   ws["!merges"].push({ s:{r:titleRow,c:0}, e:{r:titleRow,c:numCols-1} });
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:titleRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:13,color:{rgb:theme.dark},name:"Tahoma"},
-      fill:{fgColor:{rgb:lighten(theme.main,0.55)}}, alignment:{vertical:"center",horizontal:"left",indent:1} };
+    // หัวเรื่อง: ตัวหนาใหญ่ พื้นขาว (มินิมอล) ไม่มีแถบสี
+    ws[ref].s = { font:{bold:true,sz:15,color:{rgb:theme.dark},name:"Tahoma"},
+      alignment:{vertical:"center",horizontal:"left"} };
   }
-  ws["!rows"][titleRow] = { hpx:30 };
+  ws["!rows"][titleRow] = { hpx:34 };
 
   subRows.forEach(r => {
     for (let c=0; c<numCols; c++) {
       const ref = XLSX.utils.encode_cell({r,c});
-      if (ws[ref]) ws[ref].s = { font:{italic:true,sz:9.5,color:{rgb:"64748B"},name:"Tahoma"} };
+      if (ws[ref]) ws[ref].s = { font:{sz:9.5,color:{rgb:"94A3B8"},name:"Tahoma"} };
     }
-    ws["!rows"][r] = { hpx:16 };
+    ws["!rows"][r] = { hpx:18 };
   });
 
   for (let c=0; c<numCols; c++) {
     const ref = XLSX.utils.encode_cell({r:headerRow,c});
     if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"},
-      fill:{fgColor:{rgb:HFILL}}, alignment:{vertical:"center",horizontal:"center",wrapText:true},
-      border:{ top:BORDER_THIN(HFILL), bottom:BORDER_MED(theme.main), left:BORDER_THIN("FFFFFF"), right:BORDER_THIN("FFFFFF") } };
+    const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
+    ws[ref].s = { font:{bold:true,sz:10,color:{rgb:theme.dark},name:"Tahoma"},
+      fill:{fgColor:{rgb:HFILL}},
+      alignment:{vertical:"center",horizontal:isMoney||isPct?"right":isCenter?"center":"left",wrapText:true,indent:(isMoney||isPct||isCenter)?0:1},
+      // มินิมอล: มีแค่เส้นใต้บาง ๆ ไม่มีขอบซ้าย/ขวา/บน
+      border:{ bottom:BORDER_THIN(HRULE) } };
   }
-  ws["!rows"][headerRow] = { hpx:28 };
+  ws["!rows"][headerRow] = { hpx:30 };
   ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s:{r:headerRow,c:0}, e:{r:headerRow,c:numCols-1} }) };
   // ตรึงทุกอย่างเหนือแถวข้อมูล (หัวข้อ+หัวตาราง) ให้ค้างไว้ตอนเลื่อน
   ws["!freeze"] = { xSplit:0, ySplit:headerRow+1, topLeftCell: XLSX.utils.encode_cell({ r:headerRow+1, c:0 }), activePane:"bottomLeft", state:"frozen" };
@@ -666,12 +673,13 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
       if (!ws[ref]) continue;
       const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
       const isGroupLabel = groupDisplayCol != null && c === groupDisplayCol;
+      const isText = !isMoney && !isPct && !isCenter;
       const s = { font: isGroupLabel
           ? {sz:10,name:"Tahoma",bold:true,color:{rgb:theme.dark}}
-          : {sz:10,name:"Tahoma",color:{rgb:"1F2937"}},
-        alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true },
-        border:{ top: isGroupStart?BORDER_MED(GLINE):BORDER_THIN("EEF0F2"), bottom:BORDER_THIN("EEF0F2"),
-                 left:BORDER_THIN("EEF0F2"), right:BORDER_THIN("EEF0F2") } };
+          : {sz:10,name:"Tahoma",color:{rgb: isText ? "334155" : "475569"}},
+        alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true, indent: isText?1:0 },
+        // มินิมอล: ไม่มีเส้นตั้ง มีแค่เส้นคั่นแถวบาง ๆ ด้านล่าง · ขึ้นกลุ่มใหม่ใช้เส้นบางกว่าเดิม
+        border:{ bottom:BORDER_THIN(ROWLN), ...(isGroupStart?{ top:BORDER_THIN(GLINE) }:{}) } };
       if (zebra)   s.fill   = { fgColor:{rgb:BAND} };
       if (isMoney) s.numFmt = usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0';   // แยกสัญลักษณ์ $ / ฿
       if (isPct)   s.numFmt = "0.0%";
@@ -680,25 +688,27 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
         if (pill) {
           s.fill = { fgColor:{rgb:pill.bg} };
           s.font = { sz:10, name:"Tahoma", bold:true, color:{rgb:pill.fg} };
-          s.alignment = { ...s.alignment, horizontal:"center" };
+          s.alignment = { ...s.alignment, horizontal:"center", indent:0 };
         }
       }
       ws[ref].s = s;
     }
-    ws["!rows"][r] = ws["!rows"][r] || { hpx:19 };
+    ws["!rows"][r] = ws["!rows"][r] || { hpx:22 };
   }
 
   if (totalRow != null) {
     for (let c=0; c<numCols; c++) {
       const ref = XLSX.utils.encode_cell({r:totalRow,c});
       if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-      const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c);
+      const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
+      const isText = !isMoney && !isPct && !isCenter;
       ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:TFILL}},
-        alignment:{vertical:"center",horizontal:isMoney||isPct?"right":"left"},
-        border:{ top:BORDER_MED(theme.main) },
+        alignment:{vertical:"center",horizontal:isMoney||isPct?"right":isCenter?"center":"left",indent:isText?1:0},
+        // มินิมอล: เส้นเหนือแถวรวมบาง ๆ (ไม่หนา)
+        border:{ top:BORDER_THIN(TRULE) },
         numFmt: isMoney ? (usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0') : isPct?"0.0%":undefined };
     }
-    ws["!rows"][totalRow] = { hpx:24 };
+    ws["!rows"][totalRow] = { hpx:26 };
   }
 
   // จัดความกว้างคอลัมน์อัตโนมัติให้พอดีข้อความ (ดูจากหัวตาราง + ข้อมูล + แถวรวม)
@@ -872,8 +882,8 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
     setS(gTitleRow, 0, { font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
     const headFill = lighten(theme.main, 0.82);
     const gh = ["กลุ่ม","ราคาเดิม","เพิ่มรายเดือน","งบรวม","สัดส่วน","กราฟสัดส่วน"];
-    gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_MED(theme.main)} }, h));
-    for (let c=6;c<C;c++) setS(gHeadRow, c, { fill:{fgColor:{rgb:headFill}}, border:{bottom:BORDER_MED(theme.main)} });
+    gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_THIN(lighten(theme.main,0.45))} }, h));
+    for (let c=6;c<C;c++) setS(gHeadRow, c, { fill:{fgColor:{rgb:headFill}}, border:{bottom:BORDER_THIN(lighten(theme.main,0.45))} });
     if (C-1 > 5) ws["!merges"].push({ s:{r:gHeadRow,c:5}, e:{r:gHeadRow,c:C-1} });
     ws["!rows"][gHeadRow] = {hpx:22};
     const zeb = lighten(theme.main, 0.95), gmax = Math.max(...groups.map(g=>g.total||0), 1);
@@ -890,7 +900,7 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
       if (C-1 > 5) ws["!merges"].push({ s:{r,c:5}, e:{r,c:C-1} });
       ws["!rows"][r] = {hpx:18};
     });
-    const rT = gTotalRow, tb = { fill:{fgColor:{rgb:lighten(theme.main,0.75)}}, border:{top:BORDER_MED(theme.main)} };
+    const rT = gTotalRow, tb = { fill:{fgColor:{rgb:lighten(theme.main,0.88)}}, border:{top:BORDER_THIN(lighten(theme.main,0.40))} };
     const tf = (h) => ({ ...tb, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:h,indent:h==="left"?1:0} });
     setS(rT,0,tf("left"),"รวมทั้งหมด");
     setS(rT,1,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.base||0),0));
@@ -1060,11 +1070,12 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     title: `สรุปงบประมาณ — ${project.name}`,
     subtitle: `พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`,
     theme,
+    // 4 การ์ดให้ตรงกับหน้า Baseline แบบใหม่: ราคาเดิม · เผื่อเศษ 3% · งานเพิ่ม · รวมทั้งหมด
     cards: [
-      { label:"ราคาเดิม (Baseline)", value: dashBase, money:true, f:`'งบประมาณ'!D${TR}` },
-      { label:"เพิ่มรายเดือนรวม",    value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}` },
-      { label:"งบรวมทั้งหมด",         value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}` },
-      { label:"จำนวนเดือน",           value: dashMonths.length },
+      { label:"ราคาเดิม (Tender Cost)",       value: dashBase, money:true, f:`'งบประมาณ'!D${TR}` },
+      { label:"เผื่อเศษ/สูญเสีย 3% (อ้างอิง)", value: dashBase*0.03, money:true },
+      { label:"งานเพิ่ม (รวมทุกเดือน)",         value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}` },
+      { label:"รวมทั้งหมด",                    value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}` },
     ],
     chartTitle: "กราฟ: ยอดเพิ่มรายเดือน (THB)",
     items: dashItemsF,
