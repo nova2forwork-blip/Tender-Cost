@@ -610,7 +610,8 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
                            // sections instead of a flat grid.
                            // groupDisplayCol: column index holding the group's label, bolded/tinted so
                            // the eye can track straight down that column.
-                           rowGroups = null, groupDisplayCol = null }) {
+                           // codeCol: column index whose text is tinted blue (เช่น Acc. Code) ให้ตรงกับหน้าจอ
+                           rowGroups = null, groupDisplayCol = null, codeCol = null }) {
   ws["!rows"]   = ws["!rows"] || [];
   ws["!merges"] = ws["!merges"] || [];
   // ── ตารางสะอาด: เส้นตารางบาง ๆ สีเทาอ่อนทุกช่อง หัวตารางพื้นอ่อน (แบบรูปตัวอย่าง) ──
@@ -656,27 +657,22 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   // ตรึงทุกอย่างเหนือแถวข้อมูล (หัวข้อ+หัวตาราง) ให้ค้างไว้ตอนเลื่อน
   ws["!freeze"] = { xSplit:0, ySplit:headerRow+1, topLeftCell: XLSX.utils.encode_cell({ r:headerRow+1, c:0 }), activePane:"bottomLeft", state:"frozen" };
 
-  let band = 0, prevGroup;
+  // แถวสลับสีธรรมดาทีละแถว (ไม่ไล่สี/ไม่แบ่งเส้นตามกรุ๊ป) ให้ตารางเรียบเหมือนตัวอย่าง
   for (let r=dataStart; r<=dataEnd; r++) {
     const idx = r - dataStart;
-    let zebra, isGroupStart = false;
-    if (rowGroups) {
-      const g = rowGroups[idx];
-      isGroupStart = idx > 0 && g !== prevGroup;
-      if (idx === 0 || isGroupStart) band = 1 - band;
-      prevGroup = g;
-      zebra = band === 1;
-    } else {
-      zebra = idx % 2 === 1;
-    }
+    const zebra = idx % 2 === 1;
+    const isGroupStart = false;
     for (let c=0; c<numCols; c++) {
       const ref = XLSX.utils.encode_cell({r,c});
       if (!ws[ref]) continue;
       const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
       const isGroupLabel = groupDisplayCol != null && c === groupDisplayCol;
+      const isCode = codeCol != null && c === codeCol;
       const isText = !isMoney && !isPct && !isCenter;
       const s = { font: isGroupLabel
           ? {sz:10,name:"Tahoma",bold:true,color:{rgb:theme.dark}}
+          : isCode
+          ? {sz:10,name:"Tahoma",color:{rgb:theme.dark}}
           : {sz:10,name:"Tahoma",color:{rgb: isText ? "334155" : "475569"}},
         alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true, indent: isText?1:0 },
         // เส้นตารางบาง ๆ ทุกด้าน · ขึ้นกลุ่มใหม่ใช้เส้นบนเข้มขึ้นเป็นตัวแบ่ง
@@ -1087,7 +1083,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
 
   // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
   const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม (Baseline)","เพิ่มรายเดือน (รวม)","งบรวมทั้งหมด",...(U?["งบรวม (USD)"]:[])]);
+  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม","เพิ่มรายเดือน (รวม)","รวมทั้งหมด",...(U?["รวมทั้งหมด (USD)"]:[])]);
   const dataStart1 = rows1.length;
   const rowGroups1 = [];
   dashList.forEach(a => {
@@ -1112,7 +1108,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   });
   ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18},...(U?[{wch:18}]:[])];
   styleSheet(ws1, { numCols:6+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:U?[3,4,5,6]:[3,4,5], usdCols:U?[6]:[], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+    moneyCols:U?[3,4,5,6]:[3,4,5], usdCols:U?[6]:[], theme, rowGroups:rowGroups1, groupDisplayCol:2, codeCol:0 });
   xBackLink(ws1, 2, (6+(U?1:0))-1, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws1, "งบประมาณ");
 
@@ -1147,7 +1143,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   });
   ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
-    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], usdCols:U?[4+months.length]:[], theme, rowGroups:rowGroups2 });
+    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], usdCols:U?[4+months.length]:[], theme, rowGroups:rowGroups2, codeCol:0 });
   xBackLink(ws2, 2, numCols2-1, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
 
@@ -1192,7 +1188,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     styleSheet(ws, {
       numCols, subRows: [1], headerRow: 3, dataStart, dataEnd, totalRow,
       moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length, ...(U?[4 + valLabels.length]:[])], usdCols:U?[4 + valLabels.length]:[],
-      theme, rowGroups, groupDisplayCol: 2,
+      theme, rowGroups, groupDisplayCol: 2, codeCol: 0,
     });
     let nm = sheetName(monthShortLabel(m));
     if (usedNames[nm]) { usedNames[nm] += 1; nm = sheetName(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
@@ -1267,7 +1263,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
   styleSheet(ws, {
     numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
     moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length, ...(U?[6 + valLabels.length]:[])], usdCols:U?[6 + valLabels.length]:[],
-    theme, rowGroups, groupDisplayCol: 2,
+    theme, rowGroups, groupDisplayCol: 2, codeCol: 0,
   });
   XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
   XLSX.writeFile(wb, `QS_${clean(monthShortLabel(month)).replace(/[^\dA-Za-zก-๙]/g,"")}_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
