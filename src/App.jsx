@@ -4222,20 +4222,22 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     });
   };
 
-  // ── Excel-style range selection ──────────────────────────────────────────────
-  // Drag across cells to select a block, then copy it out (Ctrl/Cmd+C → TSV that
-  // pastes cleanly into Excel/Sheets) or clear it (Delete/Backspace). Buttons in
-  // the hint bar do the same for touch. Selection is expressed in (row-index in
-  // displayRows, column-index) space; parent roll-up rows carry no direct value.
+  // ── Excel-style cell selection ───────────────────────────────────────────────
+  // Selection is a Set of "ri:ci" keys (row-index in displayRows × column-index),
+  // so it supports non-rectangular multi-selection like Excel:
+  //   • plain drag / click  → replace with a rectangle
+  //   • Shift + click        → extend the rectangle from the anchor
+  //   • Ctrl/Cmd + click     → toggle a single cell (add, or de-select it)
+  //   • Ctrl/Cmd + drag      → add a rectangle to what's already selected
+  // Then Ctrl/Cmd+C copies it out as TSV (pastes cleanly into Excel/Sheets) and
+  // Delete/Backspace clears it. Parent roll-up rows carry no direct value.
   const colCount = isMultiCol ? columns.length : 1;
-  const [sel, setSel] = useState(null); // {ar,ac,fr,fc} anchor + focus
+  const [selSet, setSelSet] = useState(() => new Set());
   const selDragRef = useRef(false);
-  const selRect = sel ? {
-    r0: Math.min(sel.ar, sel.fr), r1: Math.max(sel.ar, sel.fr),
-    c0: Math.min(sel.ac, sel.fc), c1: Math.max(sel.ac, sel.fc),
-  } : null;
-  const inSel = (ri, ci) => !!selRect && ri >= selRect.r0 && ri <= selRect.r1 && ci >= selRect.c0 && ci <= selRect.c1;
-  const selCount = selRect ? (selRect.r1 - selRect.r0 + 1) * (selRect.c1 - selRect.c0 + 1) : 0;
+  const anchorRef = useRef(null);   // {ri,ci} for shift-extend / drag origin
+  const dragModeRef = useRef(null); // {mode:"replace"|"add", base:Set}
+  const inSel = (ri, ci) => selSet.has(ri + ":" + ci);
+  const selCount = selSet.size;
   const cellKeyOf = (row, ci) => isMultiCol ? `${row.code}:${columns[ci].id}` : row.code;
   const cellValStr = (row, ci) => {
     if (kidsAsOf(row.code, month).length > 0) return ""; // parent roll-up — no direct value
@@ -4243,35 +4245,77 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const n = parseFloat(raw);
     return (raw == null || raw === "" || isNaN(n)) ? "" : String(n);
   };
-  const startSel  = (ri, ci) => { selDragRef.current = true; setSel({ ar: ri, ac: ci, fr: ri, fc: ci }); };
-  const extendSel = (ri, ci) => {
-    if (!selDragRef.current) return;
-    setSel(s => (!s || (s.fr === ri && s.fc === ci)) ? (s || { ar: ri, ac: ci, fr: ri, fc: ci }) : { ...s, fr: ri, fc: ci });
-    // once the drag leaves the first cell, stop editing so the copy/keys act on the block
-    const ae = typeof document !== "undefined" ? document.activeElement : null;
-    if (ae && ae.tagName === "INPUT" && (ri !== sel?.ar || ci !== sel?.ac)) ae.blur();
+  const rectKeys = (a, b) => {
+    const keys = [];
+    const r0 = Math.min(a.ri, b.ri), r1 = Math.max(a.ri, b.ri);
+    const c0 = Math.min(a.ci, b.ci), c1 = Math.max(a.ci, b.ci);
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) keys.push(r + ":" + c);
+    return keys;
   };
-  const selectAll = () => { if (displayRows.length) setSel({ ar: 0, ac: 0, fr: displayRows.length - 1, fc: colCount - 1 }); };
+  const onCellDown = (ri, ci, e) => {
+    if (!editingUnlocked) return;
+    const additive = e.ctrlKey || e.metaKey;
+    const ranged   = e.shiftKey && anchorRef.current;
+    if (ranged || additive) e.preventDefault(); // pure selection op — don't focus/edit the input or start a text selection
+    if (ranged) {
+      setSelSet(new Set(rectKeys(anchorRef.current, { ri, ci })));
+      dragModeRef.current = { mode: "replace" };
+    } else if (additive) {
+      const base = new Set(selSet);
+      const k = ri + ":" + ci;
+      if (base.has(k)) base.delete(k); else base.add(k); // toggle → lets you de-select
+      setSelSet(base);
+      anchorRef.current = { ri, ci };
+      dragModeRef.current = { mode: "add", base: new Set(base) };
+    } else {
+      setSelSet(new Set([ri + ":" + ci]));
+      anchorRef.current = { ri, ci };
+      dragModeRef.current = { mode: "replace" };
+    }
+    selDragRef.current = true;
+  };
+  const onCellEnter = (ri, ci) => {
+    if (!selDragRef.current || !dragModeRef.current || !anchorRef.current) return;
+    const rk = rectKeys(anchorRef.current, { ri, ci });
+    if (dragModeRef.current.mode === "add") {
+      const s = new Set(dragModeRef.current.base);
+      rk.forEach(k => s.add(k));
+      setSelSet(s);
+    } else {
+      setSelSet(new Set(rk));
+    }
+    const ae = typeof document !== "undefined" ? document.activeElement : null;
+    if (ae && ae.tagName === "INPUT" && (ri !== anchorRef.current.ri || ci !== anchorRef.current.ci)) ae.blur();
+  };
+  const selectAll = () => {
+    const s = new Set();
+    for (let r = 0; r < displayRows.length; r++) for (let c = 0; c < colCount; c++) s.add(r + ":" + c);
+    setSelSet(s); anchorRef.current = { ri: 0, ci: 0 };
+  };
+  const deselectAll = () => { setSelSet(new Set()); anchorRef.current = null; };
   const buildSelTSV = () => {
-    if (!selRect) return "";
+    if (!selSet.size) return "";
+    let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+    selSet.forEach(k => { const [r, c] = k.split(":").map(Number); r0 = Math.min(r0, r); r1 = Math.max(r1, r); c0 = Math.min(c0, c); c1 = Math.max(c1, c); });
     const out = [];
-    for (let ri = selRect.r0; ri <= selRect.r1; ri++) {
-      const row = displayRows[ri]; if (!row) continue;
+    for (let r = r0; r <= r1; r++) {
+      const row = displayRows[r];
       const cells = [];
-      for (let ci = selRect.c0; ci <= selRect.c1; ci++) cells.push(cellValStr(row, ci));
+      for (let c = c0; c <= c1; c++) cells.push(row && selSet.has(r + ":" + c) ? cellValStr(row, c) : "");
       out.push(cells.join("\t"));
     }
     return out.join("\n");
   };
   const clearSelection = () => {
-    if (!selRect || !editingUnlocked) return;
+    if (!selSet.size || !editingUnlocked) return;
     setDraftAdd(d => {
       const next = { ...d };
-      for (let ri = selRect.r0; ri <= selRect.r1; ri++) {
-        const row = displayRows[ri]; if (!row) continue;
-        if (kidsAsOf(row.code, month).length > 0) continue;
-        for (let ci = selRect.c0; ci <= selRect.c1; ci++) next[cellKeyOf(row, ci)] = "";
-      }
+      selSet.forEach(k => {
+        const [r, c] = k.split(":").map(Number);
+        const row = displayRows[r]; if (!row) return;
+        if (kidsAsOf(row.code, month).length > 0) return;
+        next[cellKeyOf(row, c)] = "";
+      });
       return next;
     });
   };
@@ -4282,22 +4326,22 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     catch { /* clipboard API blocked — user can still use Ctrl/Cmd+C */ }
   };
   useEffect(() => {
-    const up = () => { selDragRef.current = false; };
+    const up = () => { selDragRef.current = false; dragModeRef.current = null; };
     const onCopy = (e) => {
-      if (!selRect || selCount < 1) return;
+      if (!selSet.size) return;
       const ae = document.activeElement;
-      if (ae && ae.tagName === "INPUT" && selCount === 1) return; // single active cell → let the input copy normally
+      if (ae && ae.tagName === "INPUT" && selSet.size === 1) return; // single active cell → let the input copy normally
       const tsv = buildSelTSV();
       if (!tsv) return;
       e.clipboardData.setData("text/plain", tsv);
       e.preventDefault();
     };
     const onKey = (e) => {
-      if (!selRect) return;
-      if (e.key === "Escape") { setSel(null); return; }
+      if (!selSet.size) return;
+      if (e.key === "Escape") { deselectAll(); return; }
       const ae = document.activeElement;
       const editing = ae && ae.tagName === "INPUT";
-      if ((e.key === "Delete" || e.key === "Backspace") && !editing && editingUnlocked && selCount > 0) {
+      if ((e.key === "Delete" || e.key === "Backspace") && !editing && editingUnlocked) {
         e.preventDefault();
         clearSelection();
       }
@@ -4427,7 +4471,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       {editingUnlocked && (
         <div style={{display:"flex",alignItems:"center",gap:8,margin:"-6px 2px 14px",fontSize:12,color:T.textMuted,flexWrap:"wrap"}}>
           <span style={{background:T.greenBg,color:T.green,fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:6,whiteSpace:"nowrap"}}>📋 Excel</span>
-          <span>{t("ลากคลุมเซลล์เพื่อเลือก → Ctrl/Cmd+C คัดลอกไป Excel · Delete ล้างที่เลือก · วางจาก Excel ลงช่องเริ่มต้นเพื่อเติมทั้งบล็อก","Drag to select cells → Ctrl/Cmd+C to copy into Excel · Delete to clear · paste from Excel into a starting cell to fill the block")}</span>
+          <span>{t("ลากคลุมเลือก · Shift+คลิก ขยายช่วง · Ctrl/Cmd+คลิก เลือก/ยกเลิกทีละช่อง · Ctrl/Cmd+C คัดลอก · Delete ล้าง · วางจาก Excel เติมทั้งบล็อก","Drag to select · Shift+click to extend · Ctrl/Cmd+click to toggle a cell · Ctrl/Cmd+C to copy · Delete to clear · paste from Excel to fill a block")}</span>
           <div style={{flex:1,minWidth:8}}/>
           <button onClick={selectAll} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>{t("เลือกทั้งหมด","Select all")}</button>
           {selCount>0 && (
@@ -4435,7 +4479,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               <span style={{background:T.blueLight,color:T.blue,fontWeight:700,fontSize:11,padding:"3px 9px",borderRadius:6,whiteSpace:"nowrap"}}>{t("เลือก","Selected")} {selCount}</span>
               <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>📋 {t("คัดลอก","Copy")}</button>
               <button onClick={clearSelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap",color:T.red,borderColor:T.red}}>🗑 {t("ล้างที่เลือก","Clear")}</button>
-              <button onClick={()=>setSel(null)} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
+              <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
             </>
           )}
         </div>
@@ -4605,8 +4649,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         const on = inSel(i,ci);
                         return (
                           <td key={c.id}
-                            onMouseDown={editingUnlocked?()=>startSel(i,ci):undefined}
-                            onMouseEnter={editingUnlocked?()=>extendSel(i,ci):undefined}
+                            onMouseDown={editingUnlocked?e=>onCellDown(i,ci,e):undefined}
+                            onMouseEnter={editingUnlocked?()=>onCellEnter(i,ci):undefined}
                             style={{padding:"8px 10px",textAlign:"right",...(on?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
                             {editingUnlocked ? (
                               <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
@@ -4620,8 +4664,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       })
                     ) : (
                       <td
-                        onMouseDown={editingUnlocked&&!hasKids?()=>startSel(i,0):undefined}
-                        onMouseEnter={editingUnlocked&&!hasKids?()=>extendSel(i,0):undefined}
+                        onMouseDown={editingUnlocked&&!hasKids?e=>onCellDown(i,0,e):undefined}
+                        onMouseEnter={editingUnlocked&&!hasKids?()=>onCellEnter(i,0):undefined}
                         style={{padding:"8px 16px",textAlign:"right",...(inSel(i,0)&&!hasKids?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
                         {hasKids ? (
                           <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:650,fontSize:13}}>
