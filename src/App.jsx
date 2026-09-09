@@ -4112,7 +4112,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     if (!newMonth) return;
     if (months.includes(newMonth)) {
       // ห้ามซ้ำ — ถ้ามีเดือนนี้อยู่แล้ว แค่กระโดดไปที่เดือนนั้นแทนการสร้างซ้ำ
-      alert(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`);
+      alert(t(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`, `${monthShortLabel(newMonth)} already exists`));
       setMonth(newMonth); setNewMonth("");
       return;
     }
@@ -4121,7 +4121,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const prevCols = prevMonth ? columnsOf(prevMonth) : [];
     const monthObj = {};
     if (prevCols.length) {
-      if (window.confirm(`คัดลอกคอลัมน์จากเดือน ${monthShortLabel(prevMonth)} มาที่เดือนใหม่ไหม?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = คัดลอกคอลัมน์ (ยอดเริ่มที่ว่าง) · Cancel = เริ่มเดือนใหม่แบบไม่มีคอลัมน์`)) {
+      if (window.confirm(t(`คัดลอกคอลัมน์จากเดือน ${monthShortLabel(prevMonth)} มาที่เดือนใหม่ไหม?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = คัดลอกคอลัมน์ (ยอดเริ่มที่ว่าง) · Cancel = เริ่มเดือนใหม่แบบไม่มีคอลัมน์`, `Copy columns from ${monthShortLabel(prevMonth)} into the new month?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = copy columns (values start empty) · Cancel = start the new month with no columns`))) {
         monthObj.$columns = prevCols.map(c => ({ ...c }));
       } else {
         monthObj.$columns = []; // เริ่มใหม่แบบไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
@@ -4134,7 +4134,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // ลบเดือน — เอาข้อมูลที่เพิ่มในเดือนนั้นออกทั้งหมด (คีย์ meta อย่าง $columns
   // ที่เป็นระดับโปรเจกต์ไม่ถูกแตะ) แล้วถ้าลบเดือนที่กำลังดูอยู่ก็ย้ายไปเดือนอื่น
   const handleDeleteMonth = (m) => {
-    if (!window.confirm(`ลบเดือน ${monthShortLabel(m)} และข้อมูลที่เพิ่มในเดือนนี้ทั้งหมด?\n(ราคาเดิม/Baseline ไม่ได้รับผลกระทบ)`)) return;
+    if (!window.confirm(t(`ลบเดือน ${monthShortLabel(m)} และข้อมูลที่เพิ่มในเดือนนี้ทั้งหมด?\n(ราคาเดิม/Baseline ไม่ได้รับผลกระทบ)`, `Delete ${monthShortLabel(m)} and all additions entered in this month?\n(Baseline is not affected)`))) return;
     const next = { ...additions };
     delete next[m];
     saveAdditions(next);
@@ -4428,41 +4428,40 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </ResponsiveContainer>
       </div>
 
-      {/* Month picker — ปกติดูอย่างเดียว (คลิกสลับเดือน) · กด "จัดการเดือน" เพื่อเข้าโหมดเพิ่ม/ลบ */}
+      {/* Month picker — คลิกสลับเดือน · เพิ่ม/ลบเดือนได้ทันที (ลบมีเตือนก่อน) */}
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
         <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,flex:1,minWidth:0}}>
+          {/* Start (baseline) — read-only reference: what date the project began */}
+          <div style={{flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${T.cardBorder}`,background:"#f8fafc",minWidth:140}}>
+            <div style={{fontSize:15,fontWeight:750,color:T.textSecondary,marginBottom:3,letterSpacing:0.2}}>🚩 {t("เริ่มต้น","Start")}</div>
+            <div style={{fontSize:15,fontWeight:650,color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(baseTotal)}</div>
+            <div style={{fontSize:10,color:T.textMuted,marginTop:2}}>{project?.createdAt ? new Date(project.createdAt).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{day:"numeric",month:"short",year:"2-digit"}) : t("ราคาเดิม","baseline")}</div>
+          </div>
           {sortedMonths.map(m=>{
             const active = m===month;
             const add = monthTotalLive(m);
             const exists = months.includes(m); // เดือนที่มีจริง (ไม่ใช่ default เปล่า) ถึงลบได้
             return (
               <div key={m} onClick={()=>setMonth(m)} ref={active?activeChipRef:null}
-                style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
+                style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 28px 10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
                   background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
-                <div style={{fontSize:11,fontWeight:600,color:active?"#bfdbfe":T.textSecondary,marginBottom:3}}>{monthShortLabel(m)}</div>
-                <div style={{fontSize:15,fontWeight:650,color:active?"#fff":T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
+                <div style={{fontSize:15,fontWeight:750,color:active?"#fff":T.textPrimary,marginBottom:3,letterSpacing:0.2}}>{monthShortLabel(m)}</div>
+                <div style={{fontSize:15,fontWeight:650,color:active?"#dbeafe":T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
                 <div style={{fontSize:10,color:active?"#dbeafe":T.textMuted,marginTop:2}}>{add>0?"+":""}{fmtK(add)} {t("เดือนนี้","this mo.")}</div>
-                {monthEditMode && exists && (
-                  <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title={t("ลบเดือนนี้","Delete this month")}
-                    style={{position:"absolute",top:5,right:5,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
-                      background:active?"rgba(255,255,255,0.18)":T.redBg,color:active?"#fff":T.red,cursor:"pointer",fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                {exists && (
+                  <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title={t("ลบเดือนนี้ (มีเตือนก่อนลบ)","Delete this month (asks first)")}
+                    style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
+                      background:active?"rgba(255,255,255,0.2)":T.redBg,color:active?"#fff":T.red,cursor:"pointer",fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
                 )}
               </div>
             );
           })}
-          {monthEditMode && (
-            <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.blue}`,background:T.blueLight}}>
-              <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
-                style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
-              <button className="btn-primary" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap",background:T.blue}} onClick={handleAddMonth}>+ {t("เพิ่มเดือน","Add month")}</button>
-            </div>
-          )}
+          <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.blue}`,background:T.blueLight}}>
+            <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
+              style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
+            <button className="btn-primary" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap",background:T.blue}} onClick={handleAddMonth}>+ {t("เพิ่มเดือน","Add month")}</button>
+          </div>
         </div>
-        <button onClick={()=>setMonthEditMode(v=>!v)}
-          style={{flexShrink:0,alignSelf:"flex-start",padding:"9px 14px",borderRadius:10,border:`1.5px solid ${monthEditMode?T.blue:T.cardBorder}`,
-            background:monthEditMode?T.blue:T.card,color:monthEditMode?"#fff":T.textSecondary,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-          {monthEditMode?t("✓ เสร็จ","✓ Done"):t("✏️ จัดการเดือน","✏️ Manage months")}
-        </button>
       </div>
 
       {/* Stats for selected month */}
