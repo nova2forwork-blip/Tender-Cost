@@ -4402,24 +4402,40 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // ── ไฮไลต์เอง: ลากเลือกเซลล์แล้วใส่สีพื้น (bg) หรือสีตัวอักษร (fg) เก็บไว้ใน
   // additions[month].$fmt (คีย์ $… ถูกข้ามจากการรวมยอดอยู่แล้ว) → บันทึกติดไปกับเดือน
   const cellFmt = draftAdd.$fmt || {};
-  const cellFmtStyle = (key) => { const f = cellFmt[key]; return f ? { ...(f.bg?{background:f.bg}:{}), ...(f.fg?{color:f.fg}:{}) } : {}; };
-  const applyCellFmt = (patch) => { // patch: {bg} / {fg} / {bg:null,fg:null} เพื่อล้าง
+  // แปลง fmt ของเซลล์ → CSS (พื้น/สีตัวอักษร/หนา/เอียง/ขีดเส้นใต้/ขนาด)
+  const cellFmtStyle = (key) => {
+    const f = cellFmt[key]; if (!f) return {};
+    return {
+      ...(f.bg?{background:f.bg}:{}), ...(f.fg?{color:f.fg}:{}),
+      ...(f.b?{fontWeight:800}:{}), ...(f.i?{fontStyle:"italic"}:{}),
+      ...(f.u?{textDecoration:"underline"}:{}), ...(f.sz?{fontSize:f.sz}:{}),
+    };
+  };
+  // รายคีย์เซลล์ (leaf) ที่กำลังเลือกอยู่ — ใช้ร่วมกันทุกเครื่องมือจัดรูปแบบ
+  const selectedCellKeys = () => {
+    const keys = [];
+    selSet.forEach(k => { const [r,c]=k.split(":").map(Number); const row=displayRows[r]; if(!row) return; if(kidsAsOf(row.code,month).length>0) return; keys.push(cellKeyOf(row,c)); });
+    return keys;
+  };
+  const mutateFmt = (fn) => { // fn(cur) → คืน object ใหม่ (หรือ null เพื่อลบ)
     if (!selSet.size || !editingUnlocked) return;
     setDraftAdd(d => {
       const fmt = { ...(d.$fmt || {}) };
-      selSet.forEach(k => {
-        const [r, c] = k.split(":").map(Number);
-        const row = displayRows[r]; if (!row) return;
-        if (kidsAsOf(row.code, month).length > 0) return; // ข้ามแถวแม่ (ไม่มีช่องกรอกตรง)
-        const key = cellKeyOf(row, c);
-        const cur = { ...(fmt[key] || {}), ...patch };
-        if (cur.bg == null) delete cur.bg;
-        if (cur.fg == null) delete cur.fg;
+      selectedCellKeys().forEach(key => {
+        let cur = fn({ ...(fmt[key] || {}) }) || {};
+        Object.keys(cur).forEach(p => { if (cur[p] == null || cur[p] === false) delete cur[p]; });
         if (Object.keys(cur).length) fmt[key] = cur; else delete fmt[key];
       });
       return { ...d, $fmt: fmt };
     });
   };
+  const applyCellFmt = (patch) => mutateFmt(cur => ({ ...cur, ...patch })); // {bg}/{fg}/{bg:null}…
+  const toggleCellFmt = (prop) => { // สลับ หนา/เอียง/ขีดเส้นใต้
+    const keys = selectedCellKeys();
+    const allOn = keys.length>0 && keys.every(key => (cellFmt[key]||{})[prop]);
+    mutateFmt(cur => ({ ...cur, [prop]: allOn ? null : true }));
+  };
+  const bumpFontSize = (delta) => mutateFmt(cur => { const base = cur.sz || 13; return { ...cur, sz: Math.max(9, Math.min(22, base + delta)) }; });
   useEffect(() => {
     const up = () => { selDragRef.current = false; dragModeRef.current = null; };
     const onCopy = (e) => {
@@ -4579,9 +4595,20 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </div>
       )}
 
-      {/* ไฮไลต์เอง: ลากเลือกเซลล์แล้วเลือกสีพื้น (ไฮไลต์) หรือสีตัวอักษร */}
+      {/* ไฮไลต์เอง: ลากเลือกเซลล์แล้วจัดรูปแบบ (หนา/เอียง/ขีดเส้นใต้/ขนาด/สีพื้น/สีตัวอักษร) */}
       {editingUnlocked && selCount>0 && (
-        <div style={{display:"flex",alignItems:"center",gap:8,margin:"-8px 2px 14px",fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,margin:"-8px 2px 14px",fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+          {(() => {
+            const on = { padding:0,width:26,height:24,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",cursor:"pointer",fontSize:13,lineHeight:1,color:T.textPrimary };
+            return (<>
+              <button onClick={()=>toggleCellFmt("b")} title={t("ตัวหนา","Bold")} style={{...on,fontWeight:900}}>B</button>
+              <button onClick={()=>toggleCellFmt("i")} title={t("ตัวเอียง","Italic")} style={{...on,fontStyle:"italic",fontFamily:"Georgia,serif"}}>I</button>
+              <button onClick={()=>toggleCellFmt("u")} title={t("ขีดเส้นใต้","Underline")} style={{...on,textDecoration:"underline"}}>U</button>
+              <button onClick={()=>bumpFontSize(-1)} title={t("ลดขนาดตัวอักษร","Smaller")} style={{...on,fontSize:11}}>A−</button>
+              <button onClick={()=>bumpFontSize(1)} title={t("เพิ่มขนาดตัวอักษร","Larger")} style={{...on,fontSize:15,fontWeight:700}}>A+</button>
+            </>);
+          })()}
+          <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
           <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🖍 {t("ไฮไลต์พื้น","Fill")}:</span>
           {["#FEF3C7","#D1FAE5","#FEE2E2","#DBEAFE","#E5E7EB"].map(bg=>(
             <button key={bg} onClick={()=>applyCellFmt({bg})} title={t("ใส่สีพื้นให้ช่องที่เลือก","Fill selected cells")}
