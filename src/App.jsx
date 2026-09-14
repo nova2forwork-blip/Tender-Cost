@@ -3768,7 +3768,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                 {label:"Group", key:"group", align:"left"},
                 {label:"Account Name", key:"name", align:"left"},
                 {label:t("ราคาเดิม (THB)","Tender Cost (THB)"), key:"value", align:"right"},
-                {label:t("เพิ่มรายเดือน (รวม)","Monthly add. (total)"), key:"add", align:"right"},
+                {label:t("รวมงานเพิ่ม","Total Additions"), key:"add", align:"right"},
                 {label:t("รวมทั้งหมด","Grand total"), key:"grand", align:"right"},
                 {label:"", key:null, align:"center"},
               ].map(({label,key,align})=>(
