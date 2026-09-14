@@ -4193,6 +4193,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const ownCols = draftAdd.$columns;
     if (columns.length) clean.$columns = columns;
     else if (Array.isArray(ownCols)) clean.$columns = []; // เดือนนี้ตั้งใจไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
+    if (draftAdd.$fmt && Object.keys(draftAdd.$fmt).length) clean.$fmt = draftAdd.$fmt; // เก็บสีไฮไลต์ที่ผู้ใช้ทำไว้
     saveAdditions({ ...additions, [month]: clean });
     setForceEdit(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false);
     setSaved(true); setTimeout(()=>setSaved(false),2000);
@@ -4398,6 +4399,27 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     try { await navigator.clipboard.writeText(tsv); }
     catch { /* clipboard API blocked — user can still use Ctrl/Cmd+C */ }
   };
+  // ── ไฮไลต์เอง: ลากเลือกเซลล์แล้วใส่สีพื้น (bg) หรือสีตัวอักษร (fg) เก็บไว้ใน
+  // additions[month].$fmt (คีย์ $… ถูกข้ามจากการรวมยอดอยู่แล้ว) → บันทึกติดไปกับเดือน
+  const cellFmt = draftAdd.$fmt || {};
+  const cellFmtStyle = (key) => { const f = cellFmt[key]; return f ? { ...(f.bg?{background:f.bg}:{}), ...(f.fg?{color:f.fg}:{}) } : {}; };
+  const applyCellFmt = (patch) => { // patch: {bg} / {fg} / {bg:null,fg:null} เพื่อล้าง
+    if (!selSet.size || !editingUnlocked) return;
+    setDraftAdd(d => {
+      const fmt = { ...(d.$fmt || {}) };
+      selSet.forEach(k => {
+        const [r, c] = k.split(":").map(Number);
+        const row = displayRows[r]; if (!row) return;
+        if (kidsAsOf(row.code, month).length > 0) return; // ข้ามแถวแม่ (ไม่มีช่องกรอกตรง)
+        const key = cellKeyOf(row, c);
+        const cur = { ...(fmt[key] || {}), ...patch };
+        if (cur.bg == null) delete cur.bg;
+        if (cur.fg == null) delete cur.fg;
+        if (Object.keys(cur).length) fmt[key] = cur; else delete fmt[key];
+      });
+      return { ...d, $fmt: fmt };
+    });
+  };
   useEffect(() => {
     const up = () => { selDragRef.current = false; dragModeRef.current = null; };
     const onCopy = (e) => {
@@ -4554,6 +4576,25 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
             </>
           )}
+        </div>
+      )}
+
+      {/* ไฮไลต์เอง: ลากเลือกเซลล์แล้วเลือกสีพื้น (ไฮไลต์) หรือสีตัวอักษร */}
+      {editingUnlocked && selCount>0 && (
+        <div style={{display:"flex",alignItems:"center",gap:8,margin:"-8px 2px 14px",fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🖍 {t("ไฮไลต์พื้น","Fill")}:</span>
+          {["#FEF3C7","#D1FAE5","#FEE2E2","#DBEAFE","#E5E7EB"].map(bg=>(
+            <button key={bg} onClick={()=>applyCellFmt({bg})} title={t("ใส่สีพื้นให้ช่องที่เลือก","Fill selected cells")}
+              style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:bg,cursor:"pointer",padding:0}}/>
+          ))}
+          <button onClick={()=>applyCellFmt({bg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีพื้น","Remove fill")}>⛔ {t("ล้างพื้น","No fill")}</button>
+          <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
+          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🎨 {t("สีตัวอักษร","Text")}:</span>
+          {[["#DC2626","แดง"],["#059669","เขียว"],["#2563EB","น้ำเงิน"],["#0F172A","ดำ"]].map(([fg,nm])=>(
+            <button key={fg} onClick={()=>applyCellFmt({fg})} title={t(`สีตัวอักษร ${nm}`,"Text color")}
+              style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",color:fg,cursor:"pointer",padding:0,fontWeight:800,fontSize:13,lineHeight:1}}>A</button>
+          ))}
+          <button onClick={()=>applyCellFmt({fg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีตัวอักษร","Reset text color")}>↺ {t("สีปกติ","Default")}</button>
         </div>
       )}
 
@@ -4719,6 +4760,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         const ck = `${r.code}:${c.id}`;
                         const cv = parseFloat(draftAdd[ck])||0;
                         const on = inSel(i,ci);
+                        const hl = cellFmtStyle(ck);
                         return (
                           <td key={c.id}
                             onMouseDown={editingUnlocked?e=>onCellDown(i,ci,e):undefined}
@@ -4727,9 +4769,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             {editingUnlocked ? (
                               <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
                                 onPaste={raw=>handleGridPaste(i,ci,raw)}
-                                style={{width:104,fontSize:13,background:cv!==0?T.amberBg:(on?"transparent":T.bg)}}/>
+                                style={{width:104,fontSize:13,background:cv!==0?T.amberBg:(on?"transparent":T.bg),...hl}}/>
                             ) : (
-                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(cv!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
+                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(cv!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted}),...hl}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
                             )}
                           </td>
                         );
@@ -4747,9 +4789,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         ) : editingUnlocked ? (
                           <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
                             onPaste={raw=>handleGridPaste(i,0,raw)}
-                            style={{width:130,background:thisVal!==0?T.amberBg:(inSel(i,0)?"transparent":T.bg)}}/>
+                            style={{width:130,background:thisVal!==0?T.amberBg:(inSel(i,0)?"transparent":T.bg),...cellFmtStyle(r.code)}}/>
                         ) : (
-                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(thisVal!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
+                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(thisVal!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted}),...cellFmtStyle(r.code)}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
                         )}
                       </td>
                     )}
@@ -6150,7 +6192,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
               {multiSupplier && <span style={{fontSize:12,color:T.textSecondary,fontWeight:600,whiteSpace:"nowrap"}}>{d.supplierName||"—"}:</span>}
               <DateCell value={d.plan} lateTint={st==="late"}/>
               <span style={{color:T.textMuted,fontSize:12}}>→</span>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","wait")}</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","Pending")}</span>
               {(() => {
                 const received = st === "received";   // รับจริงแล้ว (วันรับมาถึงแล้ว) → เขียว
                 // แสดง "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ให้ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
@@ -6845,7 +6887,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:650,minWidth:14}}>#{i+1}</span>}
               <DateCell value={d.plan} lateTint={st==="late"}/>
               <span style={{color:T.textMuted,fontSize:11}}>→</span>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","wait")}</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","Pending")}</span>
             </div>
           );
         })}
@@ -6869,7 +6911,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
         </div>
         {/* คำอธิบายสี (legend) */}
         <div style={{display:"flex",flexWrap:"wrap",gap:16,marginBottom:20,fontSize:11,color:T.textMuted,alignItems:"center"}}>
-          <span style={{fontWeight:650,color:T.textSecondary}}>{t("คำอธิบายสี","Colors")}:</span>
+          <span style={{fontWeight:650,color:T.textSecondary}}>{t("คำอธิบายสี","Legend")}:</span>
           {[[T.green,t("ปกติ · ใช้งบ <80% · จ่ายแล้ว","Normal · <80% used · paid")],[T.amber,t("เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย","Watch · 80–100% · awaiting")],[T.red,t("เกินงบ · เกินกำหนดจ่าย","Over · overdue")]].map(([c,t])=>(
             <span key={t} style={{display:"inline-flex",alignItems:"center",gap:6}}>
               <span style={{width:11,height:11,borderRadius:3,background:c,display:"inline-block"}}/>{t}
