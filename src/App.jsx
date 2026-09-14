@@ -4327,10 +4327,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     return keys;
   };
   const onCellDown = (ri, ci, e) => {
-    if (!editingUnlocked) return;
+    // เลือกเซลล์ได้ทั้งโหมดดูและแก้ไข (โหมดดูใช้สำหรับไฮไลต์/เปลี่ยนสีอย่างเดียว)
     const additive = e.ctrlKey || e.metaKey;
     const ranged   = e.shiftKey && anchorRef.current;
-    if (ranged || additive) e.preventDefault(); // pure selection op — don't focus/edit the input or start a text selection
+    // pure selection op — don't focus/edit the input or start a text selection.
+    // In view mode there's no input to focus, so always prevent (avoids selecting the numbers while dragging).
+    if (ranged || additive || !editingUnlocked) e.preventDefault();
     if (ranged) {
       setSelSet(new Set(rectKeys(anchorRef.current, { ri, ci })));
       dragModeRef.current = { mode: "replace" };
@@ -4417,17 +4419,20 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     selSet.forEach(k => { const [r,c]=k.split(":").map(Number); const row=displayRows[r]; if(!row) return; if(kidsAsOf(row.code,month).length>0) return; keys.push(cellKeyOf(row,c)); });
     return keys;
   };
-  const mutateFmt = (fn) => { // fn(cur) → คืน object ใหม่ (หรือ null เพื่อลบ)
-    if (!selSet.size || !editingUnlocked) return;
-    setDraftAdd(d => {
-      const fmt = { ...(d.$fmt || {}) };
-      selectedCellKeys().forEach(key => {
-        let cur = fn({ ...(fmt[key] || {}) }) || {};
-        Object.keys(cur).forEach(p => { if (cur[p] == null || cur[p] === false) delete cur[p]; });
-        if (Object.keys(cur).length) fmt[key] = cur; else delete fmt[key];
-      });
-      return { ...d, $fmt: fmt };
+  const mutateFmt = (fn) => { // fn(cur) → คืน object ใหม่ (หรือ null เพื่อลบ) · ใช้ได้ทั้งโหมดดู/แก้ไข
+    if (!selSet.size) return;
+    const fmt = { ...(draftAdd.$fmt || {}) };
+    selectedCellKeys().forEach(key => {
+      let cur = fn({ ...(fmt[key] || {}) }) || {};
+      Object.keys(cur).forEach(p => { if (cur[p] == null || cur[p] === false) delete cur[p]; });
+      if (Object.keys(cur).length) fmt[key] = cur; else delete fmt[key];
     });
+    setDraftAdd(d => ({ ...d, $fmt: fmt }));
+    // โหมดดู (ไม่ได้แก้ไข): ค่าตัวเลขล็อกอยู่ จึงเซฟ "เฉพาะสี" ขึ้น backend ทันที ไม่แตะค่าที่บันทึกไว้
+    if (!editingUnlocked) {
+      const base = additions[month] || {};
+      saveAdditions({ ...additions, [month]: { ...base, $fmt: fmt } });
+    }
   };
   const applyCellFmt = (patch) => mutateFmt(cur => ({ ...cur, ...patch })); // {bg}/{fg}/{bg:null}…
   const toggleCellFmt = (prop) => { // สลับ หนา/เอียง/ขีดเส้นใต้
@@ -4595,9 +4600,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </div>
       )}
 
-      {/* ไฮไลต์เอง: ลากเลือกเซลล์แล้วจัดรูปแบบ (หนา/เอียง/ขีดเส้นใต้/ขนาด/สีพื้น/สีตัวอักษร) */}
-      {editingUnlocked && selCount>0 && (
+      {/* ไฮไลต์เอง: ลากเลือกเซลล์แล้วจัดรูปแบบ (หนา/เอียง/ขีดเส้นใต้/ขนาด/สีพื้น/สีตัวอักษร) — ใช้ได้แม้ไม่ได้อยู่โหมดแก้ไข */}
+      {selCount>0 && (
         <div style={{display:"flex",alignItems:"center",gap:6,margin:"-8px 2px 14px",fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+          {!editingUnlocked && (
+            <span style={{background:T.blueLight,color:T.blue,fontWeight:700,fontSize:11,padding:"3px 9px",borderRadius:6,whiteSpace:"nowrap"}}>{t("เลือก","Selected")} {selCount}</span>
+          )}
           {(() => {
             const on = { padding:0,width:26,height:24,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",cursor:"pointer",fontSize:13,lineHeight:1,color:T.textPrimary };
             return (<>
@@ -4622,6 +4630,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",color:fg,cursor:"pointer",padding:0,fontWeight:800,fontSize:13,lineHeight:1}}>A</button>
           ))}
           <button onClick={()=>applyCellFmt({fg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีตัวอักษร","Reset text color")}>↺ {t("สีปกติ","Default")}</button>
+          {!editingUnlocked && (
+            <>
+              <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
+              <button onClick={selectAll} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>{t("เลือกทั้งหมด","Select all")}</button>
+              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>📋 {t("คัดลอก","Copy")}</button>
+              <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
+            </>
+          )}
         </div>
       )}
 
@@ -4790,8 +4806,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         const hl = cellFmtStyle(ck);
                         return (
                           <td key={c.id}
-                            onMouseDown={editingUnlocked?e=>onCellDown(i,ci,e):undefined}
-                            onMouseEnter={editingUnlocked?()=>onCellEnter(i,ci):undefined}
+                            onMouseDown={e=>onCellDown(i,ci,e)}
+                            onMouseEnter={()=>onCellEnter(i,ci)}
                             style={{padding:"8px 10px",textAlign:"right",...(on?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
                             {editingUnlocked ? (
                               <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
@@ -4805,8 +4821,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       })
                     ) : (
                       <td
-                        onMouseDown={editingUnlocked&&!hasKids?e=>onCellDown(i,0,e):undefined}
-                        onMouseEnter={editingUnlocked&&!hasKids?()=>onCellEnter(i,0):undefined}
+                        onMouseDown={!hasKids?e=>onCellDown(i,0,e):undefined}
+                        onMouseEnter={!hasKids?()=>onCellEnter(i,0):undefined}
                         style={{padding:"8px 16px",textAlign:"right",...(inSel(i,0)&&!hasKids?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
                         {hasKids ? (
                           <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:650,fontSize:13}}>
