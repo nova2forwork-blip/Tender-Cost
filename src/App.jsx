@@ -1,7363 +1,7414 @@
-import { useState, useEffect, useRef, useCallback, useMemo, forwardRef, Component } from "react";
-import { QRCodeSVG } from "qrcode.react";
+import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
+import * as XLSX from "xlsx-js-style";
+import { supabase, sg, ss, sgOrThrow, ssOrThrow, ssMerge, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
-  listRows, insertRow, insertRows, updateRow, updateRows, deleteRow, deleteRows,
-  deleteReleaseCascade, deleteProjectCascade, getProjectImpact,
-  findUnitByQr, getUnitHistory, getScanLogsBetween, getAssemblyLogsBetween, getAllUnitsFull, getReleasesFull,
-  deleteCap, setMachineOps, getUnitStatsByReleaseIds, getReleaseOpProgress, supabase,
-  recordScan, recordScanByQr, scanQueueCount, onScanQueue, flushScanQueue,
-  createReleaseBatch, releaseOrderExists, upsertEmployee, getProjectSummary, getProjectStationProgress, getPartSummary, getEmployees,
-  logoutSession, setEmployeeActive, deleteEmployee, deleteMachine, recalcPartStatus, sessionHeartbeat,
-  listActiveSessions, forceLogoutSession, updateReleaseHeader, auditRecord, listAuditLog, changeMyPassword,
-  listDeadLetter, resolveDeadLetter, setBom, getBom, setPkgManifest, createOperation, setOperationType,
-  getAssemblyState, listAssemblyParents, getUnitsByIds,
-  exportAllData, clearScansRelease, clearScansUnit, clearScansReleaseGroup,
-  ensureDailyBackup, listBackups, snapshotAllProjects, restoreBackup, importBackup,
-} from "./supabase.js";
-import { ROLE_LABELS, getSession, setSession, clearSession, verifyLogin, appLogin, isAdmin, canManage } from "./auth.js";
-import { enterFullscreen } from "./fullscreen.js";
-import { printLabels, LABEL_PRESETS } from "./labels.js";
-import { useUpdateReady, applyUpdate } from "./updatePrompt.js";
-import { useLang } from "./i18n-dom.js";
+  ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
+  loadUsers, createUser, resetPassword, toggleActive, deleteUser, loadLogs,
+} from "./auth.js";
+// (saveUsers is used internally by auth.js helpers above, not needed directly here)
 
-// ── Ctrl+Z ย้อนการแก้ไขที่ยังไม่บันทึก (ทั้งแอปฝั่งสำนักงาน) ──────────────────────
-// ใช้ useUndoable แทน useState ในฟอร์ม/ตาราง → เก็บประวัติ state (สูงสุด 50 ขั้น)
-// กด Ctrl/Cmd+Z จะย้อน "ฟอร์มที่เพิ่งแก้ล่าสุด" (ยึดลำดับการแก้ ไม่ใช่โฟกัส)
-//   • ถ้ากำลังพิมพ์ในช่องข้อความ → ปล่อยให้เบราว์เซอร์ undo ตัวอักษรเองตามปกติ
-//   • dropdown / ปุ่มเลือก (chip) / ตัวเพิ่ม-ลด ที่ไม่มี undo ในตัว → ใช้ตัวนี้ย้อน
-const _undoers = [];              // ฟอร์มที่ลงทะเบียนไว้ (ท้ายสุด = แก้ล่าสุด)
-let _undoKeyOn = false;
-let _editSeq = 0;                 // ลำดับการแก้ไข (นับขึ้นเรื่อยๆ) — ใช้กันย้อนฟอร์มที่ซ่อนหลัง modal
-const _modalStack = [];           // _editSeq ตอนที่แต่ละ modal เปิด (ล่าสุด = บนสุด)
-function _installUndoKey() {
-  if (_undoKeyOn || typeof window === "undefined") return;
-  _undoKeyOn = true;
-  window.addEventListener("keydown", (e) => {
-    if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === "z" || e.key === "Z"))) return;
-    const a = document.activeElement;
-    const tag = a && a.tagName;
-    const isText =
-      (tag === "INPUT" && !/^(checkbox|radio|button|submit|reset|range|file|color)$/i.test(a.type || "")) ||
-      tag === "TEXTAREA" || (a && a.isContentEditable);
-    if (isText) return;           // อยู่ในช่องพิมพ์ → ให้เบราว์เซอร์ undo ตัวอักษรเอง
-    // ถ้ามี modal เปิดอยู่ → ย้อนได้เฉพาะฟอร์มที่ "แก้หลังจาก modal เปิด" (กันเผลอย้อนฟอร์มพื้นหลัง)
-    const gate = _modalStack.length ? _modalStack[_modalStack.length - 1] : -1;
-    for (let i = _undoers.length - 1; i >= 0; i--) {
-      if (_undoers[i].canUndo() && (_undoers[i].seq || 0) > gate) { e.preventDefault(); _undoers[i].undo(); return; }
-    }
-  });
-}
-function useUndoable(initial) {
-  const [state, setState] = useState(initial);
-  const hist = useRef([]);
-  const api = useRef(null);
-  if (!api.current) api.current = {};
-  const set = useCallback((updater) => {
-    const idx = _undoers.indexOf(api.current);   // ทำเครื่องหมายว่าแก้ล่าสุด → ย้ายไปท้ายสแตก
-    if (idx >= 0) { _undoers.splice(idx, 1); _undoers.push(api.current); }
-    api.current.seq = ++_editSeq;                // จำลำดับการแก้ล่าสุดของฟอร์มนี้
-    try { window.dispatchEvent(new Event("mls-undo-available")); } catch { /* ignore */ }
-    setState((prev) => {
-      hist.current = [...hist.current, prev].slice(-50);
-      return typeof updater === "function" ? updater(prev) : updater;
-    });
-  }, []);
-  api.current.canUndo = () => hist.current.length > 0;
-  api.current.undo = () => setState((prev) => {
-    if (hist.current.length === 0) return prev;
-    const last = hist.current[hist.current.length - 1];
-    hist.current = hist.current.slice(0, -1);
-    return last;
-  });
-  useEffect(() => {
-    _installUndoKey();
-    _undoers.push(api.current);
-    return () => { const i = _undoers.indexOf(api.current); if (i >= 0) _undoers.splice(i, 1); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  return [state, set];
-}
-
-// ── ตารางเรียงลำดับตามหัวข้อ (คลิกหัวคอลัมน์เพื่อเรียง) ─────────────────────────
-// useTableSort เก็บ key+ทิศทาง · sortRows เรียงจาก "ค่าจริง" (ตัวเลข/วันที่) ไม่ใช่ข้อความที่โชว์
-function useTableSort(defaultKey = null, defaultDir = "asc") {
-  const [key, setKey] = useState(defaultKey);
-  const [dir, setDir] = useState(defaultDir);
-  const toggle = (k) => {
-    if (k === key) setDir((d) => (d === "asc" ? "desc" : "asc"));
-    else { setKey(k); setDir("asc"); }
-  };
-  const set = (k) => { setKey(k || null); setDir("asc"); };   // เลือกจาก dropdown (มือถือ)
-  const sortRows = (rows, accessors) => {
-    if (!key || !accessors || !accessors[key]) return rows;
-    const acc = accessors[key];
-    const arr = [...(rows || [])];
-    arr.sort((a, b) => {
-      let va = acc(a), vb = acc(b);
-      const na = va == null, nb = vb == null;
-      if (na && nb) return 0;
-      if (na) return 1;               // ค่าว่างไปท้ายเสมอ
-      if (nb) return -1;
-      if (typeof va === "number" && typeof vb === "number") return va - vb;
-      return String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: "base" });
-    });
-    if (dir === "desc") arr.reverse();
-    return arr;
-  };
-  return { key, dir, toggle, set, sortRows };
-}
-// หัวคอลัมน์ที่กดเรียงได้ (โชว์ลูกศร ▲/▼ ตัวที่กำลังเรียง) — เดสก์ท็อป
-function SortTh({ k, sort, children, style }) {
-  const active = sort.key === k;
-  return (
-    <th onClick={() => sort.toggle(k)} style={{ cursor: "pointer", userSelect: "none", ...style }} title="กดเพื่อเรียงลำดับ">
-      {children}
-      <span style={{ marginLeft: 5, fontSize: 11, opacity: active ? 1 : 0.5 }}>{active ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}</span>
-    </th>
-  );
-}
-// ตัวเลือกเรียงลำดับสำหรับมือถือ/แท็บเล็ต (หัวตารางถูกซ่อนตอนเป็นการ์ด) — โชว์เฉพาะ ≤820px
-function SortControl({ sort, options }) {
-  return (
-    <div className="sort-mobile">
-      <span>เรียงโดย</span>
-      <select value={sort.key || ""} onChange={(e) => sort.set(e.target.value)}>
-        <option value="">— ค่าเริ่มต้น —</option>
-        {options.map((o) => <option key={o.k} value={o.k}>{o.label}</option>)}
-      </select>
-      <button type="button" onClick={() => sort.key && sort.toggle(sort.key)} disabled={!sort.key}
-        title="สลับ น้อย↔มาก" aria-label="สลับทิศทางการเรียง">{sort.dir === "asc" ? "▲ น้อย→มาก" : "▼ มาก→น้อย"}</button>
-    </div>
-  );
-}
-
-// ── Toast แจ้งเตือนแบบไม่บล็อกหน้าจอ (แทน alert) ──────────────────────────────
-function mlsToast(text, tone = "info") {
-  try { window.dispatchEvent(new CustomEvent("mls-toast", { detail: { text, tone } })); } catch { /* ignore */ }
-}
-function Toaster() {
-  const [items, setItems] = useState([]);
-  useEffect(() => {
-    let idc = 0;
-    const on = (e) => {
-      const id = ++idc;
-      setItems((s) => [...s, { id, text: e.detail.text, tone: e.detail.tone || "info" }]);
-      const ttl = e.detail.tone === "error" ? 6000 : e.detail.tone === "warn" ? 4500 : 3400;
-      setTimeout(() => setItems((s) => s.filter((x) => x.id !== id)), ttl);
-    };
-    window.addEventListener("mls-toast", on);
-    return () => window.removeEventListener("mls-toast", on);
-  }, []);
-  if (!items.length) return null;
-  return (
-    <div className="mls-toaster">
-      {items.map((it) => (
-        <div key={it.id} className={`mls-toast ${it.tone}`} role="status"
-          onClick={() => setItems((s) => s.filter((x) => x.id !== it.id))} title="แตะเพื่อปิด">{it.text}</div>
-      ))}
-    </div>
-  );
-}
-
-// ── ป้ายบอกว่ากด Ctrl+Z ย้อนได้ (โผล่ครั้งแรกที่มีการแก้ไขในเซสชัน) ──────────────
-function UndoHint() {
-  const [show, setShow] = useState(false);
-  useEffect(() => {
-    const on = () => {
-      let seen = false; try { seen = sessionStorage.getItem("mls-undo-hint") === "1"; } catch { /* ignore */ }
-      if (seen) return;
-      try { sessionStorage.setItem("mls-undo-hint", "1"); } catch { /* ignore */ }
-      setShow(true);
-      setTimeout(() => setShow(false), 4500);
-    };
-    window.addEventListener("mls-undo-available", on);
-    return () => window.removeEventListener("mls-undo-available", on);
-  }, []);
-  if (!show) return null;
-  return <div className="mls-undo-hint" onClick={() => setShow(false)}>↶ กด Ctrl+Z เพื่อย้อนการแก้ไข</div>;
-}
-
-// parseReleaseExcel ถูก import แบบ dynamic ตอนเลือกไฟล์ (ดู ImportReleaseModal)
-// เพื่อไม่ให้ไลบรารี xlsx (ก้อนใหญ่) ถูกโหลดตั้งแต่หน้า Login
-import {
-  processedWeight, materialWeight, distinctUnitCount, machineOpMatrix, partOpMatrix, totalPieces,
-  machineDailyMatrix, missingWeightParts, logWeight,
-} from "./metrics.js";
-import Icon from "./icons.jsx";
-import { askConfirm, ConfirmHost } from "./confirm.jsx";
-import { SimpleBarChart } from "./svgcharts.jsx";
-
-// ─── Chart theme (สีกราฟ SVG — ค่าสีตรงกับ CSS variables ของแอป) ──
-const CHART = {
-  grid: "#e1e9e5", muted: "#6d7d76", tooltipBg: "#ffffff", tooltipBorder: "#e1e9e5",
-  text: "#142420", accent: "#10b981", success: "#22c55e",
-};
-
-// ปุ่มสลับภาษา ไทย/EN — ปุ่มเดียวโชว์ภาษาที่จะสลับไป (แบบเดียวกับหน้าเครื่อง)
-function LangToggle() {
-  const [lang, setLang] = useLang();
-  return (
-    <button className="lang-toggle-btn" onClick={() => setLang(lang === "th" ? "en" : "th")}
-      title="สลับภาษา / Switch language"
-      style={{ appearance: "none", cursor: "pointer", fontFamily: "inherit",
-        fontSize: 13, fontWeight: 800, lineHeight: 1, letterSpacing: ".03em",
-        padding: "5px 12px", borderRadius: 8,
-        border: "1.5px solid var(--accent, #10b981)", background: "transparent", color: "var(--accent, #10b981)" }}>
-      {lang === "th" ? "EN" : "ไทย"}
-    </button>
-  );
-}
-
-const fmtNum = (n) => Number(n || 0).toLocaleString("th-TH", { maximumFractionDigits: 2 });
-const fmtDT = (iso) => iso ? new Date(iso).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-";
-// วันที่อย่างเดียว (สำหรับ "วันที่ปล่อยงาน" ที่เวลาไม่ใช่เวลาจริง — โชว์เวลาแล้วจะทำให้เข้าใจผิด)
-const fmtD = (iso) => iso ? new Date(iso).toLocaleDateString("th-TH", { dateStyle: "short" }) : "-";
-// เวลาเป็น ชม.:นาที (สำหรับ "เวลาเดินเครื่อง") — ปัดวินาทีทิ้ง อ่านง่ายในรายงาน
-const fmtHrs = (secs) => {
-  const s = Math.max(0, Math.floor(Number(secs) || 0));
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h} ชม. ${String(m).padStart(2, "0")} น.` : `${m} น.`;
-};
-
-// ─── เสียง + สั่น ตอบรับการสแกน (สำคัญบนหน้าโรงงานที่ไม่ได้จ้องจอ) ───────────────
-let _audioCtx = null;
-function beep(kind) {
-  try {
-    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    if (_audioCtx.state === "suspended") _audioCtx.resume();
-    const ctx = _audioCtx;
-    const play = (freq, start, dur, vol = 0.18) => {
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.type = "square"; o.frequency.value = freq; o.connect(g); g.connect(ctx.destination);
-      const t = ctx.currentTime + start;
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      o.start(t); o.stop(t + dur + 0.02);
-    };
-    if (kind === "success") play(950, 0, 0.13);
-    else if (kind === "warning") { play(600, 0, 0.1); play(600, 0.14, 0.1); }
-    else { play(240, 0, 0.32, 0.22); } // error/danger — ต่ำและยาว
-  } catch (_) { /* บางเบราว์เซอร์บล็อกเสียงก่อน user gesture */ }
-}
-function feedback(tone) {
-  beep(tone === "danger" ? "danger" : tone === "warning" ? "warning" : "success");
-  try {
-    if (navigator.vibrate) navigator.vibrate(tone === "success" ? 60 : tone === "warning" ? [40, 50, 40] : [120, 70, 120]);
-  } catch (_) {}
-}
-
-// ─── Date range presets ─────────────────────────────────────────────────────
-const PRESETS = [
-  { value: "day", label: "วันนี้" },
-  { value: "week", label: "7 วันล่าสุด" },
-  { value: "month", label: "30 วันล่าสุด" },
-  { value: "year", label: "12 เดือนล่าสุด" },
+// ─── Master Data ──────────────────────────────────────────────────────────────
+const ACCOUNTS = [
+  { code:"511010", name:"Glass Purchases",                        group:"Materials"    },
+  { code:"511015", name:"Screw & Fastener Purchases",             group:"Materials"    },
+  { code:"511017", name:"Cast in Channel",                        group:"Materials"    },
+  { code:"511020", name:"Gaskets Purchases",                      group:"Materials"    },
+  { code:"511025", name:"Silicone & Sealant Purchases",           group:"Materials"    },
+  { code:"511030", name:"Glazing Material Purchases",             group:"Materials"    },
+  { code:"511035", name:"Miscellaneous Purchases",                group:"Materials"    },
+  { code:"511037", name:"Hardware Purchases",                     group:"Materials"    },
+  { code:"511040", name:"Tools & Consumables Purchases",          group:"Materials"    },
+  { code:"511042", name:"Accessories Purchases",                  group:"Materials"    },
+  { code:"511045", name:"Aluminium Extrusion Purchases",          group:"Aluminium"    },
+  { code:"511050", name:"Aluminium Sheet Purchases",              group:"Aluminium"    },
+  { code:"511051", name:"Extra Charge for Extrusion",             group:"Aluminium"    },
+  { code:"511052", name:"Dies & Moulds Purchases",                group:"Aluminium"    },
+  { code:"511053", name:"Aluminium Grates and Grids Purchases",   group:"Aluminium"    },
+  { code:"511055", name:"Steel Purchases",                        group:"Steel"        },
+  { code:"511060", name:"Steel Components Purchases",             group:"Steel"        },
+  { code:"511062", name:"Iron Purchases",                         group:"Steel"        },
+  { code:"511063", name:"Galvanized Purchases",                   group:"Steel"        },
+  { code:"511065", name:"Stainless Steel Sheets Purchases",       group:"Steel"        },
+  { code:"511070", name:"Composite Panel Purchases",              group:"Materials"    },
+  { code:"511075", name:"Mechanical Components Purchases",        group:"Materials"    },
+  { code:"511080", name:"Material for Protection Purchases",      group:"Materials"    },
+  { code:"511085", name:"Insulation Material Purchases",          group:"Materials"    },
+  { code:"511090", name:"Waterproofing Membranes Purchases",      group:"Materials"    },
+  { code:"511093", name:"Extra Charge for Paint",                 group:"Finishing"    },
+  { code:"511095", name:"PVF2 Expenses",                          group:"Finishing"    },
+  { code:"511100", name:"Hot Dipped Galvanized (HDG)",            group:"Finishing"    },
+  { code:"511105", name:"Powder Painting Expenses",               group:"Finishing"    },
+  { code:"511110", name:"Anodising Expenses",                     group:"Finishing"    },
+  { code:"511113", name:"Chromate Expenses",                      group:"Finishing"    },
+  { code:"511115", name:"Varnishing Steel Expenses",              group:"Finishing"    },
+  { code:"511120", name:"Sundry Chemical Treatments Expenses",    group:"Finishing"    },
+  { code:"511125", name:"Packing Materials Expenses",             group:"Logistics"    },
+  { code:"511128", name:"Installation Equipments Expenses",       group:"Installation" },
+  { code:"511130", name:"Installation Expenses",                  group:"Installation" },
+  { code:"511135", name:"Subcontractors",                         group:"Installation" },
+  { code:"511140", name:"External Design Costs",                  group:"Design & Eng" },
+  { code:"511145", name:"Other Design Costs",                     group:"Design & Eng" },
+  { code:"511150", name:"External Engineering Costs",             group:"Design & Eng" },
+  { code:"511155", name:"Other Engineering Costs",                group:"Design & Eng" },
+  { code:"511160", name:"Health & Safety Costs",                  group:"Site"         },
+  { code:"511165", name:"Skip and Rubbish Removal Costs",         group:"Site"         },
+  { code:"511166", name:"Local Charge for Shipment",              group:"Logistics"    },
+  { code:"511167", name:"Ocean Freight for Shipment",             group:"Logistics"    },
+  { code:"511168", name:"U.S. Customs",                           group:"Logistics"    },
+  { code:"511169", name:"Destination Charge for Shipment",        group:"Logistics"    },
+  { code:"511170", name:"Transport Expenses on Purchases",        group:"Logistics"    },
+  { code:"511173", name:"Transport Expenses on Sales",            group:"Logistics"    },
+  { code:"511175", name:"Other Expenses on Transport Expenses",   group:"Logistics"    },
+  { code:"511178", name:"Other Expenses on Transport Sales",      group:"Logistics"    },
+  { code:"511180", name:"Customers Expenses on Projects",         group:"Site"         },
+  { code:"511185", name:"PJM Travel and Accommodation Expenses",  group:"Site"         },
+  { code:"511205", name:"Custom Duties and Operations",           group:"Logistics"    },
+  { code:"511300", name:"Internal Production",                    group:"Production"   },
+  { code:"511305", name:"External Production",                    group:"Production"   },
+  { code:"511350", name:"Testing Expenses",                       group:"QA/QC"        },
+  { code:"511353", name:"Mock Up Expenses",                       group:"QA/QC"        },
+  { code:"511355", name:"Cost of NCR",                            group:"QA/QC"        },
+  { code:"521005", name:"Minor Factory Equipment Purchases",      group:"Factory"      },
+  { code:"521025", name:"Insurance: Shipment",                    group:"Logistics"    },
+  { code:"521110", name:"Toll and Parking Expenses",              group:"Site"         },
+  { code:"521250", name:"Other General Expenses",                 group:"Other"        },
 ];
-function rangeFor(preset) {
-  const to = new Date();
-  const from = new Date(to);
-  if (preset === "day") from.setHours(0, 0, 0, 0);
-  else if (preset === "week") from.setDate(to.getDate() - 7);
-  else if (preset === "month") from.setDate(to.getDate() - 30);
-  else from.setFullYear(to.getFullYear() - 1);
-  return { from: from.toISOString(), to: to.toISOString() };
+
+const GROUPS      = [...new Set(ACCOUNTS.map(a => a.group))];
+const PO_STATUS   = ["PO Issued","Delivered","Invoiced","Paid"];
+const STATUS_CLR  = { Planning:"#94a3b8", Pending:"#94a3b8","PO Issued":"#3b82f6",Delivered:"#f59e0b",Invoiced:"#8b5cf6",Paid:"#10b981" };
+const STATUS_BG   = { Planning:"#f1f5f9", Pending:"#f1f5f9","PO Issued":"#eff6ff",Delivered:"#fffbeb",Invoiced:"#f5f3ff",Paid:"#f0fdf4" };
+const GRP_COLORS  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#ec4899"];
+
+// ── รายการบัญชีแก้ได้ (แอดมิน) ─────────────────────────────────────────────────
+//  เก็บใน kv 'tcs-accounts' (ใช้ร่วมทุกโครงการ). applyAccountList จะทับ ACCOUNTS/
+//  GROUPS "ในที่" (mutate) เพื่อให้ทุกจุดที่อ่าน ACCOUNTS เห็นค่าล่าสุดหลัง re-render.
+function applyAccountList(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  const clean = list.filter(a => a && a.code).map(a => ({ code: String(a.code).trim(), name: a.name || "", group: a.group || "Other" }));
+  if (!clean.length) return;
+  ACCOUNTS.splice(0, ACCOUNTS.length, ...clean);
+  GROUPS.splice(0, GROUPS.length, ...[...new Set(ACCOUNTS.map(a => a.group))]);
 }
-// ─── Month / custom range helpers (used by Report's flexible date filter) ──
-function monthRangeFor(monthStr) {
-  if (!monthStr) return rangeFor("month");
-  const [y, m] = monthStr.split("-").map(Number);
-  const from = new Date(y, m - 1, 1, 0, 0, 0, 0);
-  const to = new Date(y, m, 0, 23, 59, 59, 999); // last day of that month
-  return { from: from.toISOString(), to: to.toISOString() };
-}
-function customRangeFor(fromStr, toStr) {
-  const from = fromStr ? new Date(`${fromStr}T00:00:00`) : new Date(0);
-  const to = toStr ? new Date(`${toStr}T23:59:59.999`) : new Date();
-  return { from: from.toISOString(), to: to.toISOString() };
-}
-function todayStr() { return new Date().toISOString().slice(0, 10); }
-function daysAgoStr(n) { return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10); }
-function PresetPicker({ value, onChange }) {
-  return (
-    <div className="chip-row">
-      {PRESETS.map((p) => (
-        <button key={p.value} className={`chip ${value === p.value ? "active" : ""}`} onClick={() => onChange(p.value)}>
-          {p.label}
-        </button>
-      ))}
-    </div>
-  );
+// ย้ายข้อมูลเมื่อเปลี่ยนรหัสบัญชี (ข้ามทุกโครงการ) — renameMap = { oldCode: newCode }
+async function migrateAccountCodes(renameMap) {
+  const map = Object.fromEntries(Object.entries(renameMap || {}).filter(([o, n]) => o && n && o !== n));
+  if (!Object.keys(map).length) return;
+  const ren = (code) => map[code] || code;
+  const renObjKeys = (obj) => {  // คีย์ที่เป็น "code" หรือ "code:col" ให้เปลี่ยนฐาน (ข้ามคีย์ meta $…)
+    if (!obj || typeof obj !== "object") return obj;
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k.startsWith("$")) { out[k] = v; continue; }
+      const ci = k.indexOf(":"); const base = ci >= 0 ? k.slice(0, ci) : k; const nb = map[base];
+      out[nb ? (ci >= 0 ? nb + k.slice(ci) : nb) : k] = v;
+    }
+    return out;
+  };
+  // ── ทำเป็น 2 เฟส กัน "ย้ายไม่ครบเงียบ ๆ" ──────────────────────────────────
+  //  เฟส 1: อ่านทุกคีย์ของทุกโครงการ + สร้าง payload ที่เปลี่ยนรหัสแล้วเก็บไว้ในหน่วยความจำ
+  //         ใช้ sgOrThrow — ถ้าอ่านพลาดแม้แต่คีย์เดียวจะ throw ทันที (ยังไม่เขียนอะไรเลย)
+  //  เฟส 2: เขียนทุก payload ด้วย ssOrThrow — ถ้าพลาดจะ throw ให้ผู้เรียกรู้และหยุด
+  //         ก่อนไปเขียน tcs-accounts ใหม่ (ไม่ปล่อยให้รหัสใหม่โผล่ทั้งที่ข้อมูลยังไม่ย้าย)
+  const projects = (await sgOrThrow("tcs-projects")) || [];
+  const writes = []; // { key, value }
+  for (const proj of projects) {
+    const id = proj?.id; if (!id) continue;
+    const t = await sgOrThrow(`tcs-tenders-${id}`);   if (t && typeof t === "object") writes.push({ key:`tcs-tenders-${id}`, value: renObjKeys(t) });
+    const ad = await sgOrThrow(`tcs-additions-${id}`); if (ad && typeof ad === "object") {
+      const nad = {}; for (const [m, mo] of Object.entries(ad)) nad[m] = (m.startsWith("$") || typeof mo !== "object") ? mo : renObjKeys(mo);
+      writes.push({ key:`tcs-additions-${id}`, value: nad });
+    }
+    const po = await sgOrThrow(`tcs-po-${id}`);  if (Array.isArray(po))  writes.push({ key:`tcs-po-${id}`,  value: po.map(p => ({ ...p, items: (p.items || []).map(it => ({ ...it, code: ren(it.code) })) })) });
+    const ex = await sgOrThrow(`tcs-extra-${id}`); if (Array.isArray(ex)) writes.push({ key:`tcs-extra-${id}`, value: ex.map(e => ({ ...e, code: ren(e.code), ...(e.parentCode ? { parentCode: ren(e.parentCode) } : {}) })) });
+    const hid = await sgOrThrow(`tcs-hidden-${id}`); if (Array.isArray(hid)) writes.push({ key:`tcs-hidden-${id}`, value: hid.map(ren) });
+    const inp = await sgOrThrow(`tcs-inplan-${id}`); if (Array.isArray(inp)) writes.push({ key:`tcs-inplan-${id}`, value: inp.map(pl => ({ ...pl, items: (pl.items || []).map(it => ({ ...it, code: ren(it.code) })) })) });
+  }
+  // เฟส 2: เขียนจริง (อ่านครบทุกอย่างแล้วเท่านั้นถึงเริ่มเขียน)
+  for (const w of writes) await ssOrThrow(w.key, w.value);
 }
 
-// ─── Routing helpers ─────────────────────────────────────────────────────────
-function progressFor(routing, doneOpNames) {
-  const done = new Set(doneOpNames);
-  return (routing || []).map((op) => ({ op, done: done.has(op) }));
-}
-function nextOpFor(routing, doneOpNames) {
-  const done = new Set(doneOpNames);
-  return (routing || []).find((op) => !done.has(op)) || null;
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// UI ATOMS
-// ══════════════════════════════════════════════════════════════════════════
-const Btn = ({ children, variant = "default", size, className = "", ...rest }) => {
-  const vClass = { accent: "btn-accent", success: "btn-success", danger: "btn-danger", ghost: "btn-ghost" }[variant] || "";
-  const sClass = { lg: "btn-lg", sm: "btn-sm" }[size] || "";
-  return <button {...rest} className={`btn ${vClass} ${sClass} ${className}`}>{children}</button>;
+// ─── Incoming / Payment tracking status ────────────────────────────────────
+// A PO's incoming status is derived from its planned/actual dates rather than
+// stored directly, so it's always in sync with today's date.
+// วันนี้ตาม "ปฏิทินท้องถิ่น" (ไม่ใช้ UTC เพื่อไม่ให้ข้ามวันตอนเช้ามืดในโซน UTC+7)
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 };
-const Input = forwardRef(({ className = "", ...props }, ref) => (
-  <input {...props} ref={ref} className={`input ${className}`} />
-));
-const Select = ({ options, className = "", ...props }) => (
-  <select {...props} className={`select ${className}`}>
-    <option value="">— เลือก —</option>
-    {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-  </select>
-);
-const Field = ({ label, children }) => (
-  <div className="field"><div className="label-el">{label}</div>{children}</div>
-);
-const Card = ({ title, right, children, className = "" }) => (
-  <div className={`card ${className}`}>
-    {(title || right) && (
-      <div className="card-head">
-        <div className="card-title">{title}</div>
-        <div>{right}</div>
-      </div>
-    )}
-    {children}
-  </div>
-);
-const TONES = {
-  accent: { c: "var(--accent-dk)", bg: "rgba(16,185,129,.12)", bd: "rgba(16,185,129,.3)" },
-  success: { c: "#15803d", bg: "rgba(34,197,94,.14)", bd: "rgba(34,197,94,.3)" },
-  steel: { c: "#1d4ed8", bg: "rgba(59,130,246,.12)", bd: "rgba(59,130,246,.3)" },
-  warning: { c: "#b45309", bg: "rgba(245,158,11,.14)", bd: "rgba(245,158,11,.32)" },
-  danger: { c: "#b91c1c", bg: "rgba(239,68,68,.12)", bd: "rgba(239,68,68,.3)" },
-  muted: { c: "var(--muted)", bg: "rgba(109,125,118,.1)", bd: "rgba(109,125,118,.25)" },
+
+// ─── กันข้อมูลหาย: ธง "มีการแก้ไขที่ยังไม่บันทึก" (โมดูลเดียวทั้งแอป) ───────────────
+// หน้าจอที่แก้แบบ draft (QS ราคาเดิม/รายเดือน) จะตั้งค่า .dirty ระหว่างพิมพ์ค้าง
+// แล้วปุ่มออกจากหน้า/สลับโครงการ/ล็อกเอาต์/รีเฟรชเบราว์เซอร์ จะถามยืนยันก่อนทิ้ง
+const UnsavedGuard = { dirty: false };
+const confirmLeaveIfDirty = () => !UnsavedGuard.dirty || window.confirm("มีการแก้ไขที่ยังไม่บันทึก — ออกจากหน้านี้โดยไม่บันทึกหรือไม่?");
+// "2026-07-02" + 30 -> "2026-08-01" — คำนวณด้วย UTC ล้วนทั้งไปและกลับ กัน bug timezone
+// (ของเดิม parse เป็น local แต่อ่านกลับเป็น UTC ทำให้ในไทยคลาดไป 1 วันและตกเดือนผิด)
+const addDays = (dateStr, days) => {
+  if (!dateStr) return "";
+  const [y,m,dd] = String(dateStr).split("-").map(Number);
+  if (!y || !m || !dd) return "";
+  const d = new Date(Date.UTC(y, m-1, dd));
+  d.setUTCDate(d.getUTCDate()+days);
+  return d.toISOString().slice(0,10);
 };
-const Badge = ({ children, tone = "accent" }) => {
-  const t = TONES[tone] || TONES.accent;
-  return <span className="badge" style={{ color: t.c, background: t.bg, borderColor: t.bd }}>{children}</span>;
-};
-const StatCard = ({ label, value, icon }) => (
-  <div className="card">
-    <div className="stat-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      {icon && <Icon name={icon} size={13} />}{label}
-    </div>
-    <div className="stat-value">{value}</div>
-  </div>
-);
 
-// Generic modal shell used by the quick-create Project / Part popups.
-// closeOnBackdrop: false = คลิกพื้นที่ว่างรอบๆ จะไม่ปิด (ต้องกด X หรือปุ่มยกเลิกเท่านั้น)
-// locked: true = ล็อกเต็มรูปแบบชั่วคราว (ปิดไม่ได้เลยแม้กด X/Esc) — ใช้ตอนกำลังประมวลผล/นำเข้าอยู่
-function Modal({ title, sub, onClose, children, closeOnBackdrop = true, locked = false, wide = false }) {
-  const [shake, setShake] = useState(false);
+// ─── Multi-code / multi-batch PO helpers ───────────────────────────────────
+// A single PO can now be split across several Account Codes (each with its
+// own amount that rolls up into the PO total) and can arrive in several
+// delivery batches instead of a single date. Older records saved before this
+// existed still carry a single `code`/`amount` and a single
+// `incomingPlan`/`actualReceived` — these getters transparently upgrade them
+// so both old and new records work everywhere without a one-off migration.
+// ─── PO data model + migration ─────────────────────────────────────────────
+// New shape: ONE supplier per PO. Each account-code line item carries its own
+// `store` (qty already on hand, netted out of the % base) and its own list of
+// delivery/payment `rounds`, so one material can arrive in several shipments.
+// Payment is automatic — a round counts as paid once its due date (received
+// date + credit term) has arrived. migratePO() upgrades every older record
+// (multi-supplier, supplier-level rounds, item.supplierId, PO-level
+// deliveries, paymentType "credit30") on read, so old + new records work
+// everywhere with no destructive one-off migration.
+const DEFAULT_CREDIT_DAYS = 30;
 
-  useEffect(() => {
-    function onKey(e) { if (e.key === "Escape" && !locked) onClose(); }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, locked]);
+const isNewPO = (p) => !!(p && p.supplier && typeof p.supplier === "object" &&
+  Array.isArray(p.items) && p.items.length > 0 && Array.isArray(p.items[0].rounds));
 
-  // ลงทะเบียน modal ในสแตก (สำหรับ Ctrl+Z: ย้อนได้เฉพาะฟอร์มในหน้าต่างนี้ ไม่ย้อนฟอร์มพื้นหลัง)
-  useEffect(() => {
-    _modalStack.push(_editSeq);
-    return () => { _modalStack.pop(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function pulse() {
-    setShake(true);
-    setTimeout(() => setShake(false), 320);
-  }
-
-  function handleBackdropClick(e) {
-    if (e.target !== e.currentTarget) return;
-    if (locked) { pulse(); return; }
-    if (closeOnBackdrop) onClose();
-    else pulse(); // แจ้งเตือนเบาๆ ว่าหน้าต่างนี้ถูกล็อกไว้ ไม่ได้ค้าง
-  }
-
-  return (
-    <div className="modal-backdrop" onMouseDown={handleBackdropClick}>
-      <div className={`modal${wide ? " modal-wide" : ""}${shake ? " modal-shake" : ""}`}>
-        <div className="modal-head">
-          <div>
-            <div className="modal-title">{title}</div>
-            {sub && <div className="modal-sub">{sub}</div>}
-          </div>
-          <span
-            className={`modal-close${locked ? " modal-close-disabled" : ""}`}
-            onClick={() => { if (locked) { pulse(); return; } onClose(); }}
-          >
-            <Icon name="close" size={16} />
-          </span>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-// Signature element: the routing rail — a numbered track of the real
-// operation sequence a part unit must travel through.
-function RoutingRail({ routing, doneOps }) {
-  const steps = routing || [];
-  const doneSet = new Set(doneOps || []);
-  let currentAssigned = false;
-  if (steps.length === 0) {
-    return <div style={{ fontSize: 12.5, color: "var(--muted)" }}>ยังไม่ได้กำหนด Routing สำหรับ Part นี้</div>;
-  }
-  return (
-    <div className="rail">
-      {steps.map((op, i) => {
-        const done = doneSet.has(op);
-        const isCurrent = !done && !currentAssigned;
-        if (isCurrent) currentAssigned = true;
-        return (
-          <div className="rail-node-wrap" key={op}>
-            {i > 0 && <div className={`rail-line ${doneSet.has(steps[i - 1]) ? "done" : ""}`} />}
-            <div className="rail-node">
-              <div className={`rail-dot ${done ? "done" : isCurrent ? "current" : ""}`}>{done ? "✓" : i + 1}</div>
-              <div className={`rail-label ${done ? "done" : isCurrent ? "current" : ""}`}>{op}</div>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// LOGIN
-// ══════════════════════════════════════════════════════════════════════════
-// อนิเมชันโหลดตอนล็อกอิน/เปลี่ยนหน้า (แบบ 3 — จุดเต้น + แถบกวาด) เต็มจอ
-function LoginSplash({ text = "กำลังเข้าสู่ระบบ…" }) {
-  return (
-    <div className="mls-splash">
-      <div className="mls-splash-brand"><span className="m"><Icon name="bolt" size={18} /></span> MACHINING LINE</div>
-      <div className="mls-load3"><div className="mls-load3-dots"><i /><i /><i /></div><div className="mls-load3-bar" /></div>
-      <div className="mls-splash-text">{text}</div>
-    </div>
-  );
-}
-
-function Login({ onLogin }) {
-  const [code, setCode] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(e) {
-    e.preventDefault();
-    setErr(""); setBusy(true);
-    const res = await appLogin(code, password);   // ล็อกอินรวม (หน้าเดียวทั้งออฟฟิศ+คนงาน) — ออนไลน์เช็ค DB + จำรหัสไว้ล็อกอินออฟไลน์
-    setBusy(false);
-    if (!res || !res.user) {
-      setErr(res && res.error === "offline_first"
-        ? "บัญชีนี้ยังไม่เคยล็อกอินในเครื่องนี้ — ต้องล็อกอินตอนมีเน็ต 1 ครั้งก่อน แล้วครั้งต่อไปจะออฟไลน์ได้"
-        : res && res.error === "network"
-          ? "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ (เน็ตช้า/หลุด) — เช็ค Wi-Fi แล้วกดเข้าสู่ระบบอีกครั้ง"
-          : "รหัสพนักงานหรือรหัสผ่านไม่ถูกต้อง");
-      return;
-    }
-    setSession(res.user);
-    enterFullscreen();   // ล็อกอินสำเร็จ = user gesture → เข้าเต็มจอทันที
-    onLogin(res.user);   // operator จะถูก goStation เด้งไป /station → แล้วเข้าแผนกตัวเองอัตโนมัติ
-  }
-
-  return (
-    <div className="login-wrap">
-      <form onSubmit={submit} className="login-card">
-        <div className="login-mark"><Icon name="bolt" size={24} style={{ stroke: "var(--accent-ink)" }} /></div>
-        <div style={{ fontFamily: "var(--font-display)", fontSize: 21, fontWeight: 600, color: "var(--text)" }}>
-          Machining Line System
-        </div>
-        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 24, marginTop: 3 }}>
-          ระบบบันทึกการทำงานเครื่องจักร
-        </div>
-        <Field label="รหัสพนักงาน">
-          <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="เช่น admin" autoFocus autoCapitalize="none" autoCorrect="off" spellCheck={false} />
-        </Field>
-        <Field label="รหัสผ่าน">
-          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
-        </Field>
-        {err && <div style={{ color: "var(--danger-hi)", fontSize: 13, marginBottom: 12 }}>{err}</div>}
-        <Btn variant="accent" size="lg" className="btn-block" disabled={busy}>
-          {busy ? <>กำลังเข้าสู่ระบบ<span className="mls-btn-dots"><i /><i /><i /></span></> : "เข้าสู่ระบบ"}
-        </Btn>
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 18, lineHeight: 1.7, textAlign: "center" }}>
-          ลืมรหัสผ่าน? ติดต่อผู้ดูแลระบบ
-        </div>
-      </form>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// SHELL — responsive nav: sidebar (desktop) / topbar+drawer+bottom nav (mobile)
-// ══════════════════════════════════════════════════════════════════════════
-// can: ฟังก์ชันเช็คสิทธิ์ต่อเมนู (undefined = ทุก role เข้าได้)
-const MENU = [
-  { group: "ขั้นตอนงาน", items: [
-    { key: "projects", label: "โปรเจค", icon: "folder" },
-    { key: "release", label: "ปล่อยงาน (Release)", icon: "box" },
-    { key: "labels", label: "พิมพ์ QR / ป้าย", icon: "qr" },
-    { key: "report", label: "รายงานข้อมูลสแกน", icon: "chart" },
-    { key: "verify", label: "ตรวจงานประกอบ", icon: "check" },
-  ] },
-  { group: "สรุปภาพรวม", items: [
-    { key: "machines", label: "สรุปเครื่องจักร", icon: "machine" },
-    { key: "parts", label: "สรุป Part", icon: "grid" },
-  ] },
-  { group: "จัดการ", items: [
-    { key: "setup", label: "ตั้งค่า", icon: "settings", can: isAdmin },
-  ] },
-];
-// เมนูที่ user คนนี้เข้าถึงได้จริง (ตามสิทธิ์) — ใช้ทั้งเรนเดอร์เมนูและกันการเปิดแท็บ
-function menuForUser(user) {
-  return MENU
-    .map((g) => ({ ...g, items: g.items.filter((it) => !it.can || it.can(user)) }))
-    .filter((g) => g.items.length > 0);
-}
-function canOpenTab(user, key) {
-  return MENU.flatMap((g) => g.items).some((it) => it.key === key && (!it.can || it.can(user)));
-}
-const BOTTOM_LEFT = { key: "release", label: "Release", icon: "box" };
-const BOTTOM_LEFT2 = { key: "labels", label: "พิมพ์ QR", icon: "qr" };
-const BOTTOM_RIGHT = { key: "report", label: "รายงาน", icon: "chart" };
-
-// ─── เปลี่ยนรหัสผ่านของตัวเอง (ผู้ใช้คนไหนก็ได้ที่ล็อกอินอยู่) ───────────────────
-function ChangePasswordModal({ onClose }) {
-  const [oldPw, setOldPw] = useState("");
-  const [newPw, setNewPw] = useState("");
-  const [confirmPw, setConfirmPw] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [done, setDone] = useState(false);
-
-  async function submit() {
-    setErr("");
-    if (newPw.length < 4) { setErr("รหัสผ่านใหม่ต้องอย่างน้อย 4 ตัวอักษร"); return; }
-    if (newPw !== confirmPw) { setErr("ยืนยันรหัสผ่านใหม่ไม่ตรงกัน"); return; }
-    if (newPw === oldPw) { setErr("รหัสผ่านใหม่ต้องต่างจากรหัสเดิม"); return; }
-    setBusy(true);
-    try {
-      const res = await changeMyPassword(oldPw, newPw);
-      if (res?.ok) { setDone(true); mlsToast("เปลี่ยนรหัสผ่านแล้ว", "success"); }
-      else if (res?.reason === "wrong_old") setErr("รหัสผ่านเดิมไม่ถูกต้อง");
-      else if (res?.reason === "too_short") setErr("รหัสผ่านใหม่สั้นเกินไป");
-      else setErr("เปลี่ยนไม่สำเร็จ");
-    } catch (e) { setErr("เปลี่ยนไม่สำเร็จ: " + (e?.message || e)); }
-    finally { setBusy(false); }
-  }
-
-  return (
-    <Modal title="เปลี่ยนรหัสผ่าน" sub="เปลี่ยนรหัสผ่านของบัญชีคุณเอง" onClose={onClose} locked={busy}>
-      {done ? (
-        <>
-          <div style={{ fontSize: 13.5, lineHeight: 1.7, color: "var(--accent-dk)", marginBottom: 16 }}>
-            ✓ เปลี่ยนรหัสผ่านเรียบร้อยแล้ว — ครั้งต่อไปให้ใช้รหัสผ่านใหม่ในการเข้าสู่ระบบ
-          </div>
-          <div className="modal-actions"><Btn variant="accent" onClick={onClose}>เสร็จสิ้น</Btn></div>
-        </>
-      ) : (
-        <>
-          <Field label="รหัสผ่านเดิม">
-            <Input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoFocus />
-          </Field>
-          <Field label="รหัสผ่านใหม่ (อย่างน้อย 4 ตัว)">
-            <Input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} />
-          </Field>
-          <Field label="ยืนยันรหัสผ่านใหม่">
-            <Input type="password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
-          </Field>
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 4 }}>{err}</div>}
-          <div className="modal-actions" style={{ marginTop: 16 }}>
-            <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-            <Btn variant="accent" onClick={submit} disabled={busy || !oldPw || !newPw || !confirmPw}>
-              {busy ? "กำลังเปลี่ยน..." : "เปลี่ยนรหัสผ่าน"}
-            </Btn>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
-}
-
-function Shell({ user, onLogout }) {
-  const [tab, setTab] = useState("projects");
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [pwOpen, setPwOpen] = useState(false);   // หน้าต่างเปลี่ยนรหัสผ่านตัวเอง
-  const [labelsPreselect, setLabelsPreselect] = useState(""); // release id ที่ส่งมาจากหน้ารายละเอียด Release เพื่อเปิดหน้าพิมพ์ QR แบบเลือกล็อตให้อัตโนมัติ
-  const [verifyPreselect, setVerifyPreselect] = useState(""); // parent QR ส่งมาจากรายงานประกอบ/แพ็ก → เปิดหน้าตรวจเบอร์นั้นอัตโนมัติ
-  const [verifyNonce, setVerifyNonce] = useState(0); // บั๊มพ์ทุกครั้งที่เข้าหน้าตรวจ → remount หน้าใหม่ (กดเมนูซ้ำ = เคลียร์ผลเดิม)
-
-  const menu = menuForUser(user); // เมนูตามสิทธิ์ของ user คนนี้
-  const currentLabel = MENU.flatMap((g) => g.items).find((i) => i.key === tab)?.label || "";
-
-  function go(key, opts) {
-    if (!canOpenTab(user, key)) return; // กันเปิดแท็บที่ไม่มีสิทธิ์ (เช่น ยิงจากปุ่มลึกๆ)
-    setTab(key);
-    setDrawerOpen(false);
-    if (opts?.releaseId) setLabelsPreselect(opts.releaseId);
-    if (opts?.qr) setVerifyPreselect(opts.qr);
-    if (key === "verify") setVerifyNonce((n) => n + 1);   // เข้าหน้าตรวจทุกครั้ง → หน้าใหม่ (กดเมนูซ้ำ = เคลียร์ผลเดิม)
-  }
-
-  // (เอาการสแกนออกจากหน้าสำนักงานแล้ว — การสแกนทำที่หน้าเครื่อง /station เท่านั้น
-  //  หน้าสำนักงานบนมือถือ/ไอแพดจึงไม่ต้องใช้กล้อง)
-
-  return (
-    <div className="app-shell">
-      {/* ── Desktop sidebar ── */}
-      <div className="sidebar">
-        <div className="brand">
-          <div className="brand-mark"><Icon name="bolt" size={19} style={{ stroke: "var(--accent-ink)" }} /></div>
-          <div>
-            <div className="brand-name">Machining Line</div>
-            <div className="brand-sub">ระบบบันทึกการทำงานเครื่องจักร</div>
-          </div>
-        </div>
-        {menu.map((g) => (
-          <div className="nav-group" key={g.group}>
-            <div className="nav-group-label">{g.group}</div>
-            {g.items.map((it) => (
-              <div key={it.key} className={`nav-item ${tab === it.key ? "active" : ""}`} onClick={() => go(it.key)}>
-                <Icon name={it.icon} size={17} />{it.label}
-              </div>
-            ))}
-          </div>
-        ))}
-        <div className="sidebar-footer">
-          <div className="user-chip">
-            <div className="user-avatar">{(user.name || "U").slice(0, 1)}</div>
-            <div>
-              <div className="user-name">{user.name}</div>
-              <div className="user-role">{ROLE_LABELS[user.role] || user.role}</div>
-            </div>
-            <div style={{ marginLeft: "auto" }}><LangToggle /></div>
-          </div>
-          <div className="nav-item" onClick={() => setPwOpen(true)}><Icon name="lock" size={17} />เปลี่ยนรหัสผ่าน</div>
-          <div className="nav-item logout-item" onClick={onLogout}><Icon name="logout" size={17} />ออกจากระบบ</div>
-        </div>
-      </div>
-
-      {/* ── Mobile topbar ── */}
-      <div className="topbar">
-        <div className="icon-btn" onClick={() => setDrawerOpen(true)}><Icon name="menu" size={19} /></div>
-        <div className="topbar-center">
-          <div className="topbar-title">{currentLabel}</div>
-          <div className="topbar-sub">{user.name} · {ROLE_LABELS[user.role] || user.role}</div>
-        </div>
-        <div className="topbar-actions">
-          <div className="icon-btn" onClick={onLogout} title="ออกจากระบบ">
-            <Icon name="logout" size={17} style={{ stroke: "var(--danger)" }} />
-          </div>
-          <div className="topbar-avatar" onClick={() => setDrawerOpen(true)}>{(user.name || "U").slice(0, 1)}</div>
-        </div>
-      </div>
-
-      {/* ── Mobile drawer ── */}
-      <div className={`drawer-backdrop ${drawerOpen ? "open" : ""}`} onClick={() => setDrawerOpen(false)} />
-      <div className={`drawer ${drawerOpen ? "open" : ""}`}>
-        <div className="brand">
-          <div className="brand-mark"><Icon name="bolt" size={19} style={{ stroke: "var(--accent-ink)" }} /></div>
-          <div>
-            <div className="brand-name">Machining Line</div>
-            <div className="brand-sub">{user.name} · {ROLE_LABELS[user.role] || user.role}</div>
-          </div>
-        </div>
-        {menu.map((g) => (
-          <div className="nav-group" key={g.group}>
-            <div className="nav-group-label">{g.group}</div>
-            {g.items.map((it) => (
-              <div key={it.key} className={`nav-item ${tab === it.key ? "active" : ""}`} onClick={() => go(it.key)}>
-                <Icon name={it.icon} size={17} />{it.label}
-              </div>
-            ))}
-          </div>
-        ))}
-        <div style={{ marginTop: 10, borderTop: "1px solid var(--border-soft)", paddingTop: 14, paddingLeft: 6 }}>
-          <LangToggle />
-        </div>
-        <div className="nav-item" onClick={() => { setDrawerOpen(false); setPwOpen(true); }} style={{ marginTop: 8 }}>
-          <Icon name="lock" size={17} />เปลี่ยนรหัสผ่าน
-        </div>
-        <div className="nav-item logout-item" onClick={onLogout} style={{ marginTop: 8 }}>
-          <Icon name="logout" size={17} />ออกจากระบบ
-        </div>
-      </div>
-
-      {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} />}
-
-      {/* ── Page content ── */}
-      <div className="content">
-        <div className="content-inner">
-          {tab === "release" && <ReleasePage user={user} goTo={go} />}
-          {tab === "labels" && <QrLabelsPage initialReleaseId={labelsPreselect} onConsumeInitial={() => setLabelsPreselect("")} />}
-          {tab === "report" && <ReportPage goTo={go} />}
-          {tab === "verify" && <AssemblyVerifyPage key={"vf" + verifyNonce} initialQr={verifyPreselect} onConsumeInitial={() => setVerifyPreselect("")} />}
-          {tab === "machines" && <MachinesSummaryPage />}
-          {tab === "projects" && <ProjectsPage user={user} goTo={go} />}
-          {tab === "parts" && <PartsSummaryPage />}
-          {tab === "setup" && isAdmin(user) && <SetupPage />}
-        </div>
-      </div>
-
-      {/* ── Mobile bottom nav ── */}
-      <div className="bottom-nav">
-        <div className={`bottom-nav-item ${tab === BOTTOM_LEFT.key ? "active" : ""}`} onClick={() => go(BOTTOM_LEFT.key)}>
-          <Icon name={BOTTOM_LEFT.icon} size={20} /><span>{BOTTOM_LEFT.label}</span>
-        </div>
-        <div className={`bottom-nav-item ${tab === BOTTOM_LEFT2.key ? "active" : ""}`} onClick={() => go(BOTTOM_LEFT2.key)}>
-          <Icon name={BOTTOM_LEFT2.icon} size={20} /><span>{BOTTOM_LEFT2.label}</span>
-        </div>
-        <div className={`bottom-nav-item ${tab === BOTTOM_RIGHT.key ? "active" : ""}`} onClick={() => go(BOTTOM_RIGHT.key)}>
-          <Icon name={BOTTOM_RIGHT.icon} size={20} /><span>{BOTTOM_RIGHT.label}</span>
-        </div>
-        <div className="bottom-nav-item" onClick={() => setDrawerOpen(true)}>
-          <Icon name="more" size={20} /><span>เพิ่มเติม</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 1) RELEASE PRODUCTION — ปล่อยงาน + สร้าง QR ต่อชิ้น
-// ══════════════════════════════════════════════════════════════════════════
-// Postgres unique-violation code, used to give a friendly Thai message
-// instead of a raw DB error when someone reuses a code that must be unique.
-function isDuplicateError(e) {
-  return e?.code === "23505" || /duplicate key|already exists/i.test(e?.message || "");
-}
-
-// ─── Add Release popup helpers ──────────────────────────────────────────────
-// น้ำหนัก/ชิ้น = (ความยาว มม. → ม.) × น้ำหนัก/เมตร — สูตรเดียวกับตอนนำเข้า Excel
-const gnum = (v) => {
-  if (v === undefined || v === null || String(v).trim() === "") return null;
-  const n = Number(String(v).replace(/,/g, "").trim());
-  return Number.isFinite(n) ? n : null;
-};
-function rowWeightPcs(row) {
-  const len = gnum(row.length_mm), wpm = gnum(row.weight_per_m);
-  return len && wpm ? Number(((len / 1000) * wpm).toFixed(4)) : null;
-}
-function rowTotalKg(row) {
-  const q = gnum(row.qty), wpcs = rowWeightPcs(row);
-  return q && wpcs ? Number((q * wpcs).toFixed(2)) : null;
-}
-// รวมวันที่ที่เลือก + เวลาปัจจุบัน เพื่อให้ backdate ได้แต่ยังเรียงลำดับภายในวันได้
-function dateToIso(dateStr) {
-  if (!dateStr) return new Date().toISOString();
-  const now = new Date();
-  const d = new Date(`${dateStr}T00:00:00`);
-  d.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
-  return d.toISOString();
-}
-// Release Order ต้องเป็นรูปแบบ P-<ตัวเลข> เช่น P-009 (ตามฟอร์มจริงของโรงงาน)
-// P-ตัวเลข + ต่อท้ายด้วยข้อความในวงเล็บได้ เช่น "P-184 (L13-L15)" (ไว้โน้ตว่าปล่อยอะไรไปบ้าง)
-const RELEASE_ORDER_RE = /^P-\d+(\s*\(.*\))?$/i;
-function normalizeReleaseOrder(raw) {
-  const s = String(raw || "").trim().toUpperCase();
-  if (!s) return "";
-  if (/^\d+$/.test(s)) return `P-${s.padStart(3, "0")}`; // พิมพ์เลขล้วน → เติม P- ให้
-  return s;
-}
-// ลำดับคอลัมน์ตามฟอร์ม Excel จริง (Image): [No.] Code, Qty, Length, Weight/M, Material, [Total Kg], Remark
-// __skip__ = คอลัมน์ที่ระบบคำนวณเอง (Total Kg) — รับค่าที่วางมาแต่ทิ้ง แล้วคิดใหม่
-const PASTE_COLS = ["code", "qty", "length_mm", "weight_per_m", "material", "__skip__", "remark"];
-
-// จับคอลัมน์จาก "ชื่อหัวตาราง" (header) — รองรับ MDF / REV และคอลัมน์สลับลำดับได้
-const HEADER_ALIASES = {
-  code: [/^code$/i, /เบอร์/i, /part\s*no/i, /part\s*number/i],
-  rev: [/^rev\.?$/i, /revision/i],
-  qty: [/qty/i, /q'?ty/i, /จำนวน/i],
-  length_mm: [/length/i, /ยาว/i, /ความยาว/i],
-  weight_per_m: [/weight\s*\/?\s*m/i, /\bw\/?m\b/i, /น้ำหนัก\s*\/?\s*เมตร/i, /weight\s*per/i],
-  material: [/material/i, /วัสดุ/i, /วัตถุดิบ/i],
-  remark: [/remark/i, /หมายเหตุ/i],
-};
-function matchHeaderCell(cell) {
-  const s = String(cell ?? "").trim();
-  if (!s) return null;
-  for (const [field, pats] of Object.entries(HEADER_ALIASES)) {
-    if (pats.some((re) => re.test(s))) return field;
-  }
-  return null;
-}
-function looksLikeHeader(cells) {
-  return cells.filter((c) => matchHeaderCell(c)).length >= 2;
-}
-
-function parsePastedRows(text) {
-  const lines = String(text).replace(/\r/g, "").split("\n");
-  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
-  const grid = lines.map((l) => l.split("\t")).filter((cells) => cells.some((c) => String(c).trim() !== ""));
-  if (grid.length === 0) return [];
-
-  // ── โหมดมีหัวตาราง: จับคอลัมน์จากชื่อหัว (รองรับ MDF/REV + สลับลำดับ) ──
-  if (looksLikeHeader(grid[0])) {
-    const map = grid[0].map(matchHeaderCell);
-    return grid.slice(1).map((cells) => {
-      const row = {};
-      map.forEach((field, i) => {
-        if (!field) return;
-        if (cells[i] !== undefined) row[field] = String(cells[i]).trim();
-      });
-      return row;
-    });
-  }
-
-  // ── โหมดไม่มีหัวตาราง: ใช้ลำดับคงที่แบบเดิม ──
-  return grid.map((cells) => {
-    let cols = cells;
-    if (cols.length === PASTE_COLS.length + 1 && /^\d+$/.test(String(cols[0]).trim())) {
-      cols = cols.slice(1);
-    }
-    const row = {};
-    PASTE_COLS.forEach((key, i) => {
-      if (key === "__skip__") return;
-      if (cols[i] !== undefined) row[key] = String(cols[i]).trim();
-    });
-    return row;
-  });
-}
-
-// ─── Quick-create: Project ──────────────────────────────────────────────────
-// Lets the user spin up a new project right from the Release page instead of
-// hopping over to Setup — keeps "create project → create part → release" as
-// one uninterrupted flow.
-function QuickAddProjectModal({ onClose, onCreated }) {
-  const [form, setForm] = useUndoable({});
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  async function submit(e) {
-    e.preventDefault();
-    const code = (form.code || "").trim();
-    const name = (form.name || "").trim();
-    if (!code || !name) { setErr("กรอกรหัสโปรเจคและชื่อโปรเจคให้ครบ"); return; }
-    setBusy(true); setErr("");
-    try {
-      const project = await insertRow("projects", { code, name });
-      onCreated(project);
-      onClose();
-    } catch (e2) {
-      setErr(isDuplicateError(e2) ? `รหัสโปรเจค "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น` : "เกิดข้อผิดพลาด: " + e2.message);
-    }
-    setBusy(false);
-  }
-
-  return (
-    <Modal title="โปรเจคใหม่" sub="1 โปรเจคสามารถมีได้หลาย Part และหลาย Release" onClose={onClose}>
-      <form onSubmit={submit}>
-        <Field label="รหัสโปรเจค *">
-          <Input autoFocus value={form.code || ""} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="เช่น PRJ001" />
-        </Field>
-        <Field label="ชื่อโปรเจค *">
-          <Input value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="เช่น สายการผลิตชิ้นส่วน A" />
-        </Field>
-        {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 2 }}>{err}</div>}
-        <div className="modal-actions">
-          <Btn type="button" variant="ghost" onClick={onClose}>ยกเลิก</Btn>
-          <Btn type="submit" variant="accent" disabled={busy}>{busy ? "กำลังสร้าง..." : "สร้างโปรเจค"}</Btn>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// ─── Quick-create: Part (+ Routing) ─────────────────────────────────────────
-// A project needs at least one Part before it can be Released, so this
-// mirrors PartMasterCrud but scoped to one project and reachable inline.
-function QuickAddPartModal({ project, onClose, onCreated }) {
-  const [operations, setOperations] = useState([]);
-  const [form, setForm] = useUndoable({ routing: [] });
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  useEffect(() => { listRows("operations", { order: "seq" }).then(setOperations); }, []);
-
-  function toggleOp(name) {
-    setForm((f) => {
-      const has = (f.routing || []).includes(name);
-      return { ...f, routing: has ? f.routing.filter((x) => x !== name) : [...(f.routing || []), name] };
-    });
-  }
-
-  async function submit(e) {
-    e.preventDefault();
-    const part_no = (form.part_no || "").trim();
-    if (!part_no) { setErr("กรอกรหัส Part ให้ครบ"); return; }
-    setBusy(true); setErr("");
-    try {
-      const part = await insertRow("part_master", {
-        project_id: project.id, part_no, part_name: (form.part_name || "").trim() || part_no,
-        material: (form.material || "").trim() || null,
-        unit_weight: Number(form.unit_weight || 0),
-        default_length_mm: form.default_length_mm === "" || form.default_length_mm == null ? null : Number(form.default_length_mm),
-        routing: form.routing || [],
-      });
-      onCreated(part);
-      onClose();
-    } catch (e2) {
-      setErr(isDuplicateError(e2) ? `Part "${part_no}" มีอยู่แล้วในโปรเจคนี้` : "เกิดข้อผิดพลาด: " + e2.message);
-    }
-    setBusy(false);
-  }
-
-  return (
-    <Modal title="Part ใหม่" sub={`ในโปรเจค ${project.code} — ${project.name}`} onClose={onClose}>
-      <form onSubmit={submit}>
-        <div className="grid-2">
-          <Field label="รหัส Part *">
-            <Input autoFocus value={form.part_no || ""} onChange={(e) => setForm({ ...form, part_no: e.target.value })} />
-          </Field>
-          <Field label="ชื่อ Part">
-            <Input value={form.part_name || ""} onChange={(e) => setForm({ ...form, part_name: e.target.value })} />
-          </Field>
-          <Field label="วัสดุ">
-            <Input value={form.material || ""} onChange={(e) => setForm({ ...form, material: e.target.value })} />
-          </Field>
-          <Field label="น้ำหนัก/ชิ้น (กก.)">
-            <Input type="number" step="0.01" value={form.unit_weight || ""} onChange={(e) => setForm({ ...form, unit_weight: e.target.value })} />
-          </Field>
-          <Field label="ความยาว/ชิ้น (มม.)">
-            <Input type="number" step="0.1" value={form.default_length_mm || ""} onChange={(e) => setForm({ ...form, default_length_mm: e.target.value })} />
-          </Field>
-        </div>
-        <div className="label-el">Routing — เลือกขั้นตอนที่ part นี้ต้องผ่านตามลำดับ</div>
-        <div className="chip-row" style={{ marginBottom: 6 }}>
-          {operations.map((o) => {
-            const active = (form.routing || []).includes(o.name);
-            return (
-              <span key={o.id} onClick={() => toggleOp(o.name)} className={`chip ${active ? "active" : ""}`}>
-                {o.name}{active ? ` (${form.routing.indexOf(o.name) + 1})` : ""}
-              </span>
-            );
-          })}
-          {operations.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)" }}>ยังไม่มีขั้นตอนงาน — ไปตั้งค่าที่ Setup ก่อน</span>}
-        </div>
-        {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 8 }}>{err}</div>}
-        <div className="modal-actions">
-          <Btn type="button" variant="ghost" onClick={onClose}>ยกเลิก</Btn>
-          <Btn type="submit" variant="accent" disabled={busy}>{busy ? "กำลังสร้าง..." : "สร้าง Part"}</Btn>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// ─── เพิ่ม Release (ป็อปอัป) — กรอกหัวเอกสาร + วางข้อมูล Part จาก Excel ได้เลย ──
-// หัวเอกสาร: Release Order (P-xxx), วันที่, โปรเจค
-// ตาราง Part: วาง (paste) จาก Excel ได้ทั้งบล็อก — คอลัมน์ตรงตามฟอร์ม Production
-// Release Report (Code, Qty, Length, Weight/M, Material, Total Kg, Remark)
-// แต่ละแถว = 1 release + สร้าง QR ต่อชิ้นให้ครบตาม Qty (เหมือนการนำเข้า Excel)
-const BLANK_ROW = () => ({ id: Math.random().toString(36).slice(2), code: "", rev: "", qty: "", length_mm: "", weight_per_m: "", material: "", remark: "", routing: [] });
-
-function AddReleaseModal({ user, projects, parts, onClose, onSaved, onNeedProject }) {
-  const [modify, setModify] = useState("");   // Modify Release (เช่น M-001) — ระดับทั้งใบ
-  const [releaseOrder, setReleaseOrder] = useState("");
-  const [date, setDate] = useState(() => todayStr());
-  const [projectId, setProjectId] = useState("");
-  const [rows, setRows] = useState(() => Array.from({ length: 5 }, BLANK_ROW));
-  const [makeQr, setMakeQr] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState("");
-  const [err, setErr] = useState("");
-  const [undoCount, setUndoCount] = useState(0); // แสดงตัวเลขย้อนกลับล่าสุด (feedback เล็กๆ)
-
-  // ── Undo stack (Ctrl+Z) ─────────────────────────────────────────────────
-  // เก็บ snapshot ของ rows ก่อนทุกการเปลี่ยนแปลง ไม่เกิน 50 ขั้น
-  const historyRef = useRef([]);
-  const rowsScrollRef = useRef(null);   // กรอบเลื่อนตารางแถว (ปุ่ม "ขึ้นบนสุด")
-
-  // ใช้แทน setRows เสมอเมื่อต้องการ undo ได้
-  const setRowsU = useCallback((updater) => {
-    setRows((prev) => {
-      historyRef.current = [...historyRef.current, prev].slice(-50);
-      return typeof updater === "function" ? updater(prev) : updater;
-    });
-  }, []);
-
-  // Ctrl+Z / Cmd+Z — pop จาก stack แล้ว restore
-  useEffect(() => {
-    function onKeydown(e) {
-      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !busy) {
-        if (historyRef.current.length === 0) return;
-        e.preventDefault();
-        const prev = historyRef.current[historyRef.current.length - 1];
-        historyRef.current = historyRef.current.slice(0, -1);
-        setRows(prev);
-        setUndoCount((n) => n + 1);
-        setTimeout(() => setUndoCount(0), 1200);
-      }
-    }
-    window.addEventListener("keydown", onKeydown);
-    return () => window.removeEventListener("keydown", onKeydown);
-  }, [busy]);
-
-  function setCell(rowId, key, value) {
-    setRowsU((rs) => rs.map((r) => (r.id === rowId ? { ...r, [key]: value } : r)));
-  }
-  function addRow() { setRowsU((rs) => [...rs, BLANK_ROW()]); }
-  function removeRow(rowId) {
-    setRowsU((rs) => {
-      const next = rs.filter((r) => r.id !== rowId);
-      return next.length ? next : [BLANK_ROW()];
-    });
-  }
-
-  // วางข้อมูลจาก Excel:
-  //  - หลายคอลัมน์ (มี tab) → เติมทั้งแถวตามลำดับคอลัมน์ เริ่มจากแถวที่โฟกัส
-  //  - คอลัมน์เดียว (มีแต่ขึ้นบรรทัดใหม่) → เติมลงคอลัมน์ที่โฟกัสไล่ลงไป
-  function handlePaste(e, rowIndex, colKey) {
-    if (!projectId) {
-      e.preventDefault();
-      setErr("กรุณาเลือกโปรเจคก่อน แล้วจึงวางข้อมูล — ระบบต้องรู้โปรเจคเพื่อแยก Part เดิม/ใหม่ให้ถูกต้อง (เบอร์เดียวกันคนละโปรเจคถือเป็นคนละ Part)");
-      return;
-    }
-    const text = e.clipboardData.getData("text");
-    if (!text || (!text.includes("\t") && !text.includes("\n"))) return; // ค่าเดียว ปล่อยให้วางปกติ
-    e.preventDefault();
-
-    const isMultiCol = text.includes("\t");
-    setRowsU((rs) => {
-      const next = [...rs];
-      const ensure = (idx) => { while (next.length <= idx) next.push(BLANK_ROW()); };
-
-      if (isMultiCol) {
-        const parsed = parsePastedRows(text);
-        parsed.forEach((data, i) => {
-          const idx = rowIndex + i;
-          ensure(idx);
-          next[idx] = { ...next[idx], ...data };
-        });
-      } else {
-        const values = text.replace(/\r/g, "").split("\n");
-        while (values.length && values[values.length - 1].trim() === "") values.pop();
-        values.forEach((v, i) => {
-          const idx = rowIndex + i;
-          ensure(idx);
-          next[idx] = { ...next[idx], [colKey]: v.trim() };
-        });
-      }
-      return next;
-    });
-  }
-
-  const project = projects.find((p) => p.id === projectId);
-  const qtyOf = (r) => gnum(r.qty) || 1;                       // เว้นว่าง = 1 อัตโนมัติ
-  const validRows = rows.filter((r) => r.code.trim());         // ขอแค่มีรหัส Code (จำนวนไม่บังคับ)
-  const totalQty = validRows.reduce((s, r) => s + qtyOf(r), 0);
-  const totalKg = validRows.reduce((s, r) => s + (qtyOf(r) * (rowWeightPcs(r) || 0)), 0);
-  const partsInProject = parts.filter((p) => p.project_id === projectId);
-
-  // Part เดิมในโปรเจคนี้ (ถ้ามี) — ใช้ตัดสินว่าแถวนี้เป็น Part ใหม่หรือของเดิม
-  function existingPartFor(row) {
-    const code = row.code.trim().toLowerCase();
-    if (!code) return null;
-    return partsInProject.find((p) => p.part_no.trim().toLowerCase() === code) || null;
-  }
-  // เบอร์เดียวกันที่มีอยู่ใน "โปรเจคอื่น" — เตือนให้รู้ว่ามี routing อื่นอยู่ (อาจต่างกันโดยตั้งใจ)
-  // คนละโปรเจค = คนละ Part เสมอ จึงไม่ดึง routing ข้ามโปรเจคมาให้ แต่โชว์ให้ดูเป็นข้อมูลอ้างอิง
-  function otherProjectMatches(row) {
-    const code = row.code.trim().toLowerCase();
-    if (!code) return [];
-    return parts
-      .filter((p) => p.part_no.trim().toLowerCase() === code && p.project_id !== projectId)
-      .map((p) => ({ part: p, project: projects.find((pr) => pr.id === p.project_id) }));
-  }
-  const isNewPartRow = (row) => row.code.trim() && !existingPartFor(row);
-  const newPartCount = validRows.filter(isNewPartRow).length;
-
-  async function doSave() {
-    const ro = normalizeReleaseOrder(releaseOrder);
-    if (!ro || !RELEASE_ORDER_RE.test(ro)) { setErr('เลขที่ Release Order ต้องเป็นรูปแบบ "P-ตัวเลข" เช่น P-009'); return; }
-    if (!projectId) { setErr("กรุณาเลือกโปรเจค"); return; }
-    if (!date) { setErr("กรุณาเลือกวันที่"); return; }
-    if (validRows.length === 0) { setErr("กรุณากรอกอย่างน้อย 1 Part (ต้องมีรหัส Code)"); return; }
-    // กันจำนวนติดลบ/ทศนิยม/ใหญ่ผิดปกติ (เว้นว่าง = 1) — จำนวนชิ้นต้องเป็นจำนวนเต็มบวก
-    const badRow = validRows.find((r) => {
-      const raw = String(r.qty ?? "").trim();
-      if (raw === "") return false;              // เว้นว่าง = 1 (อนุญาต)
-      const q = gnum(raw);                        // ใช้ gnum → รองรับคอมมา "1,200" เหมือนตอนบันทึก
-      return !Number.isInteger(q) || q < 1 || q > 1000000;
-    });
-    if (badRow) { setErr(`จำนวนของ Part "${badRow.code || "-"}" ไม่ถูกต้อง — ต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป`); return; }
-
-    setBusy(true); setErr(""); setProgress("กำลังบันทึกทั้งใบ...");
-    try {
-      // ส่งทั้งใบไปให้ DB ทำใน transaction เดียว (atomic) — สร้าง Part/Release/QR ครบ
-      // ถ้าพังกลางคัน DB จะ rollback ทั้งใบ ไม่มีข้อมูลค้างครึ่งๆ (แก้ H2) และ Part
-      // รหัสซ้ำในใบเดียวจะถูก find-or-create ให้ถูกต้อง ไม่ชนกันเอง (แก้ M2)
-      const rows = validRows.map((r) => ({
-        code: r.code.trim(),
-        qty: qtyOf(r),                    // เว้นว่าง = 1
-        unit_weight: rowWeightPcs(r),
-        length_mm: gnum(r.length_mm),
-        material: r.material?.trim() || null,
-        remark: r.remark?.trim() || null,
-        routing: [],                      // ไม่ใช้ Routing แล้ว — ขั้นตอนขึ้นกับเครื่องที่ทำ
-      }));
-      // ★ กัน Release ซ้ำ: ถ้า (โปรเจค+เลข Order) นี้มีแล้ว (เช่นกดแล้วเน็ตวูบตอนตอบกลับ) อย่าสร้างซ้ำ
-      if (await releaseOrderExists(projectId, ro)) {
-        setErr(`Release Order "${ro}" มีอยู่แล้วในโปรเจคนี้ — ถ้าเพิ่งกดแล้วเน็ตหลุด อาจบันทึกไปแล้ว · รีเฟรช/ตรวจในรายการ Release ก่อนกดซ้ำ (กันบันทึกซ้ำ)`);
-        setBusy(false); setProgress(""); return;
-      }
-      const res = await createReleaseBatch({
-        projectId, releaseOrder: ro, releaseDate: dateToIso(date),
-        releasedBy: user.id, makeQr, rows,
-      });
-      // เก็บ Modify (ทั้งใบ) → mdf_no ทุก Part ในใบนี้ · REV → ราย Part — เว้นว่าง = "0"
-      // (ต้องมีคอลัมน์ mdf_no / rev จาก migration-station.sql; ถ้ายังไม่มีจะข้ามเงียบๆ)
-      const mdfVal = modify.trim() || "0";
-      for (const r of validRows) {
-        const code = r.code.trim();
-        if (!code) continue;
-        try {
-          await updateRows("part_master", { project_id: projectId, part_no: code }, {
-            mdf_no: mdfVal,
-            rev: (r.rev ?? "").toString().trim() || "0",
-          });
-        } catch (_) { /* คอลัมน์อาจยังไม่มี — ไม่ให้ล้มทั้งใบ */ }
-      }
-      onSaved({ releaseOrder: ro, ...res });
-    } catch (e2) {
-      setErr("เกิดข้อผิดพลาดระหว่างบันทึก: " + e2.message + " — ถ้าเน็ตหลุดหลังกดบันทึก อาจบันทึกไปแล้ว · รีเฟรชแล้วตรวจในรายการ Release ก่อนกดซ้ำ (กันซ้ำ)");
-    }
-    setBusy(false); setProgress("");
-  }
-
-  return (
-    <Modal
-      title="เพิ่ม Release" wide
-      sub="กรอกหัวเอกสาร แล้ววางข้อมูล Part จาก Excel ลงตารางได้เลย (Ctrl+V)"
-      onClose={onClose} closeOnBackdrop={false} locked={busy}
-    >
-      <div className="modal-lock-hint">
-        <Icon name="lock" size={12} /> หน้าต่างนี้ล็อกไว้ — คลิกนอกกรอบจะไม่ปิด กด "ยกเลิก" หรือ ✕ เพื่อออก
-      </div>
-
-      <div className="release-header-fields" style={{ marginBottom: 12 }}>
-        <Field label="Modify (Release)">
-          <Input value={modify} placeholder="เช่น M-001"
-            onChange={(e) => setModify(e.target.value)} />
-        </Field>
-        <Field label="เลขที่ Release Order *">
-          <Input value={releaseOrder} placeholder="เช่น P-009"
-            onChange={(e) => setReleaseOrder(e.target.value)}
-            onBlur={(e) => setReleaseOrder(normalizeReleaseOrder(e.target.value))} />
-        </Field>
-        <Field label="วันที่ *">
-          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-        </Field>
-        <Field label="โปรเจค *">
-          <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}
-            options={projects.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))} />
-        </Field>
-        <Btn type="button" variant="ghost" className="icon-btn-add" title="สร้างโปรเจคใหม่"
-          onClick={() => onNeedProject && onNeedProject()}>
-          <Icon name="plus" size={16} />
-        </Btn>
-      </div>
-
-      {/* แถบสรุป + ปุ่มทั้งหมด ล็อกไว้ด้านบน (ไม่ต้องเลื่อนลงไปกดบันทึก) */}
-      <div className="release-actionbar">
-        <span className="ra-summary">
-          รวม <b>{fmtNum(totalQty)}</b> ชิ้น · <b>{validRows.length}</b> Part · <b>{fmtNum(totalKg)}</b> กก.
-          {newPartCount > 0 && <span style={{ color: "var(--accent-dk)", marginLeft: 6 }}>({newPartCount} ใหม่)</span>}
-        </span>
-        <label className="toggle-row" style={{ margin: 0 }}>
-          <span className={`toggle-switch${makeQr ? " on" : ""}`}>
-            <input type="checkbox" checked={makeQr} onChange={(e) => setMakeQr(e.target.checked)} />
-            <span className="toggle-knob" />
-          </span>
-          <span className="toggle-text"><span className="toggle-text-title" style={{ fontSize: 12.5 }}>สร้าง QR ต่อชิ้น</span></span>
-        </label>
-        <span className="ra-spacer" />
-        <Btn type="button" variant="ghost" size="sm" onClick={addRow} disabled={!projectId}><Icon name="plus" size={14} /> เพิ่มแถว</Btn>
-        <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-        <Btn type="button" variant="accent" onClick={doSave} disabled={busy || validRows.length === 0}>
-          {busy ? "กำลังบันทึก..." : makeQr ? `บันทึก + QR (${fmtNum(totalQty)})` : "บันทึก Release"}
-        </Btn>
-      </div>
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-      {busy && progress && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{progress}</div>}
-
-      <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.6 }}>
-        วางจาก Excel ได้ทั้งบล็อก — คอลัมน์: <b>Code · จำนวน · Length · Weight/M · Material · Total Kg · Remark</b>{" "}
-        (คอลัมน์ No. และ Total Kg ระบบจัดการ/คำนวณให้เอง) · น้ำหนัก/ชิ้น = (Length ÷ 1000) × Weight/M
-        <br />จำนวนเว้นว่างได้ = 1 อัตโนมัติ · ขั้นตอนการทำงานขึ้นกับ "เครื่อง" ที่ทำ (ไม่ต้องตั้ง Routing ต่อ Part แล้ว)
-      </div>
-
-      {!projectId && (
-        <div className="pgrid-need-project">
-          <Icon name="folder" size={14} />
-          เลือกโปรเจคก่อน แล้วจึงกรอก/วางข้อมูล Part — ระบบต้องรู้โปรเจคเพื่อแยก Part เดิม/ใหม่ให้ถูกต้อง
-          <span style={{ color: "var(--muted)", fontWeight: 400 }}>(เบอร์เดียวกันคนละโปรเจค = คนละ Part คนละ Routing)</span>
-        </div>
-      )}
-
-      <div ref={rowsScrollRef} className="pgrid-wrap" style={!projectId ? { opacity: 0.45, pointerEvents: "none" } : undefined}>
-        <table className="pgrid">
-          <thead>
-            <tr>
-              <th style={{ width: 34 }}>#</th>
-              <th style={{ minWidth: 130 }}>Code *</th>
-              <th style={{ width: 64 }}>REV.</th>
-              <th style={{ width: 78 }}>จำนวน</th>
-              <th style={{ width: 90 }}>Length (มม.)</th>
-              <th style={{ width: 90 }}>Weight/M</th>
-              <th style={{ minWidth: 110 }}>Material</th>
-              <th style={{ width: 92, textAlign: "right" }}>น้ำหนัก/ชิ้น</th>
-              <th style={{ width: 92, textAlign: "right" }}>Total Kg</th>
-              <th style={{ minWidth: 110 }}>Remark</th>
-              <th style={{ width: 30 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => {
-              const wpcs = rowWeightPcs(r);
-              const tkg = rowTotalKg(r);
-              return (
-                <tr key={r.id}>
-                  <td className="pgrid-idx">{i + 1}</td>
-                  <td><input value={r.code} onChange={(e) => setCell(r.id, "code", e.target.value)} onPaste={(e) => handlePaste(e, i, "code")} placeholder="AN04-001-01" /></td>
-                  <td><input value={r.rev} onChange={(e) => setCell(r.id, "rev", e.target.value)} onPaste={(e) => handlePaste(e, i, "rev")} placeholder="0" /></td>
-                  <td><input value={r.qty} onChange={(e) => setCell(r.id, "qty", e.target.value)} onPaste={(e) => handlePaste(e, i, "qty")} inputMode="numeric" /></td>
-                  <td><input value={r.length_mm} onChange={(e) => setCell(r.id, "length_mm", e.target.value)} onPaste={(e) => handlePaste(e, i, "length_mm")} inputMode="decimal" /></td>
-                  <td><input value={r.weight_per_m} onChange={(e) => setCell(r.id, "weight_per_m", e.target.value)} onPaste={(e) => handlePaste(e, i, "weight_per_m")} inputMode="decimal" /></td>
-                  <td><input value={r.material} onChange={(e) => setCell(r.id, "material", e.target.value)} onPaste={(e) => handlePaste(e, i, "material")} /></td>
-                  <td className="pgrid-ro">{wpcs != null ? fmtNum(wpcs) : "-"}</td>
-                  <td className="pgrid-ro">{tkg != null ? fmtNum(tkg) : "-"}</td>
-                  <td><input value={r.remark} onChange={(e) => setCell(r.id, "remark", e.target.value)} onPaste={(e) => handlePaste(e, i, "remark")} /></td>
-                  <td className="pgrid-del" onClick={() => removeRow(r.id)} title="ลบแถว">✕</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="pgrid-foot">
-        <span style={{ fontSize: 11.5, color: "var(--muted)", userSelect: "none" }} title="กด Ctrl+Z เพื่อย้อนกลับการแก้ไขตาราง">
-          <Icon name="refresh" size={12} style={{ verticalAlign: "-2px", marginRight: 3 }} />Ctrl+Z ย้อนกลับได้
-          {historyRef.current.length > 0 && (
-            <span style={{ marginLeft: 4, color: "var(--accent-dk)", fontWeight: 600 }}>({historyRef.current.length})</span>
-          )}
-        </span>
-        {undoCount > 0 && (
-          <span style={{ fontSize: 11.5, color: "var(--success)", fontWeight: 600 }}>↩ ย้อนกลับแล้ว</span>
-        )}
-        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-          {makeQr ? "เปิดสร้าง QR — จะได้ป้ายทุกชิ้นอัตโนมัติ" : "ปิดสร้าง QR — บันทึกแค่ยอด Release"}
-        </span>
-        <Btn variant="ghost" size="sm" style={{ marginLeft: "auto" }}
-          onClick={() => rowsScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign: "-2px" }}><path d="M12 19V5M5 12l7-7 7 7" /></svg>
-          &nbsp;ขึ้นบนสุด
-        </Btn>
-      </div>
-    </Modal>
-  );
-}
-
-// ─── Import Release จากไฟล์ Excel (หลาย Part ในใบเดียว) ─────────────────────
-// ไฟล์ต้นแบบ: "Production Release Report" — มี Release Order + Project ที่หัว
-// เอกสาร ตามด้วยตารางรายการ Part หลายแถว (Code / Qty / Length / Weight-per-m /
-// Material / Remark) แต่ละแถวจะกลายเป็น 1 release + สร้าง QR ต่อชิ้นให้ครบ
-// ตาม Qty เหมือนการ Release ทีละ Part ทุกประการ — ต่างกันที่ทำทีเดียวหลาย Part
-// และ Part ที่ยังไม่มีใน Part Master จะถูกสร้างให้อัตโนมัติจากข้อมูลในไฟล์
-function ImportReleaseModal({ user, projects, parts, onClose, onImported }) {
-  const [file, setFile] = useState(null);
-  const [parsed, setParsed] = useState(null); // { releaseOrder, projectCode, items }
-  const [projectId, setProjectId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [progress, setProgress] = useState("");
-
-  async function handleFile(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFile(f); setErr(""); setParsed(null);
-    try {
-      const { parseReleaseExcel } = await import("./excelImport.js"); // โหลด xlsx เฉพาะตอนใช้จริง
-      const result = await parseReleaseExcel(f);
-      setParsed(result);
-      const matchedProject = projects.find(
-        (p) => p.code.trim().toLowerCase() === result.projectCode.trim().toLowerCase()
-      );
-      setProjectId(matchedProject ? matchedProject.id : "");
-    } catch (e2) {
-      setErr(e2.message || "อ่านไฟล์ไม่สำเร็จ");
-    }
-  }
-
-  const partsInProject = parts.filter((p) => p.project_id === projectId);
-  const rowsPreview = (parsed?.items || []).map((it) => ({
-    ...it,
-    existingPart: partsInProject.find((p) => p.part_no.trim().toLowerCase() === it.code.trim().toLowerCase()),
+const migratePO = (p) => {
+  if (!p) return p;
+  if (isNewPO(p)) return { creditDays: DEFAULT_CREDIT_DAYS, ...p };
+  // --- upgrade a legacy record ---
+  const legacySuppliers = (p.suppliers && p.suppliers.length)
+    ? p.suppliers
+    : [{ name: (typeof p.supplier === "string" ? p.supplier : "") || "", poNumber: p.poNumber || "",
+         rounds: (p.deliveries && p.deliveries.length
+                   ? p.deliveries
+                   : (p.incomingPlan || p.actualReceived ? [{ plan:p.incomingPlan||"", actual:p.actualReceived||"" }] : []))
+                 .map(d => ({ amount:"", plan:d.plan||"", actual:d.actual||"" })) }];
+  const first = legacySuppliers[0] || { name:"", poNumber:"", rounds:[] };
+  const supplier = { name: first.name || (typeof p.supplier === "string" ? p.supplier : "") || "", poNumber: first.poNumber || p.poNumber || "" };
+  const paymentType = p.paymentType === "credit30" ? "credit" : (p.paymentType || "");
+  const creditDays  = p.creditDays || (p.paymentType === "credit30" ? 30 : DEFAULT_CREDIT_DAYS);
+  const legacyRounds = legacySuppliers.flatMap(s => s.rounds || []);
+  // Treat old data as fully received if it was ever marked delivered/paid or
+  // carried an actual date, so received totals don't suddenly read as zero.
+  const wasReceived = p.status === "Delivered" || p.status === "Paid" || legacyRounds.some(r => r.actual);
+  const recvDate = legacyRounds.map(r=>r.actual).filter(Boolean).sort()[0] || p.date || "";
+  const planDate = legacyRounds.map(r=>r.plan).filter(Boolean).sort()[0] || p.incomingPlan || "";
+  const legacyItems = (p.items && p.items.length) ? p.items : [{ id:"legacy", code:p.code||"", amount:p.amount||"" }];
+  const items = legacyItems.map(it => ({
+    id: it.id && it.id !== "legacy" ? it.id : uid(),
+    code: it.code || "", store: it.store || "", amount: it.amount || "",
+    rounds: [{
+      id: uid(), planDate, planAmount: it.amount || "",
+      actualAmount: wasReceived ? (it.amount || "") : "",
+      actualDate:  wasReceived ? recvDate : "",
+    }],
   }));
-  const newPartCount = rowsPreview.filter((r) => !r.existingPart).length;
-  const totalUnits = rowsPreview.reduce((sum, r) => sum + r.qty, 0);
-
-  async function doImport() {
-    if (!parsed || !projectId) return;
-    setBusy(true); setErr(""); setProgress("กำลังนำเข้าทั้งใบ...");
-    try {
-      // นำเข้าทั้งใบใน transaction เดียว (atomic) — พังกลางคัน = rollback ทั้งใบ (แก้ H2)
-      // Part ใหม่จาก Excel จะยังไม่มี routing → เตือนผู้ใช้ให้ไปตั้งที่ Setup (แก้ M3)
-      const rows = rowsPreview.map((r) => ({
-        code: r.code,
-        qty: r.qty,
-        unit_weight: r.unit_weight,
-        length_mm: r.length_mm,
-        material: r.material,
-        remark: r.remark,
-        routing: [],
-      }));
-      // ★ กัน Release ซ้ำตอน retry: ถ้า (โปรเจค+เลข Order) นี้มีแล้ว อย่านำเข้าซ้ำ
-      if (await releaseOrderExists(projectId, parsed.releaseOrder)) {
-        setErr(`Release Order "${parsed.releaseOrder}" มีอยู่แล้วในโปรเจคนี้ — อาจนำเข้าไปแล้ว · ตรวจในรายการ Release ก่อนนำเข้าซ้ำ`);
-        setBusy(false); setProgress(""); return;
-      }
-      const res = await createReleaseBatch({
-        projectId, releaseOrder: parsed.releaseOrder, releaseDate: null,
-        releasedBy: user.id, makeQr: true, rows,
-      });
-      onImported({ releaseOrder: parsed.releaseOrder, ...res });
-      onClose();
-    } catch (e2) {
-      setErr("เกิดข้อผิดพลาดระหว่างนำเข้า: " + e2.message + " — ถ้าเน็ตหลุดหลังกดนำเข้า อาจนำเข้าไปแล้ว · รีเฟรชแล้วตรวจในรายการ Release ก่อนนำเข้าซ้ำ");
-    }
-    setBusy(false); setProgress("");
-  }
-
-  return (
-    <Modal
-      title="นำเข้า Release จาก Excel"
-      sub="รองรับไฟล์ฟอร์ม Production Release Report (หลาย Part ในใบเดียว)"
-      onClose={onClose}
-      closeOnBackdrop={false}
-      locked={busy}
-    >
-      <div className="modal-lock-hint">
-        <Icon name="lock" size={12} /> หน้าต่างนี้ล็อกไว้ — คลิกนอกกรอบจะไม่ปิด กด "ยกเลิก" หรือ ✕ เพื่อออก
-      </div>
-      {!parsed && (
-        <>
-          <Field label="เลือกไฟล์ Excel (.xlsx)">
-            <input type="file" accept=".xlsx,.xls" onChange={handleFile} className="input" />
-          </Field>
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 4 }}>{err}</div>}
-        </>
-      )}
-
-      {parsed && (
-        <>
-          <div className="grid-2" style={{ marginBottom: 10 }}>
-            <Field label="เลขที่ Release Order (จากไฟล์)">
-              <Input value={parsed.releaseOrder || "-"} readOnly />
-            </Field>
-            <Field label="โปรเจค">
-              <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}
-                options={projects.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))} />
-            </Field>
-          </div>
-          {!projectId && (
-            <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>
-              ไม่พบโปรเจค "{parsed.projectCode}" ที่ตรงกันในระบบ — กรุณาเลือกโปรเจคเป้าหมายเอง
-            </div>
-          )}
-
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 8 }}>
-            พบ {rowsPreview.length} รายการ Part · รวม {fmtNum(totalUnits)} ชิ้น
-            {newPartCount > 0 && <> · <b style={{ color: "var(--accent-dk)" }}>{newPartCount} Part จะถูกสร้างใหม่อัตโนมัติ</b></>}
-          </div>
-          {newPartCount > 0 && (
-            <div style={{ fontSize: 11.5, color: "var(--warning)", marginBottom: 10, lineHeight: 1.5, display: "flex", gap: 6 }}>
-              <Icon name="bolt" size={13} style={{ flexShrink: 0, marginTop: 1 }} />
-              <span>Part ใหม่จากไฟล์จะยังไม่มี Routing — หลังนำเข้าให้ไปตั้งขั้นตอนที่ <b>Setup &gt; Part Master</b> ไม่งั้นชิ้นงานจะไม่ขึ้นสถานะ "เสร็จ"</span>
-            </div>
-          )}
-
-          <div className="table-wrap" style={{ maxHeight: 280, overflowY: "auto", marginBottom: 12 }}>
-            <table className="data-table">
-              <thead>
-                <tr><th>Code</th><th>Qty</th><th>ยาว (มม.)</th><th>น้ำหนัก/ชิ้น</th><th>วัสดุ</th><th>สถานะ</th></tr>
-              </thead>
-              <tbody>
-                {rowsPreview.map((r, i) => (
-                  <tr key={i}>
-                    <td>{r.code}</td>
-                    <td>{r.qty}</td>
-                    <td>{r.length_mm ? fmtNum(r.length_mm) : "-"}</td>
-                    <td>{r.unit_weight ? `${fmtNum(r.unit_weight)} กก.` : "-"}</td>
-                    <td>{r.material || "-"}</td>
-                    <td>{r.existingPart ? <Badge tone="steel">มีอยู่แล้ว</Badge> : <Badge tone="warning">สร้างใหม่</Badge>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-          {busy && progress && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{progress}</div>}
-
-          <div className="modal-actions">
-            <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-            <Btn type="button" variant="accent" onClick={doImport} disabled={busy || !projectId}>
-              {busy ? "กำลังนำเข้า..." : `นำเข้าและสร้าง QR ทั้งหมด (${fmtNum(totalUnits)} ใบ)`}
-            </Btn>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
-}
-
-// ══ Sub Assembly release (เบอร์แม่ kind=subassembly + ลูกตาม BOM × จำนวน) ══════
-// บันทึกต่อกลุ่ม 3 ขั้น: (1) release เบอร์แม่ (createReleaseBatch → part+QR) (2) ตั้ง kind=subassembly
-//   (3) upsert ลูก + ตั้ง BOM (ต่อชุด = จำนวนรวมของลูก ÷ จำนวนแม่)
-// รองรับทั้งกรอกมือและนำเข้า Excel (ปุ่มนำเข้าเติมกลุ่มให้ แล้วผู้ใช้ตรวจก่อนบันทึก)
-function emptySubAsmChild() { return { code: "", desc: "", len: "", perSet: "" }; }
-function emptySubAsmGroup() { return { parentKind: "subassembly", parentCode: "", parentDesc: "", parentLen: "", parentQty: "1", children: [] }; }
-
-function AssemblyReleaseModal({ user, projects, onClose, onSaved, onNeedProject }) {
-  const [releaseOrder, setReleaseOrder] = useState("");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [projectId, setProjectId] = useState(projects[0]?.id || "");
-  const [groups, setGroups] = useState([emptySubAsmGroup()]);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [progress, setProgress] = useState("");
-  const fileRef = useRef(null);
-
-  const setParent = (gi, key, val) => setGroups((gs) => gs.map((g, i) => (i === gi ? { ...g, [key]: val } : g)));
-  const setChild = (gi, ci, key, val) => setGroups((gs) => gs.map((g, i) => (i === gi
-    ? { ...g, children: g.children.map((c, j) => (j === ci ? { ...c, [key]: val } : c)) } : g)));
-  const addChild = (gi) => setGroups((gs) => gs.map((g, i) => (i === gi ? { ...g, children: [...g.children, emptySubAsmChild()] } : g)));
-  const removeChild = (gi, ci) => setGroups((gs) => gs.map((g, i) => (i === gi ? { ...g, children: g.children.filter((_, j) => j !== ci) } : g)));
-  const addGroup = () => setGroups((gs) => [...gs, emptySubAsmGroup()]);
-  const removeGroup = (gi) => setGroups((gs) => (gs.length <= 1 ? [emptySubAsmGroup()] : gs.filter((_, i) => i !== gi)));
-
-  // เติมฟอร์มจากผลที่ parse ได้ (ใช้ทั้งนำเข้าไฟล์ + วางจาก Excel)
-  function matchProject(projectName) {
-    if (!projectName) return;
-    const nm = projectName.toLowerCase();
-    const pj = projects.find((p) => (p.name || "").toLowerCase() === nm || (p.code || "").toLowerCase() === nm);
-    if (pj) setProjectId(pj.id);
-  }
-  function applyBom(parsed, src) {
-    const gs = parsed.groups.map((g) => ({
-      parentKind: g.parentKind || "subassembly",
-      parentCode: g.parentCode, parentDesc: g.parentDesc,
-      parentLen: g.parentLen ?? "", parentQty: String(g.parentQty || 1),
-      // ไฟล์/วาง คืน "จำนวนรวมทุกแม่" (totalQty) → แปลงเป็น "ต่อชุด" (÷ จำนวนแม่) ให้ฟอร์มใหม่ที่กรอกต่อชุดตรง ๆ
-      children: g.children.map((c) => ({
-        code: c.code, desc: c.desc, len: c.len ?? "",
-        perSet: Number(c.totalQty) > 0 ? String(Math.max(1, Math.round(Number(c.totalQty) / (Number(g.parentQty) || 1)))) : "",
-      })),
-    }));
-    setGroups(gs.length ? gs : [emptySubAsmGroup()]);
-    if (parsed.releaseOrder) setReleaseOrder(parsed.releaseOrder);
-    matchProject(parsed.projectName);
-    mlsToast(`${src} ${gs.length} เบอร์แม่ — ตรวจแล้วกดบันทึก`, "success");
-  }
-  // รายชื่อแผง (flat) → กลุ่มแบบ "ไม่มีลูก" (ปล่อยงานเฉยๆ · kind=panel)
-  function applyPanelAsGroups(parsed, src) {
-    const gs = parsed.items.map((it) => ({ parentKind: "panel", parentCode: it.code, parentDesc: "", parentLen: "", parentQty: String(it.qty || 1), children: [] }));
-    setGroups(gs.length ? gs : [emptySubAsmGroup()]);
-    if (parsed.releaseOrder) setReleaseOrder(parsed.releaseOrder);
-    matchProject(parsed.projectName);
-    mlsToast(`${src} ${gs.length} แผง (ปล่อยงานเฉยๆ) — ตรวจแล้วกดบันทึก`, "success");
-  }
-  // นำเข้า/วาง auto-detect เอง: ลองอ่านเป็นฟอร์ม BOM ก่อน · ถ้าไม่ใช่ (ไม่มีคอลัมน์ Code) → อ่านเป็นรายชื่อแผง
-  async function onPickFile(e) {
-    const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; setErr("");
-    try {
-      const mod = await import("./excelImport.js");
-      try { applyBom(await mod.parseSubAssemblyExcel(file), "อ่านไฟล์ได้"); }
-      catch { applyPanelAsGroups(await mod.parsePanelReleaseExcel(file), "อ่านไฟล์ได้"); }
-    } catch (e2) { setErr("อ่านไฟล์ไม่สำเร็จ: " + (e2?.message || e2)); }
-  }
-  const pasteRef = useRef(null);
-  const lastPasteRef = useRef(0);
-  async function handlePastedText(text) {
-    if (!text || (!text.includes("\t") && !text.includes("\n"))) {
-      setErr("ยังไม่ใช่ตาราง — ก็อปจาก Excel โดยลากคลุมทั้งตาราง (รวมแถวหัว Code/Quantity/Sum) ก่อน");
-      return;
-    }
-    const now = Date.now();
-    if (now - lastPasteRef.current < 400) return;   // กันประมวลผลซ้ำ (ช่องวาง + ตัวฟังทั้งหน้า ยิงพร้อมกัน)
-    lastPasteRef.current = now;
-    setErr("");
-    try {
-      const mod = await import("./excelImport.js");
-      try { applyBom(mod.parseSubAssemblyText(text), "วางข้อมูลได้"); }
-      catch { applyPanelAsGroups(mod.parsePanelReleaseText(text), "วางข้อมูลได้"); }
-    } catch (e2) { setErr("อ่านข้อมูลที่วางไม่สำเร็จ: " + (e2?.message || e2)); }
-  }
-  function onPasteTextarea(e) {
-    const text = e.clipboardData?.getData("text") || "";
-    if (!text.includes("\t") && !text.includes("\n")) return;   // ค่าเดียว → วางปกติ
-    e.preventDefault();
-    handlePastedText(text);
-  }
-  // วางด้วย Ctrl+V ได้เลย: โฟกัสช่องวางอัตโนมัติตอนเปิด + ฟัง paste ทั้งหน้าเป็นสำรอง (เผื่อโฟกัสหลุด)
-  useEffect(() => {
-    try { pasteRef.current?.focus(); } catch { /* ignore */ }
-    const onDocPaste = (ev) => {
-      const text = ev.clipboardData?.getData("text") || "";
-      if (!text.includes("\t") && !text.includes("\n")) return;
-      ev.preventDefault();
-      handlePastedText(text);
-    };
-    document.addEventListener("paste", onDocPaste);
-    return () => document.removeEventListener("paste", onDocPaste);
-  }, []);
-
-  // บันทึก 1 กลุ่ม (เบอร์แม่ + ลูก) — atomic เฉพาะขั้น release; BOM/kind เป็นขั้นต่อเนื่อง
-  async function saveOneGroup(g, ro) {
-    const parentCode = g.parentCode.trim();
-    const pQty = parseInt(g.parentQty, 10) || 1;
-    // 1) release เบอร์แม่ → หา/สร้าง part_master (ถ้ายังไม่มี) + release + QR
-    //    ★ หาแม่ก่อนเสมอ (เหมือน saveOneBunk) — ถ้ามีแล้วข้าม createReleaseBatch
-    //    กัน retry หลังพลาดกลางกลุ่ม สร้าง release + QR ซ้ำ (createReleaseBatch ไม่ idempotent)
-    let parentPm = (await listRows("part_master", { filters: { project_id: projectId, part_no: parentCode } }))[0];
-    if (!parentPm) {
-      await createReleaseBatch({
-        projectId, releaseOrder: ro, releaseDate: dateToIso(date), releasedBy: user.id, makeQr: true,
-        rows: [{ code: parentCode, qty: pQty, unit_weight: 0,
-          length_mm: g.parentLen === "" || g.parentLen == null ? null : Number(g.parentLen),
-          material: null, remark: null, routing: [] }],
-      });
-      parentPm = (await listRows("part_master", { filters: { project_id: projectId, part_no: parentCode } }))[0];
-    }
-    if (!parentPm) throw new Error(`ไม่พบเบอร์แม่ ${parentCode} หลังสร้าง`);
-    // 2) ตั้ง kind=subassembly (replace-style, idempotent)
-    await updateRow("part_master", parentPm.id, { kind: g.parentKind || "subassembly" });
-    // 3) upsert ลูก → id + ตั้ง BOM (qty = "ต่อชุด" ที่กรอกโดยตรง — 1 แม่ใช้ลูกกี่ชิ้น)
-    const components = [];
-    for (const ch of g.children) {
-      const code = ch.code.trim();
-      if (!code || !(Number(ch.perSet) > 0)) continue;
-      let pm = (await listRows("part_master", { filters: { project_id: projectId, part_no: code } }))[0];
-      if (!pm) {
-        const created = await insertRow("part_master", {
-          project_id: projectId, part_no: code, part_name: ch.desc?.trim() || code,
-          material: null, unit_weight: 0,
-          default_length_mm: ch.len === "" || ch.len == null ? null : Number(ch.len),
-          routing: [], kind: /^\s*sa/i.test(code) ? "subassembly" : "part",   // ลูกที่ code ขึ้นต้น SA = เบอร์ซับ
-        });
-        pm = created && created.id ? created : (await listRows("part_master", { filters: { project_id: projectId, part_no: code } }))[0];
-      }
-      if (!pm?.id) throw new Error(`สร้าง/หาลูก ${code} ไม่สำเร็จ`);
-      const perUnit = Math.max(1, Math.round(Number(ch.perSet)));   // "ต่อชุด" = qty ใน BOM โดยตรง (ไม่ต้องหารแล้ว)
-      components.push({ child_pm_id: pm.id, qty: perUnit });
-    }
-    if (components.length) await setBom(parentPm.id, components);
-  }
-
-  async function doSave() {
-    const ro = normalizeReleaseOrder(releaseOrder);
-    if (!ro || !RELEASE_ORDER_RE.test(ro)) { setErr('เลขที่ Release Order ต้องเป็นรูปแบบ "P-ตัวเลข" เช่น P-076'); return; }
-    if (!projectId) { setErr("กรุณาเลือกโปรเจค"); return; }
-    if (!date) { setErr("กรุณาเลือกวันที่"); return; }
-    const clean = groups
-      .map((g) => ({ ...g, parentCode: g.parentCode.trim(), children: g.children.filter((c) => c.code.trim() && Number(c.perSet) > 0) }))
-      .filter((g) => g.parentCode);   // มีเบอร์แม่พอ · มีลูก = ตั้ง BOM · ไม่มีลูก = ปล่อยงานเฉยๆ (เช่นแผง)
-    if (clean.length === 0) { setErr("ต้องมีอย่างน้อย 1 เบอร์แม่ (กรอก Code)"); return; }
-    for (const g of clean) {
-      const pq = Number(g.parentQty);
-      if (!Number.isInteger(pq) || pq < 1) { setErr(`จำนวนแม่ของ "${g.parentCode}" ต้องเป็นจำนวนเต็ม ≥ 1`); return; }
-      for (const c of g.children) {
-        const ps = Number(c.perSet);
-        if (!Number.isInteger(ps) || ps < 1) { setErr(`จำนวนต่อชุดของลูก "${c.code}" ใน "${g.parentCode}" ต้องเป็นจำนวนเต็ม ≥ 1`); return; }
-      }
-    }
-    setBusy(true); setErr("");
-    let done = 0;
-    try {
-      for (const g of clean) {
-        setProgress(`กำลังบันทึก ${g.parentCode} (${done + 1}/${clean.length})...`);
-        await saveOneGroup(g, ro);
-        done++;
-      }
-      onSaved({ releaseOrder: ro, groups: clean.length });
-    } catch (e2) {
-      // เก็บเฉพาะเบอร์ที่ "ยังไม่บันทึก" ไว้ในฟอร์ม กันกดซ้ำแล้วสร้าง release ซ้ำ
-      const remaining = clean.slice(done).map((g) => ({
-        parentCode: g.parentCode, parentDesc: g.parentDesc, parentLen: g.parentLen, parentQty: String(g.parentQty),
-        children: g.children.map((c) => ({ code: c.code, desc: c.desc, len: c.len, perSet: String(c.perSet) })),
-      }));
-      setGroups(remaining.length ? remaining : [emptySubAsmGroup()]);
-      setErr(`บันทึกไม่สำเร็จที่เบอร์ "${clean[done]?.parentCode || "-"}": ${e2?.message || e2}` + (done > 0 ? ` · บันทึกสำเร็จไปแล้ว ${done} เบอร์ (เอาออกจากฟอร์มให้แล้ว ไม่ต้องทำซ้ำ)` : ""));
-      setBusy(false); setProgress("");
-      return;
-    }
-    setBusy(false); setProgress("");
-  }
-
-  const totalParents = groups.filter((g) => g.parentCode.trim()).length;
-  const totalUnits = groups.reduce((s, g) => s + (g.parentCode.trim() ? (parseInt(g.parentQty, 10) || 0) : 0), 0);
-
-  return (
-    <Modal title="เพิ่ม / นำเข้า เบอร์ประกอบ + แผง" wide
-      sub="ฟอร์มเดียวใช้ได้ทั้งคู่: ใส่ลูก = ตั้ง BOM + ปล่อยงาน (ซับ/แผง) · ไม่ใส่ลูก = ปล่อยงานเฉยๆ (เช่นแผง) · นำเข้า/วางจาก Excel ได้ทั้งฟอร์ม BOM และรายชื่อแผง — ระบบแยกให้เอง"
-      onClose={onClose} closeOnBackdrop={false} locked={busy}>
-      <div className="modal-lock-hint">
-        <Icon name="lock" size={12} /> หน้าต่างนี้ล็อกไว้ — กด "ยกเลิก" หรือ ✕ เพื่อออก
-      </div>
-
-      <div className="release-header-fields" style={{ marginBottom: 12 }}>
-        <Field label="เลขที่ Release Order *">
-          <Input value={releaseOrder} placeholder="เช่น P-076"
-            onChange={(e) => setReleaseOrder(e.target.value)}
-            onBlur={(e) => setReleaseOrder(normalizeReleaseOrder(e.target.value))} />
-        </Field>
-        <Field label="วันที่ *"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-        <Field label="โปรเจค *">
-          <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}
-            options={projects.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))} />
-        </Field>
-        <Btn type="button" variant="ghost" className="icon-btn-add" title="สร้างโปรเจคใหม่"
-          onClick={() => onNeedProject && onNeedProject()}><Icon name="plus" size={16} /></Btn>
-      </div>
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={onPickFile} />
-        <Btn type="button" variant="ghost" size="sm" onClick={() => fileRef.current?.click()} disabled={busy}>
-          <Icon name="folder" size={14} /> นำเข้าจากไฟล์ Excel
-        </Btn>
-        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>หรือก็อปตารางจาก Excel แล้ว <b>กด Ctrl+V</b> (ช่องด้านล่างพร้อมวางแล้ว)</span>
-      </div>
-      <textarea ref={pasteRef} onPaste={onPasteTextarea} rows={2} disabled={busy}
-        placeholder="⬇ วางตารางที่นี่ด้วย Ctrl+V — ก็อปจาก Excel รวมแถวหัว (Code / Quantity / Sum) · ได้ทั้งฟอร์ม BOM และรายชื่อแผง"
-        style={{ width: "100%", boxSizing: "border-box", resize: "none", padding: "11px 12px", borderRadius: 8, marginBottom: 10,
-          border: "2px dashed var(--accent, #10b981)", background: "var(--surface-2, #f4f8f6)",
-          fontSize: 13, fontFamily: "inherit", color: "var(--muted)" }} />
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
-        หรือกรอกมือด้านล่าง · รวม <b>{fmtNum(totalParents)}</b> เบอร์ · ปล่อยงาน <b>{fmtNum(totalUnits)}</b> ชิ้น (QR)
-      </div>
-
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>{err}</div>}
-      {progress && <div style={{ color: "var(--accent-dk)", fontSize: 12.5, marginBottom: 10 }}>{progress}</div>}
-
-      <div style={{ maxHeight: "48vh", overflow: "auto", paddingRight: 4 }}>
-        {groups.map((g, gi) => {
-          const pq = parseInt(g.parentQty, 10) || 0;
-          return (
-            <div key={gi} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 12, marginBottom: 12, background: "var(--surface-2, #f6f8f7)" }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 8 }}>
-                <div style={{ flex: "0 0 108px" }}>
-                  <Field label={`ชนิด #${gi + 1}`}>
-                    <Select value={g.parentKind || "subassembly"} onChange={(e) => setParent(gi, "parentKind", e.target.value)}
-                      options={[{ value: "subassembly", label: "ซับ (Sub)" }, { value: "panel", label: "แผง (Panel)" }, { value: "package", label: "แพ็ก (Pack)" }]} />
-                  </Field>
-                </div>
-                <div style={{ flex: "1 1 130px", minWidth: 120 }}>
-                  <Field label="เบอร์แม่ (Code) *"><Input value={g.parentCode} placeholder="เช่น SAAN04-001 / UA1501B"
-                    onChange={(e) => setParent(gi, "parentCode", e.target.value)} /></Field>
-                </div>
-                <div style={{ flex: "2 1 200px", minWidth: 160 }}>
-                  <Field label="รายละเอียด"><Input value={g.parentDesc} placeholder="SUB-ASSEMBLY ..."
-                    onChange={(e) => setParent(gi, "parentDesc", e.target.value)} /></Field>
-                </div>
-                <div style={{ flex: "0 0 80px" }}>
-                  <Field label="L (มม.)"><Input value={g.parentLen} inputMode="decimal"
-                    onChange={(e) => setParent(gi, "parentLen", e.target.value)} /></Field>
-                </div>
-                <div style={{ flex: "0 0 90px" }}>
-                  <Field label="จำนวนแม่ *"><Input value={g.parentQty} inputMode="numeric"
-                    onChange={(e) => setParent(gi, "parentQty", e.target.value)} /></Field>
-                </div>
-                <Btn type="button" variant="ghost" size="sm" title="ลบเบอร์แม่นี้" onClick={() => removeGroup(gi)}>
-                  <Icon name="trash" size={13} />
-                </Btn>
-              </div>
-
-              {g.children.length > 0 && (
-              <div style={{ overflowX: "auto" }}>
-                <table className="data-table bom-child-table" style={{ fontSize: 12.5, width: "100%", minWidth: 620, tableLayout: "fixed" }}>
-                  <thead><tr>
-                    <th style={{ width: 132 }}>ลูก (Code)</th><th>รายละเอียด</th>
-                    <th style={{ width: 96 }}>L</th><th style={{ width: 96 }}>ต่อชุด *</th>
-                    <th style={{ width: 84 }}>รวมทุกแม่</th><th style={{ width: 30 }}></th>
-                  </tr></thead>
-                  <tbody>
-                    {g.children.map((c, ci) => {
-                      const per = Number(c.perSet);
-                      const total = pq > 0 && per > 0 ? per * pq : null;   // ต่อชุด × จำนวนแม่ = ลูกที่ต้องใช้ทั้งหมด (โชว์เฉย ๆ)
-                      const totalTxt = total == null ? "—" : fmtNum(total);
-                      return (
-                        <tr key={ci}>
-                          <td><Input value={c.code} title={c.code} placeholder="AN04-001A" style={{ width: "100%" }} onChange={(e) => setChild(gi, ci, "code", e.target.value)} /></td>
-                          <td><Input value={c.desc} title={c.desc} placeholder="ANCHOR BASE PLATE" style={{ width: "100%" }} onChange={(e) => setChild(gi, ci, "desc", e.target.value)} /></td>
-                          <td><Input value={c.len} title={c.len} inputMode="decimal" style={{ width: "100%" }} onChange={(e) => setChild(gi, ci, "len", e.target.value)} /></td>
-                          <td><Input value={c.perSet} inputMode="numeric" placeholder="ใส่จำนวน" style={{ width: "100%" }} onChange={(e) => setChild(gi, ci, "perSet", e.target.value)} /></td>
-                          <td style={{ textAlign: "center", color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{totalTxt}</td>
-                          <td style={{ textAlign: "center" }}>
-                            <span onClick={() => removeChild(gi, ci)} title="ลบลูก" style={{ cursor: "pointer", color: "var(--danger-hi)" }}>✕</span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              )}
-              <Btn type="button" variant="ghost" size="sm" onClick={() => addChild(gi)} style={{ marginTop: 6 }}>
-                <Icon name="plus" size={13} /> {g.children.length > 0 ? "เพิ่มลูก" : "＋ ใส่ลูก (ตั้ง BOM) — ไม่ใส่ = ปล่อยงานเฉยๆ"}
-              </Btn>
-            </div>
-          );
-        })}
-      </div>
-
-      <Btn type="button" variant="ghost" onClick={addGroup} style={{ marginTop: 4 }}>
-        <Icon name="plus" size={15} /> เพิ่มเบอร์แม่
-      </Btn>
-
-      <div className="modal-actions" style={{ marginTop: 14 }}>
-        <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-        <Btn type="button" variant="accent" onClick={doSave} disabled={busy}>
-          {busy ? "กำลังบันทึก..." : "บันทึก + ปล่อยงาน"}
-        </Btn>
-      </div>
-    </Modal>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// นำเข้า "ฟอร์มบั้ง (Packing List)" — ไฟล์เดียวหลายบั้ง → สร้าง package + BOM + manifest
-//   1 บั้ง = 1 package (kind=package + QR) · ยูนิตในบั้ง = BOM (จับคู่ part_no) · ฟอร์มเต็ม = pkg_manifest
-//   หน้าแพ็กที่สเตชันจะโชว์ manifest นี้ (ตำแหน่ง/ขนาด/น้ำหนัก) แล้วสแกนยูนิตเข้าเพื่อติดตามแพ็ก
-// ══════════════════════════════════════════════════════════════════════════
-function BunkImportModal({ user, projects, onClose, onSaved, onNeedProject }) {
-  const [releaseOrder, setReleaseOrder] = useState("");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [projectId, setProjectId] = useState(projects[0]?.id || "");
-  const [packType, setPackType] = useState("panel");   // ชนิดการแพ็กของบั้งชุดนี้: panel (แพ็กแผง) / site (แพ็กไซต์ไอเทม) → pkg_meta.pack_type
-  const [bunks, setBunks] = useState([]);      // [{ meta, units }]
-  const [openIdx, setOpenIdx] = useState(-1);  // การ์ดที่กางดูยูนิต
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [progress, setProgress] = useState("");
-  const fileRef = useRef(null);
-  const pasteRef = useRef(null);
-  const lastPasteRef = useRef(0);
-
-  function matchProject(projectName) {
-    if (!projectName) return;
-    const nm = String(projectName).toLowerCase();
-    // ★ กัน code/name ว่าง: "..".includes("") = true เสมอ → เดิมเลือกโปรเจคที่ code ว่างมั่ว
-    const pj = projects.find((p) => {
-      const code = (p.code || "").toLowerCase(), name = (p.name || "").toLowerCase();
-      return (name && name === nm) || (code && code === nm) || (code && nm.includes(code)) || (name && name.includes(nm));
-    });
-    if (pj) setProjectId(pj.id);
-  }
-  function applyBunks(parsed, src) {
-    const list = (parsed?.bunks || []).filter((b) => b && b.units && b.units.length);
-    if (!list.length) { setErr("ไม่พบข้อมูลบั้งในไฟล์/ข้อความ — ตรวจว่ามีหัว 'BUNK NO.' + ตาราง Unit No/Weight"); return; }
-    setBunks(list);
-    setOpenIdx(-1);
-    matchProject(list[0]?.meta?.project);
-    setErr("");
-    mlsToast(`${src} ${list.length} บั้ง · ${list.reduce((s, b) => s + b.units.length, 0)} ยูนิต — ตรวจแล้วกดบันทึก`, "success");
-  }
-  async function onPickFile(e) {
-    const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; setErr("");
-    try {
-      const mod = await import("./excelImport.js");
-      applyBunks(await mod.parseBunkExcel(file), "อ่านไฟล์ได้");
-    } catch (e2) { setErr("อ่านไฟล์ไม่สำเร็จ: " + (e2?.message || e2)); }
-  }
-  async function handlePastedText(text) {
-    if (!text || (!text.includes("\t") && !text.includes("\n"))) {
-      setErr("ยังไม่ใช่ตาราง — ก็อปจาก Excel ทั้งฟอร์มบั้ง (รวมหัว BUNK NO. + ตาราง Unit No) ก่อน"); return;
-    }
-    const now = Date.now(); if (now - lastPasteRef.current < 400) return; lastPasteRef.current = now;
-    setErr("");
-    try {
-      const mod = await import("./excelImport.js");
-      applyBunks(mod.parseBunkText(text), "วางข้อมูลได้");
-    } catch (e2) { setErr("อ่านข้อมูลที่วางไม่สำเร็จ: " + (e2?.message || e2)); }
-  }
-  function onPasteTextarea(e) {
-    const text = e.clipboardData?.getData("text") || "";
-    if (!text.includes("\t") && !text.includes("\n")) return;
-    e.preventDefault(); handlePastedText(text);
-  }
-  useEffect(() => {
-    try { pasteRef.current?.focus(); } catch { /* ignore */ }
-    const onDocPaste = (ev) => {
-      const text = ev.clipboardData?.getData("text") || "";
-      if (!text.includes("\t") && !text.includes("\n")) return;
-      ev.preventDefault(); handlePastedText(text);
-    };
-    document.addEventListener("paste", onDocPaste);
-    return () => document.removeEventListener("paste", onDocPaste);
-  }, []);
-
-  const removeBunk = (i) => setBunks((bs) => bs.filter((_, j) => j !== i));
-
-  // บันทึก 1 บั้ง: หา/สร้าง package (+QR) → kind=package → BOM (รวมตาม unit_no) → manifest
-  //   คืนรายชื่อยูนิตที่ "สร้างใหม่" (ยังไม่มีในระบบ = ยังไม่มี QR ให้สแกน) ไว้เตือน office
-  async function saveOneBunk(bunk, ro) {
-    const code = String(bunk.meta?.bunk_no || "").trim();
-    if (!code) throw new Error("บั้งนี้ไม่มีเลข BUNK NO.");
-    let parentPm = (await listRows("part_master", { filters: { project_id: projectId, part_no: code } }))[0];
-    if (!parentPm) {
-      await createReleaseBatch({
-        projectId, releaseOrder: ro, releaseDate: dateToIso(date), releasedBy: user.id, makeQr: true,
-        rows: [{ code, qty: 1, unit_weight: Number(bunk.meta?.total_weight) || 0, length_mm: null, material: null,
-          remark: [bunk.meta?.project, bunk.meta?.elevation, bunk.meta?.level].filter(Boolean).join(" · ") || null, routing: [] }],
-      });
-      parentPm = (await listRows("part_master", { filters: { project_id: projectId, part_no: code } }))[0];
-    }
-    if (!parentPm?.id) throw new Error(`ไม่พบบั้ง ${code} หลังสร้าง`);
-    if (parentPm.kind !== "package") await updateRow("part_master", parentPm.id, { kind: "package" });
-
-    // รวมยูนิตตาม unit_no (sum qty) → BOM
-    const byNo = new Map();
-    for (const u of bunk.units) {
-      const key = String(u.unit_no || "").trim();
-      if (!key) continue;
-      byNo.set(key, (byNo.get(key) || 0) + (Number(u.qty) > 0 ? Number(u.qty) : 1));
-    }
-    const components = []; const createdUnits = [];
-    for (const [unitNo, qty] of byNo) {
-      let pm = (await listRows("part_master", { filters: { project_id: projectId, part_no: unitNo } }))[0];
-      if (!pm) {
-        const sample = bunk.units.find((u) => String(u.unit_no).trim() === unitNo) || {};
-        const created = await insertRow("part_master", {
-          project_id: projectId, part_no: unitNo, part_name: sample.description || unitNo,
-          material: null, unit_weight: Number(sample.weight) || 0, default_length_mm: null, routing: [], kind: "part",
-        });
-        pm = created && created.id ? created : (await listRows("part_master", { filters: { project_id: projectId, part_no: unitNo } }))[0];
-        createdUnits.push(unitNo);
-      }
-      if (!pm?.id) throw new Error(`สร้าง/หายูนิต ${unitNo} ไม่สำเร็จ`);
-      components.push({ child_pm_id: pm.id, qty });
-    }
-    if (components.length) await setBom(parentPm.id, components);
-    // ★ ติดป้ายชนิดการแพ็ก (pack_type) ลง pkg_meta → สเตชันแพ็กแผง/แพ็กไซต์ไอเทมกรองบั้งของตัวเอง
-    await setPkgManifest(parentPm.id, bunk.units, { ...(bunk.meta || {}), pack_type: packType });
-    return { createdUnits };
-  }
-
-  async function doSave() {
-    const ro = normalizeReleaseOrder(releaseOrder);
-    if (!ro || !RELEASE_ORDER_RE.test(ro)) { setErr('เลขที่ Release Order ต้องเป็นรูปแบบ "P-ตัวเลข" เช่น P-100'); return; }
-    if (!projectId) { setErr("กรุณาเลือกโปรเจค"); return; }
-    if (!date) { setErr("กรุณาเลือกวันที่"); return; }
-    if (!bunks.length) { setErr("ยังไม่มีบั้ง — นำเข้าไฟล์ หรือวางฟอร์มบั้งก่อน"); return; }
-    const bad = bunks.find((b) => !String(b.meta?.bunk_no || "").trim());
-    if (bad) { setErr("มีบั้งที่ไม่มีเลข BUNK NO. — ตรวจไฟล์อีกครั้ง"); return; }
-
-    setBusy(true); setErr(""); let done = 0; const allCreated = new Set();
-    try {
-      for (const b of bunks) {
-        setProgress(`กำลังบันทึกบั้ง ${b.meta.bunk_no} (${done + 1}/${bunks.length})...`);
-        const { createdUnits } = await saveOneBunk(b, ro);
-        (createdUnits || []).forEach((u) => allCreated.add(u));
-        done++;
-      }
-    } catch (e2) {
-      setBunks((bs) => bs.slice(done));   // เหลือเฉพาะบั้งที่ยังไม่บันทึก กันบันทึกซ้ำ
-      setErr(`บันทึกไม่สำเร็จที่บั้ง "${bunks[done]?.meta?.bunk_no || "-"}": ${e2?.message || e2}`
-        + (done > 0 ? ` · บันทึกสำเร็จไปแล้ว ${done} บั้ง (เอาออกให้แล้ว)` : ""));
-      setBusy(false); setProgress("");
-      return;
-    }
-    setBusy(false); setProgress("");
-    onSaved({ releaseOrder: ro, bunks: done, createdUnits: Array.from(allCreated) });
-  }
-
-  const totalUnits = bunks.reduce((s, b) => s + b.units.length, 0);
-  const fmt2 = (n) => (n == null || isNaN(Number(n)) ? "—" : Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 }));
-
-  return (
-    <Modal title="นำเข้าฟอร์มบั้ง (Packing List)" wide
-      sub="1 บั้ง = 1 แพ็ก (package + QR) · ยูนิตในบั้งจะตั้งเป็น BOM ให้อัตโนมัติ · ฟอร์มเต็ม (ตำแหน่ง/ขนาด/น้ำหนัก) เก็บไว้โชว์ที่หน้าแพ็ก — ไฟล์เดียวหลายบั้งได้"
-      onClose={onClose} closeOnBackdrop={false} locked={busy}>
-      <div className="modal-lock-hint"><Icon name="lock" size={12} /> หน้าต่างนี้ล็อกไว้ — กด "ยกเลิก" หรือ ✕ เพื่อออก</div>
-
-      <div className="release-header-fields" style={{ marginBottom: 12 }}>
-        <Field label="เลขที่ Release Order *">
-          <Input value={releaseOrder} placeholder="เช่น P-100"
-            onChange={(e) => setReleaseOrder(e.target.value)}
-            onBlur={(e) => setReleaseOrder(normalizeReleaseOrder(e.target.value))} />
-        </Field>
-        <Field label="วันที่ *"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-        <Field label="โปรเจค *">
-          <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}
-            options={projects.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))} />
-        </Field>
-        <Field label="ชนิดการแพ็ก *">
-          <Select value={packType} onChange={(e) => setPackType(e.target.value)}
-            options={[{ value: "panel", label: "แพ็กแผง (panel)" }, { value: "site", label: "แพ็กไซต์ไอเทม (site item)" }]} />
-        </Field>
-        <Btn type="button" variant="ghost" className="icon-btn-add" title="สร้างโปรเจคใหม่"
-          onClick={() => onNeedProject && onNeedProject()}><Icon name="plus" size={16} /></Btn>
-      </div>
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={onPickFile} />
-        <Btn type="button" variant="ghost" size="sm" onClick={() => fileRef.current?.click()} disabled={busy}>
-          <Icon name="folder" size={14} /> นำเข้าจากไฟล์ Excel
-        </Btn>
-        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>หรือก็อปฟอร์มบั้งจาก Excel แล้ว <b>กด Ctrl+V</b> (ช่องด้านล่างพร้อมวางแล้ว)</span>
-      </div>
-      <textarea ref={pasteRef} onPaste={onPasteTextarea} rows={2} disabled={busy}
-        placeholder="⬇ วางฟอร์มบั้งที่นี่ด้วย Ctrl+V — ก็อปจาก Excel รวมหัว BUNK NO. + ตาราง Unit No/Position/Weight · หลายบั้งในครั้งเดียวได้"
-        style={{ width: "100%", boxSizing: "border-box", resize: "none", padding: "11px 12px", borderRadius: 8, marginBottom: 10,
-          border: "2px dashed #2b8cff", background: "var(--surface-2, #f4f8f6)", fontSize: 13, fontFamily: "inherit", color: "var(--muted)" }} />
-
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>{err}</div>}
-      {progress && <div style={{ color: "var(--accent-dk)", fontSize: 12.5, marginBottom: 10 }}>{progress}</div>}
-
-      {bunks.length > 0 ? (
-        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
-          พร้อมบันทึก <b>{fmtNum(bunks.length)}</b> บั้ง · รวม <b>{fmtNum(totalUnits)}</b> ยูนิต — แตะการ์ดเพื่อดูรายละเอียด
-        </div>
-      ) : (
-        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 12, padding: "18px 12px", textAlign: "center", border: "1px dashed var(--border)", borderRadius: 10 }}>
-          ยังไม่มีบั้ง — นำเข้าไฟล์ Excel หรือวางฟอร์มบั้งด้านบน
-        </div>
-      )}
-
-      <div style={{ maxHeight: "46vh", overflow: "auto", paddingRight: 4 }}>
-        {bunks.map((b, i) => {
-          const m = b.meta || {};
-          const meta = [m.project, m.elevation, m.level].filter(Boolean).join(" · ");
-          const open = openIdx === i;
-          return (
-            <div key={i} style={{ border: "1px solid var(--border)", borderRadius: 10, marginBottom: 10, background: "var(--surface-2, #f6f8f7)", overflow: "hidden" }}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "11px 13px", cursor: "pointer" }} onClick={() => setOpenIdx(open ? -1 : i)}>
-                <span style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 15, color: "var(--ink, #123)" }}>{m.bunk_no || "(ไม่มีเลขบั้ง)"}</span>
-                {meta ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{meta}</span> : null}
-                <span style={{ marginLeft: "auto", fontSize: 12.5, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
-                  {b.units.length} ยูนิต · {fmt2(m.total_weight)} Lbs
-                </span>
-                <span onClick={(e) => { e.stopPropagation(); removeBunk(i); }} title="เอาบั้งนี้ออก" style={{ cursor: "pointer", color: "var(--danger-hi)", padding: "0 4px" }}>✕</span>
-                <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "▲" : "▼"}</span>
-              </div>
-              {open && (
-                <div style={{ overflowX: "auto", borderTop: "1px solid var(--border)" }}>
-                  <table className="data-table" style={{ fontSize: 12, width: "100%", minWidth: 640 }}>
-                    <thead><tr>
-                      <th style={{ width: 34 }}>#</th><th style={{ width: 96 }}>ยูนิต</th><th style={{ width: 60 }}>ตำแหน่ง</th>
-                      <th>รายละเอียด</th><th style={{ width: 110 }}>ขนาด (มม.)</th><th style={{ width: 64 }}>จำนวน</th><th style={{ width: 88 }}>น้ำหนัก</th>
-                    </tr></thead>
-                    <tbody>
-                      {b.units.map((u, j) => (
-                        <tr key={j}>
-                          <td style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>{u.no || j + 1}</td>
-                          <td style={{ fontFamily: "var(--font-mono)", fontWeight: 700 }}>{u.unit_no}</td>
-                          <td style={{ fontFamily: "var(--font-mono)", textAlign: "center" }}>{u.position || "—"}</td>
-                          <td style={{ color: "var(--muted)" }}>{u.description || ""}{u.address_seq ? ` · ${u.address_seq}` : ""}</td>
-                          <td style={{ fontFamily: "var(--font-mono)", textAlign: "right" }}>{u.width != null && u.height != null ? `${fmt2(u.width)} × ${fmt2(u.height)}` : "—"}</td>
-                          <td style={{ fontFamily: "var(--font-mono)", textAlign: "center" }}>{u.qty || 1}</td>
-                          <td style={{ fontFamily: "var(--font-mono)", textAlign: "right" }}>{u.weight != null ? `${fmt2(u.weight)}` : "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="modal-actions" style={{ marginTop: 14 }}>
-        <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-        <Btn type="button" variant="accent" onClick={doSave} disabled={busy || !bunks.length}>
-          {busy ? "กำลังบันทึก..." : `บันทึก ${bunks.length ? fmtNum(bunks.length) + " บั้ง" : ""} + ปล่อยงาน`}
-        </Btn>
-      </div>
-    </Modal>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// ตรวจงานประกอบ/แพ็ก (หลังบ้าน) — เทียบ "ที่สั่งจาก release (แผน/BOM)" กับ
-//   "ที่หน้างานสแกนมาจริง (แต่ละชิ้น + QR)" → ดูว่าทำถูก + ครบไหม
-//   หน้างาน (สเตชัน) ไม่โชว์รายการแล้ว = สแกนอย่างเดียว · การตรวจย้ายมาทำที่นี่
-// ══════════════════════════════════════════════════════════════════════════
-function verifyStatusColor(s) {
-  return s === "complete" ? { bg: "rgba(16,185,129,.12)", fg: "var(--accent-dk, #0e9d63)", bd: "rgba(16,185,129,.35)" }
-    : s === "partial" ? { bg: "rgba(217,164,65,.14)", fg: "#b45309", bd: "rgba(217,164,65,.4)" }
-    : { bg: "rgba(220,38,38,.10)", fg: "var(--danger-hi, #c0362c)", bd: "rgba(220,38,38,.3)" };
-}
-function AssemblyVerifyPage({ initialQr, onConsumeInitial }) {
-  const [parents, setParents] = useState([]);
-  const [q, setQ] = useState("");
-  const [manualQr, setManualQr] = useState("");
-  const [sel, setSel] = useState(null);       // parent meta ที่เลือก
-  const [result, setResult] = useState(null);  // ผลเทียบ
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [projSel, setProjSel] = useState(""); // กรองโปรเจค (เหมือนหน้าพิมพ์ QR)
-  const [partSel, setPartSel] = useState(""); // กรองเบอร์ (Part)
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [asm, panel, pack] = await Promise.all([listAssemblyParents("assembly"), listAssemblyParents("panel"), listAssemblyParents("packing")]);
-        const seen = new Set(); const merged = [];
-        [...asm, ...panel, ...pack].forEach((p) => { if (!seen.has(p.id)) { seen.add(p.id); merged.push(p); } });
-        setParents(merged);
-      } catch (e) { /* ยังพิมพ์ QR เองได้ */ }
-    })();
-  }, []);
-
-  // ตัวเลือก dropdown (เหมือนหน้าพิมพ์ QR) — โปรเจค → Part (Part กรองตามโปรเจคที่เลือก)
-  const projOptions = useMemo(
-    () => [...new Set(parents.map((p) => p.project_code).filter(Boolean))]
-      .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
-      .map((c) => ({ value: c, label: c })),
-    [parents]);
-  const partOptions = useMemo(
-    () => [...new Set(parents.filter((p) => !projSel || p.project_code === projSel).map((p) => p.part_no).filter(Boolean))]
-      .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
-      .map((n) => ({ value: n, label: n })),
-    [parents, projSel]);
-  const filtered = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    return parents.filter((p) => {
-      if (projSel && p.project_code !== projSel) return false;
-      if (partSel && p.part_no !== partSel) return false;
-      if (s && !((p.part_no || "").toLowerCase().includes(s)
-        || (p.qr_code || "").toLowerCase().includes(s)
-        || (p.project_code || "").toLowerCase().includes(s))) return false;
-      return true;
-    });
-  }, [parents, q, projSel, partSel]);
-
-  async function load(qr, meta) {
-    if (!qr) return;
-    setBusy(true); setErr(""); setResult(null); setSel(meta || { part_no: qr, qr_code: qr });
-    try {
-      const st = await getAssemblyState(qr);
-      if (!st || !st.ok) {
-        setErr(st?.reason === "no_bom" ? "เบอร์นี้ยังไม่ได้ตั้ง BOM — ตั้งที่หน้า Part Master ก่อน"
-          : st?.reason === "not_found" ? "ไม่พบ QR นี้ในระบบ" : "โหลดสถานะไม่ได้ (" + (st?.reason || "error") + ")");
-        setBusy(false); return;
-      }
-      const bom = st.bom || [];
-      const installed = st.installed || [];
-      const madeQty = Math.max(1, Math.floor(Number(st.made_qty) || 1));   // จำนวนที่ทำของเบอร์แม่ → แผน = BOM × จำนวนนี้
-      const unitMap = await getUnitsByIds(installed.map((x) => x.child_unit_id));
-      const byPm = {};
-      installed.forEach((x) => {
-        (byPm[x.child_pm_id] = byPm[x.child_pm_id] || []).push({
-          unit_id: x.child_unit_id,
-          qty: Math.max(1, Math.floor(Number(x.qty) || 1)),   // จำนวนที่ใส่จริง (นับจำนวนรวม)
-          qr: unitMap[x.child_unit_id]?.qr_code || "—",
-          part_no: unitMap[x.child_unit_id]?.part_no || "",
-        });
-      });
-      const sumQty = (arr) => arr.reduce((s, u) => s + (Number(u.qty) || 1), 0);
-      const rows = bom.map((b) => {
-        const sc = byPm[b.child_pm_id] || [];
-        const used = sumQty(sc);                       // ใช้ไปจริง (รวมจำนวน)
-        const need = (Number(b.qty) || 0) * madeQty;   // แผน = ต่อชุด × จำนวนที่ทำ
-        // เกิน (over) = ใช้มากกว่าแผน · ครบ = เท่ากับแผนเป๊ะ · ขาด = partial · ยังไม่สแกน = missing
-        const status = used > need ? "over" : used === need ? "complete" : used > 0 ? "partial" : "missing";
-        return { part_no: b.part_no, part_name: b.part_name, planned: need, scanned: used, units: sc, status };
-      });
-      const bomSet = new Set(bom.map((b) => b.child_pm_id));
-      const extra = [];
-      Object.keys(byPm).forEach((pm) => { if (!bomSet.has(pm)) extra.push(...byPm[pm]); });
-      const hasOver = rows.some((r) => r.status === "over");
-      const complete = rows.length > 0 && rows.every((r) => r.status === "complete");
-      setResult({
-        parentNo: meta?.part_no || st.parent?.part_no || qr,
-        parentName: meta?.part_name || "",
-        finished: st.parent?.status === "finished",
-        madeQty,
-        rows, extra, complete, hasOver, ok: complete && extra.length === 0 && !hasOver,
-        plannedTotal: bom.reduce((s, b) => s + (Number(b.qty) || 0) * madeQty, 0), scannedTotal: sumQty(installed),
-      });
-    } catch (e) { setErr("ผิดพลาด: " + (e?.message || e)); }
-    setBusy(false);
-  }
-
-  // เปิดมาจากรายงานประกอบ/แพ็ก (กดเบอร์แม่) → โหลดเบอร์นั้นให้อัตโนมัติ
-  useEffect(() => {
-    if (initialQr) { load(initialQr); onConsumeInitial && onConsumeInitial(); }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialQr]);
-
-  const doing = (s) => /progress/i.test(s || "");
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div className="page-title">ตรวจงานประกอบ / แพ็ก</div>
-          <div className="page-sub">เทียบ "ที่สั่งจาก release (แผน)" กับ "ที่หน้างานสแกนมาจริง" — ดูว่าทำถูก + ครบไหม · เลือกเบอร์จากรายการ หรือสแกน/พิมพ์ QR (ดูของที่เสร็จแล้วได้)</div>
-        </div>
-      </div>
-
-      <Card title="เลือกเบอร์แม่ / เบอร์แพ็ก">
-        {/* กรองแบบเดียวกับหน้าพิมพ์ QR: เลือกโปรเจค → Part · หรือสแกน/พิมพ์ QR ตรง ๆ */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, alignItems: "end" }}>
-          <Field label="โปรเจค">
-            <Select value={projSel} onChange={(e) => { setProjSel(e.target.value); setPartSel(""); }} options={projOptions} />
-          </Field>
-          <Field label="เบอร์ (Part)">
-            <Select value={partSel} onChange={(e) => setPartSel(e.target.value)} options={partOptions} />
-          </Field>
-          <Field label="หรือสแกน / พิมพ์ QR ตรงๆ (เสร็จแล้วก็ดูได้)">
-            <form onSubmit={(e) => { e.preventDefault(); const s = manualQr.trim(); if (s) load(s, null); }} style={{ display: "flex", gap: 8 }}>
-              <Input value={manualQr} onChange={(e) => setManualQr(e.target.value)} placeholder="เช่น UA3011B / QR" style={{ flex: 1 }} />
-              <Btn type="submit" variant="accent">โหลด</Btn>
-            </form>
-          </Field>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาเพิ่ม (เบอร์ / โปรเจค / QR)" style={{ flex: "1 1 240px" }} />
-          {(projSel || partSel || q) && <Btn variant="ghost" onClick={() => { setProjSel(""); setPartSel(""); setQ(""); }}>× ล้างตัวกรอง</Btn>}
-          {(projSel || partSel || q.trim()) && <span style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{filtered.length.toLocaleString()} รายการ</span>}
-        </div>
-        <div style={{ maxHeight: 300, overflow: "auto", marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-          {!(projSel || partSel || q.trim()) ? (
-            <div style={{ color: "var(--muted)", fontSize: 13, padding: 20, textAlign: "center", lineHeight: 1.8 }}>
-              เลือก <b>โปรเจค / Part</b> หรือพิมพ์ค้นหาด้านบน เพื่อดูรายการ<br />
-              <span style={{ fontSize: 12 }}>· หรือสแกน / พิมพ์ QR ตรง ๆ (ดูเบอร์ที่เสร็จแล้วก็ได้)</span>
-            </div>
-          ) : filtered.slice(0, 300).map((p) => (
-            <div key={p.id} onClick={() => load(p.qr_code, p)}
-              style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 9, border: "1px solid var(--border)", background: sel && sel.id === p.id ? "var(--surface-2, #eef4f1)" : "var(--surface, #fff)", cursor: "pointer" }}>
-              <b style={{ fontFamily: "var(--font-mono)", fontSize: 15, flexShrink: 0 }}>{p.part_no}</b>
-              <span style={{ color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", flexShrink: 0 }}>{p.qr_code}</span>
-              <span style={{ color: "var(--muted)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.part_name}{p.project_code ? ` · ${p.project_code}` : ""}</span>
-              <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: doing(p.status) ? "rgba(217,164,65,.15)" : "rgba(120,140,190,.12)", color: doing(p.status) ? "#b45309" : "var(--muted)" }}>{doing(p.status) ? "กำลังทำ" : "ยังไม่เริ่ม"}</span>
-              <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, letterSpacing: ".03em", color: "var(--muted)" }}>{p.kind === "package" ? "แพ็ก" : p.kind === "panel" ? "แผง" : "ซับ"}</span>
-            </div>
-          ))}
-          {(projSel || partSel || q.trim()) && filtered.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13, padding: 14, textAlign: "center" }}>ไม่พบในรายการที่กำลังทำ — ถ้าเบอร์เสร็จแล้ว ให้สแกน/พิมพ์ QR ในช่องด้านบน</div>}
-        </div>
-      </Card>
-
-      {busy && <Card><div style={{ color: "var(--muted)", padding: 8 }}>กำลังโหลด…</div></Card>}
-      {err && !busy && <Card><div style={{ color: "var(--danger-hi)", fontSize: 13, padding: 8, lineHeight: 1.6 }}>{err}</div></Card>}
-
-      {result && !busy && (
-        <Card title={`ผลเทียบ — ${result.parentNo}${result.parentName ? "  ·  " + result.parentName : ""}${result.finished ? "  (เสร็จแล้ว)" : ""}`}>
-          <div style={{
-            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "11px 14px", borderRadius: 10, marginBottom: 14, fontWeight: 700,
-            ...(result.ok ? { background: "rgba(16,185,129,.12)", color: "var(--accent-dk, #0e9d63)", border: "1px solid rgba(16,185,129,.35)" }
-              : (result.extra.length || result.hasOver) ? { background: "rgba(220,38,38,.10)", color: "var(--danger-hi, #c0362c)", border: "1px solid rgba(220,38,38,.3)" }
-                : { background: "rgba(217,164,65,.14)", color: "#b45309", border: "1px solid rgba(217,164,65,.4)" }),
-          }}>
-            <span style={{ fontSize: 16 }}>{result.ok ? "✓ ทำถูกและครบตามแผน" : result.extra.length ? "⚠ มีชิ้นที่ไม่อยู่ในแผน (อาจใส่ผิด/เกิน)" : result.hasOver ? "⚠ มีชิ้นเกินจำนวนที่แผนกำหนด" : "◐ ยังไม่ครบตามแผน"}</span>
-            {result.madeQty > 1 ? <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontWeight: 700, opacity: .9 }}>ทำเบอร์แม่ {result.madeQty} ตัว · แผน = ต่อชุด×{result.madeQty}</span> : null}
-            <span style={{ marginLeft: result.madeQty > 1 ? 0 : "auto", fontFamily: "var(--font-mono)", fontWeight: 800 }}>สแกนแล้ว {result.scannedTotal}/{result.plannedTotal} ชิ้น</span>
-          </div>
-
-          <div style={{ overflowX: "auto" }}>
-            <table className="data-table" style={{ minWidth: 640 }}>
-              <thead><tr>
-                <th>เบอร์ชิ้น (แผน)</th><th>รายละเอียด</th>
-                <th style={{ textAlign: "center", width: 80 }}>ต้องใช้</th><th style={{ textAlign: "center", width: 90 }}>สแกนแล้ว</th>
-                <th style={{ width: 120 }}>สถานะ</th><th>QR/ชิ้นที่สแกนมา</th>
-              </tr></thead>
-              <tbody>
-                {result.rows.map((r, i) => {
-                  const c = verifyStatusColor(r.status);
-                  return (
-                    <tr key={i}>
-                      <td style={{ fontFamily: "var(--font-mono)", fontWeight: 700, whiteSpace: "nowrap" }}>{r.part_no}</td>
-                      <td style={{ color: "var(--muted)", fontSize: 12.5 }}>{r.part_name}</td>
-                      <td style={{ textAlign: "center", fontFamily: "var(--font-mono)" }}>{r.planned}</td>
-                      <td style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontWeight: 700 }}>{r.scanned}</td>
-                      <td><span style={{ fontSize: 12, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: c.bg, color: c.fg, border: `1px solid ${c.bd}`, whiteSpace: "nowrap" }}>{r.status === "complete" ? "✓ ครบ" : r.status === "over" ? `เกิน +${r.scanned - r.planned}` : r.status === "partial" ? `ขาด ${r.planned - r.scanned}` : "✗ ยังไม่สแกน"}</span></td>
-                      <td style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--muted)" }}>{r.units.length ? r.units.map((u) => (Number(u.qty) > 1 ? `${u.qr} ×${u.qty}` : u.qr)).join(", ") : "—"}</td>
-                    </tr>
-                  );
-                })}
-                {result.rows.length === 0 && <tr><td colSpan={6} style={{ textAlign: "center", color: "var(--muted)", padding: 16 }}>เบอร์นี้ไม่มี BOM (ไม่มีชิ้นที่ต้องประกอบ)</td></tr>}
-              </tbody>
-            </table>
-          </div>
-
-          {result.extra.length > 0 && (
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontWeight: 700, color: "var(--danger-hi)", marginBottom: 6 }}>⚠ ชิ้นที่สแกนมาแต่ไม่อยู่ในแผน ({result.extra.length}) — ตรวจว่าใส่ผิดเบอร์ไหม</div>
-              <div style={{ overflowX: "auto" }}>
-                <table className="data-table" style={{ minWidth: 360 }}>
-                  <thead><tr><th>เบอร์ชิ้น</th><th>QR</th></tr></thead>
-                  <tbody>{result.extra.map((u, i) => <tr key={i}><td style={{ fontFamily: "var(--font-mono)" }}>{u.part_no || "?"}</td><td style={{ fontFamily: "var(--font-mono)" }}>{u.qr}{Number(u.qty) > 1 ? ` ×${u.qty}` : ""}</td></tr>)}</tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </Card>
-      )}
-    </div>
-  );
-}
-
-// จัดกลุ่ม release หลายแถวที่มาจากไฟล์ Excel เดียวกัน (release_order เดียวกัน) ให้เป็น
-// "การปล่อยงาน 1 ครั้ง" 1 แถวในตารางสรุป — ส่วน release เดี่ยวที่ไม่มี release_order
-// (ปล่อยทีละ Part ตามปกติ) ก็ยังคงแยกเป็นคนละแถวเหมือนเดิม
-function groupReleases(list) {
-  const map = new Map();
-  for (const r of list) {
-    // จับกลุ่มด้วย (โปรเจค + Release Order) — release_order ไม่ unique และคนละโปรเจค
-    // อาจใช้เลขซ้ำกันได้ (มาจากคนละไฟล์ Excel) จึงต้องแยกตามโปรเจคด้วย ไม่งั้นยอดรวมเพี้ยน
-    const pid = r.part_master?.project_id || r.part_master?.projects?.code || "?";
-    const key = r.release_order ? `RO:${pid}:${r.release_order}` : `S:${r.id}`;
-    if (!map.has(key)) {
-      map.set(key, {
-        key,
-        releaseOrder: r.release_order || null,
-        projectCode: r.part_master?.projects?.code || "-",
-        projectName: r.part_master?.projects?.name || "-",
-        date: r.release_date,
-        totalQty: 0,
-        totalWeight: 0,
-        notes: new Set(),
-        releases: [],
-      });
-    }
-    const g = map.get(key);
-    g.totalQty += r.qty || 0;
-    g.totalWeight += (r.qty || 0) * (r.unit_weight || 0);
-    if (r.note) g.notes.add(r.note);
-    if (new Date(r.release_date) < new Date(g.date)) g.date = r.release_date;
-    g.releases.push(r);
-  }
-  return Array.from(map.values()).sort((a, b) => new Date(b.date) - new Date(a.date));
-}
-
-// ── ตัวช่วยกลาง: คำนวณ "จำนวนเสร็จ" ของกลุ่ม Release ให้ทุกหน้าตรงกัน ──────────
-//   นิยามเดียว (ใช้เหมือนกันทั้ง Projects, รายการ Release, รายละเอียด Release):
-//   เสร็จ = max( เสร็จจากสแกนสำนักงาน (part_units.status),
-//                เสร็จจากขั้นตอนสุดท้ายของงานหน้าเครื่อง (machine_records) )  ไม่เกินจำนวนสั่ง
-//   → เลิกขัดกันเอง (เดิมพอมีงานหน้าเครื่องแม้แถวเดียว จะทิ้งยอดสำนักงานทันที = 400/400 กลายเป็น 0%)
-function computeGroupProgress(releases, unitStats, opProg, totalQty) {
-  const by = new Map();
-  for (const r of releases) {
-    for (const o of (opProg?.[r.id] || [])) {
-      const k = o.op || "ไม่ระบุ";
-      const e = by.get(k) || { op: k, seq: o.seq ?? 999, done: 0, finished: 0 };
-      e.done += Number(o.done) || 0; e.finished += Number(o.finished) || 0;
-      by.set(k, e);
-    }
-  }
-  const opAgg = Array.from(by.values()).sort((a, b) => (a.seq - b.seq) || a.op.localeCompare(b.op));
-  const lastOp = opAgg.length ? opAgg[opAgg.length - 1] : null;
-  const stationFinished = lastOp ? Math.min(lastOp.finished, totalQty) : 0;
-  const officeFinished = releases.reduce((s, r) => s + (unitStats?.[r.id]?.finished || 0), 0);
-  const finished = Math.min(Math.max(officeFinished, stationFinished), totalQty);
-  // งานหน้าเครื่องเป็น "ตัวหลัก" เมื่อยอดหน้าเครื่อง ≥ ยอดสำนักงาน และมากกว่า 0
-  const stationDrove = stationFinished > 0 && stationFinished >= officeFinished;
-  return { finished, officeFinished, stationFinished, opAgg, lastOp, stationDrove };
-}
-
-// ── Mini progress bar (inline, no extra deps) ───────────────────────────────
-function ProgressBar({ pct, finished, total }) {
-  // "เสร็จจริง" = ชิ้นครบ (ไม่ใช่แค่ % ปัดขึ้นถึง 100) — กัน 199/200 = 99.5% ปัดเป็น 100% เขียว
-  const complete = (finished != null && total != null && total > 0) ? finished >= total : pct >= 100;
-  let p = Math.min(100, Math.max(0, pct));
-  if (!complete && p >= 100) p = 99;   // ยังไม่ครบ อย่าเพิ่งโชว์ 100%
-  const color = complete ? "var(--success)" : p > 0 ? "var(--accent-dk)" : "var(--border)";
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 160 }}>
-      <div style={{ flex: 1, height: 7, background: "var(--surface-2)", borderRadius: 99, overflow: "hidden", border: "1px solid var(--border)" }}>
-        <div style={{ width: `${p}%`, height: "100%", background: color, borderRadius: 99, transition: "width .4s ease" }} />
-      </div>
-      <span style={{ fontSize: 12, fontWeight: 600, color, whiteSpace: "nowrap", minWidth: 38, textAlign: "right" }}>
-        {p}%
-      </span>
-      <span style={{ fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
-        ({finished}/{total})
-      </span>
-    </div>
-  );
-}
-
-// ── รายละเอียดความคืบหน้าของ Part เดียว (แยกตามขั้นตอน) ─────────────────────
-// กดจากแถว Part ในหน้ารายละเอียด Release — แสดงว่าเบอร์นี้ ตัดไปกี่ชิ้น เหลือเจาะ
-// เหลือบาก ฯลฯ โดยนับ "จำนวนชิ้น (distinct) ที่ผ่านแต่ละขั้นตอน" จาก scan_logs จริง
-function PartProgressModal({ release, user, onClose }) {
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
-  const [opProg, setOpProg] = useState([]);   // [{op, seq, done, finished}] ความคืบหน้าแยกขั้นตอน (งานหน้าเครื่อง)
-  const [finished, setFinished] = useState(0);
-  const [inProgress, setInProgress] = useState(0);
-  const [totalUnits, setTotalUnits] = useState(release.qty || 0);
-
-  const routing = release.part_master?.routing || [];
-  const partNo = release.part_master?.part_no || "-";
-  const partName = release.part_master?.part_name || "";
-
-  // สไตล์การ์ดสรุป (ใช้ซ้ำหลายจุด)
-  const cellStyle = { flex: 1, minWidth: 120, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "10px 12px" };
-  const cellLbl = { fontSize: 11.5, color: "var(--muted)" };
-  const cellVal = { fontSize: 16, fontWeight: 700 };
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      setLoading(true); setErr("");
-      try {
-        // จำนวนชิ้น (รวม/เสร็จ/กำลังทำ) + ความคืบหน้าแยกขั้นตอนจากงานหน้าเครื่องจริง
-        // ใช้แหล่งเดียวกับการ์ดรวมในหน้ารายละเอียด Release เพื่อให้ตัวเลขตรงกัน
-        const [stats, prog] = await Promise.all([
-          getUnitStatsByReleaseIds([release.id]),
-          getReleaseOpProgress([release.id]),
-        ]);
-        if (!alive) return;
-        const s = stats[release.id] || { total: release.qty || 0, finished: 0, inProgress: 0 };
-        setTotalUnits(s.total || release.qty || 0);
-        setFinished(s.finished || 0);
-        setInProgress(s.inProgress || 0);
-        setOpProg(Array.isArray(prog[release.id]) ? prog[release.id] : []);
-        setLoading(false);
-      } catch (e) {
-        if (alive) { setErr("โหลดข้อมูลไม่สำเร็จ: " + e.message); setLoading(false); }
-      }
-    })();
-    return () => { alive = false; };
-  }, [release]);
-
-  // เรียงขั้นตอนตาม routing ก่อน แล้วต่อด้วยขั้นตอนที่มีงานจริงแต่ไม่อยู่ใน routing
-  const opMap = new Map(opProg.map((o) => [o.op, o]));
-  const extraOps = opProg.filter((o) => !routing.includes(o.op)).map((o) => o.op);
-  const stages = [...routing, ...extraOps];
-  const notStarted = Math.max(0, totalUnits - finished - inProgress);
-
-  return (
-    <Modal
-      title={`ความคืบหน้า — ${partNo}`}
-      sub={`${partName}${partName ? " · " : ""}ทั้งหมด ${fmtNum(totalUnits)} ชิ้น`}
-      onClose={onClose}
-    >
-      {loading ? (
-        <div style={{ color: "var(--muted)", fontSize: 13, padding: "12px 2px" }}>กำลังโหลด...</div>
-      ) : err ? (
-        <div style={{ color: "var(--danger-hi)", fontSize: 13 }}>{err}</div>
-      ) : (
-        <>
-          {/* ── น้ำหนัก / ความยาว ของ Part นี้ ───────────────────────────── */}
-          {(() => {
-            const uw = release.unit_weight ?? release.part_master?.unit_weight;
-            const len = release.length_mm ?? release.part_master?.default_length_mm;
-            return (
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-                <div style={cellStyle}>
-                  <div style={cellLbl}>น้ำหนัก/ชิ้น</div>
-                  <div style={cellVal}>{uw != null ? `${fmtNum(uw)} กก.` : "-"}</div>
-                </div>
-                <div style={cellStyle}>
-                  <div style={cellLbl}>ความยาว/ชิ้น</div>
-                  <div style={cellVal}>{len != null ? `${fmtNum(len)} มม.` : "-"}</div>
-                </div>
-                <div style={cellStyle}>
-                  <div style={cellLbl}>น้ำหนักรวม</div>
-                  <div style={cellVal}>{uw != null ? `${fmtNum(totalUnits * uw)} กก.` : "-"}</div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* ── สรุปจำนวนชิ้น: ทั้งหมด / เสร็จ / กำลังทำ / ยังไม่เริ่ม ───────── */}
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-            <div style={cellStyle}>
-              <div style={cellLbl}>จำนวนทั้งหมด</div>
-              <div style={cellVal}>{fmtNum(totalUnits)} ชิ้น</div>
-            </div>
-            <div style={cellStyle}>
-              <div style={cellLbl}>เสร็จแล้ว</div>
-              <div style={{ ...cellVal, color: finished > 0 ? "var(--success)" : "var(--muted)" }}>{fmtNum(finished)} ชิ้น</div>
-            </div>
-            <div style={cellStyle}>
-              <div style={cellLbl}>กำลังทำ</div>
-              <div style={{ ...cellVal, color: inProgress > 0 ? "var(--accent-dk)" : "var(--text)" }}>{fmtNum(inProgress)} ชิ้น</div>
-            </div>
-            <div style={cellStyle}>
-              <div style={cellLbl}>ยังไม่เริ่ม</div>
-              <div style={{ ...cellVal, color: "var(--muted)" }}>{fmtNum(notStarted)} ชิ้น</div>
-            </div>
-          </div>
-
-          {/* ── ทำแต่ละขั้นตอนไปแล้วกี่ชิ้น (งานหน้าเครื่อง) ─────────────────── */}
-          <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 3 }}>ทำแต่ละขั้นตอนไปแล้วกี่ชิ้น</div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-            นับจากงานที่บันทึกหน้าเครื่องจริง แยกแต่ละขั้นตอน — <b>ทำแล้ว</b> = ทุกสถานะ · <b>เสร็จ</b> = กด Finished · เทียบกับจำนวนสั่ง {fmtNum(totalUnits)} ชิ้น
-          </div>
-          {stages.length === 0 ? (
-            <div style={{ fontSize: 12.5, color: "var(--muted)", padding: "2px 2px 6px", lineHeight: 1.6 }}>
-              {routing.length === 0
-                ? "Part นี้ยังไม่ได้ตั้ง Routing — ไปตั้งขั้นตอนที่ Setup › Part Master ก่อน"
-                : "ยังไม่มีการบันทึกงานหน้าเครื่องสำหรับ Part นี้"}
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {stages.map((op, i) => {
-                const e = opMap.get(op) || { done: 0, finished: 0 };
-                const done = Number(e.done) || 0;
-                const fin = Number(e.finished) || 0;
-                const pct = totalUnits > 0 ? Math.round((done / totalUnits) * 100) : 0;
-                const over = done > totalUnits;
-                const inRouting = routing.includes(op);
-                return (
-                  <div key={op}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 4, gap: 10 }}>
-                      <span style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                        {inRouting && <span className="stage-seq">{i + 1}</span>}
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{op}</span>
-                        {!inRouting && <span style={{ fontWeight: 400, fontSize: 11, color: "var(--muted)" }}>(นอก routing)</span>}
-                      </span>
-                      <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
-                        ทำแล้ว {fmtNum(done)} / {fmtNum(totalUnits)} ชิ้น
-                        {fin > 0 ? <span style={{ color: "var(--success)" }}> · เสร็จ {fmtNum(fin)}</span> : null}
-                        {over ? <span style={{ color: "var(--warning)" }}> · เกิน (สแปร์)</span> : null}
-                      </span>
-                    </div>
-                    <ProgressBar pct={Math.min(pct, 100)} finished={done} total={totalUnits} />
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </>
-      )}
-
-      <div className="modal-actions">
-        <Btn type="button" variant="ghost" onClick={onClose}>ปิด</Btn>
-      </div>
-    </Modal>
-  );
-}
-
-function ReleaseGroupDetail({ group, user, onBack, goTo, onHome, onChanged }) {
-  const canEdit = isAdmin(user);   // เฉพาะ Admin เท่านั้นที่แก้ไข/ลบ Release ได้ (office เพิ่ม/นำเข้า/ดูได้ แต่แก้/ลบไม่ได้)
-  // สำเนา releases แบบ local เพื่อให้แก้ไข/ลบ สะท้อนทันทีในหน้านี้ (ยอดรวมคิดใหม่ตามนี้)
-  const [releases, setReleases] = useState(group.releases);
-  const [unitStats, setUnitStats] = useState({});
-  const [opProg, setOpProg] = useState({});   // ความคืบหน้าแยกขั้นตอน (งานหน้าเครื่อง) ต่อ release
-  const [statsLoading, setStatsLoading] = useState(true);
-  const [viewPart, setViewPart] = useState(null); // release row ที่กำลังดูความคืบหน้าแยกขั้นตอน
-  const [editing, setEditing] = useState(null);   // release ที่กำลังแก้ไข
-  const [busyId, setBusyId] = useState(null);     // release ที่กำลังลบ
-  const [editHeader, setEditHeader] = useState(false);   // เปิดหน้าต่างแก้หัวเอกสาร (Modify/RO/วันที่)
-  const [hdr, setHdr] = useState({ ro: group.releaseOrder, date: group.date });   // ค่าหัวเอกสารที่โชว์ (อัปเดตหลังบันทึก)
-  const sort = useTableSort();
-
-  // ยอดรวมคิดจาก releases ปัจจุบัน (อัปเดตเมื่อแก้ไข/ลบ)
-  const totalQty = releases.reduce((s, r) => s + (r.qty || 0), 0);
-  const totalWeight = releases.reduce((s, r) => s + (r.qty || 0) * (r.unit_weight || 0), 0);
-  // ประกอบ/แพ็ก (ลูกเป็น sub/แผง/แพ็ก) ไม่ต้องโชว์น้ำหนัก — คงไว้เฉพาะงานเครื่อง (part)
-  const isAsmGroup = releases.length > 0 && releases.every((r) => { const k = r.part_master?.kind || "part"; return k === "subassembly" || k === "panel" || k === "package"; });
-  const notes = new Set(releases.map((r) => r.note).filter(Boolean));
-  const noteLabel = notes.size === 0 ? "-" : notes.size === 1 ? [...notes][0] : `${notes.size} หมายเหตุ`;
-
-  const loadStats = useCallback((list = releases) => {
-    const ids = list.map((r) => r.id);
-    if (ids.length === 0) { setUnitStats({}); setOpProg({}); setStatsLoading(false); return; }
-    setStatsLoading(true);
-    Promise.all([getUnitStatsByReleaseIds(ids), getReleaseOpProgress(ids)])
-      .then(([s, op]) => { setUnitStats(s); setOpProg(op || {}); setStatsLoading(false); });
-  }, [releases]);
-  useEffect(() => { loadStats(); }, [loadStats]);
-
-  // ── ลบ Release (พร้อม QR + ประวัติสแกนของล็อตนั้น) ───────────────────────
-  async function handleDelete(r) {
-    setBusyId(r.id);
-    try {
-      const units = await listRows("part_units", { filters: { release_id: r.id } });
-      const scanned = units.filter((u) => u.status !== "released").length;
-      const msg = scanned > 0
-        ? `ล็อตนี้มี ${units.length} ชิ้น และมี ${scanned} ชิ้นที่สแกนไปแล้ว (มีประวัติการทำงาน)\n\nการลบ Release นี้จะลบ QR และประวัติสแกนของชิ้นทั้งหมดในล็อตนี้ไปด้วย และกู้คืนไม่ได้\n\nยืนยันที่จะลบหรือไม่?`
-        : `ล็อตนี้มี ${units.length} ชิ้น (ยังไม่มีการสแกน)\n\nต้องการลบ Release นี้พร้อม QR ทั้งหมดหรือไม่? การลบกู้คืนไม่ได้`;
-      if (!(await askConfirm({ message: msg, tone: "danger", confirmText: "ลบ Release", cancelText: "ยกเลิก" }))) { setBusyId(null); return; }
-      await deleteReleaseCascade(r.id);
-      auditRecord("delete_release", "release", r.id, { part_no: r.part_master?.part_no, release_order: r.release_order, qty: r.qty, project: r.part_master?.projects?.code });
-      const next = releases.filter((x) => x.id !== r.id);
-      setReleases(next);
-      onChanged && onChanged();               // ให้หน้ารายการหลักรีโหลดด้วย
-      if (next.length === 0) { onBack(); return; } // ลบหมดทั้งกลุ่ม → กลับหน้ารายการ
-      loadStats(next);
-    } catch (e) {
-      mlsToast("ลบไม่สำเร็จ: " + e.message, "error");
-    }
-    setBusyId(null);
-  }
-
-  // หลังแก้ไข Release: ดึงค่าล่าสุดของล็อตในกลุ่มนี้มาแสดง แล้วรีเฟรชสถิติ
-  async function afterEdit() {
-    setEditing(null);
-    onChanged && onChanged();
-    try {
-      const all = await getReleasesFull();
-      const ids = new Set(releases.map((r) => r.id));
-      const updated = all.filter((r) => ids.has(r.id));
-      if (updated.length) { setReleases(updated); loadStats(updated); }
-      else loadStats();
-    } catch { loadStats(); }
-  }
-
-  // ★ ใช้ตัวช่วยกลาง computeGroupProgress → นิยาม "เสร็จ" เดียวกับหน้า Projects และ
-  //   รายการ Release (max ระหว่างสแกนสำนักงาน กับขั้นตอนสุดท้ายหน้าเครื่อง) — เลิกขัดกันเอง
-  const wPer = (r) => Number(r.unit_weight ?? r.part_master?.unit_weight ?? 0);
-  const { finished: totalFinished, opAgg, lastOp, stationDrove } =
-    computeGroupProgress(releases, unitStats, opProg, totalQty);
-  const totalInProgress = stationDrove
-    ? Math.max(0, Math.min(lastOp.done, totalQty) - totalFinished)
-    : releases.reduce((sum, r) => sum + (unitStats[r.id]?.inProgress || 0), 0);
-  const pctOverall = totalQty > 0 ? Math.round((totalFinished / totalQty) * 100) : 0;
-  const avgW = totalQty > 0 ? totalWeight / totalQty : 0;
-  const finishedWeight = stationDrove
-    ? totalFinished * avgW
-    : releases.reduce((sum, r) => sum + (unitStats[r.id]?.finished || 0) * wPer(r), 0);
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-            <Btn variant="ghost" size="sm" onClick={onBack}>
-              <Icon name="arrowLeft" size={14} /> กลับไปหน้า Release
-            </Btn>
-            <Btn variant="ghost" size="sm" onClick={loadStats} title="โหลดความคืบหน้าล่าสุด">
-              <Icon name="refresh" size={14} /> รีเฟรช
-            </Btn>
-            <Btn variant="ghost" size="sm" onClick={() => (onHome ? onHome() : onBack())} title="กลับหน้าแรก">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: "-2px" }}>
-                <path d="M3 11.5 12 4l9 7.5M5 10v9a1 1 0 0 0 1 1h3v-6h6v6h3a1 1 0 0 0 1-1v-9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              หน้าแรก
-            </Btn>
-          </div>
-          <div className="page-title">{hdr.ro ? `Release Order: ${hdr.ro}` : `Release — ${releases[0]?.part_master?.part_no || ""}`}</div>
-          <div className="page-sub">{group.projectCode} — {group.projectName} · {fmtD(hdr.date)}</div>
-        </div>
-        {canEdit && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <Btn variant="accent" onClick={() => setEditHeader(true)}
-              title="แก้เลขที่ Release Order / วันที่ / Modify ของทั้งใบ">
-              <Icon name="settings" size={15} /> แก้ไขหัวเอกสาร
-            </Btn>
-          </div>
-        )}
-      </div>
-
-      <div className="grid-3" style={{ marginBottom: 16 }}>
-        <Card>
-          <div className="label-el">จำนวนรวม</div>
-          <div style={{ fontSize: 22, fontWeight: 700 }}>{fmtNum(totalQty)} ชิ้น</div>
-        </Card>
-        {!isAsmGroup && (
-          <Card>
-            <div className="label-el">น้ำหนักรวม</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{fmtNum(totalWeight)} กก.</div>
-          </Card>
-        )}
-        <Card>
-          <div className="label-el">Part No.</div>
-          <div style={{ fontSize: 22, fontWeight: 700 }}>{releases.length} Part</div>
-        </Card>
-        <Card>
-          <div className="label-el" style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <Icon name="check" size={12} /> เสร็จแล้ว (ภาพรวม)
-          </div>
-          {statsLoading ? (
-            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>กำลังโหลด...</div>
-          ) : (
-            <>
-              <div style={{ fontSize: 22, fontWeight: 700, color: (totalQty > 0 && totalFinished >= totalQty) ? "var(--success)" : "var(--text)" }}>
-                {fmtNum(totalFinished)} <span style={{ fontSize: 14, fontWeight: 400, color: "var(--muted)" }}>/ {fmtNum(totalQty)} ชิ้น</span>
-              </div>
-              <ProgressBar pct={pctOverall} finished={totalFinished} total={totalQty} />
-              {!isAsmGroup && (
-                <div style={{ fontSize: 12, color: "var(--accent-dk)", fontWeight: 600, marginTop: 6 }}>
-                  น้ำหนักที่ทำแล้ว: {fmtNum(finishedWeight)} <span style={{ color: "var(--muted)", fontWeight: 400 }}>/ {fmtNum(totalWeight)} กก.</span>
-                </div>
-              )}
-              {stationDrove && lastOp && (
-                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
-                  * นับจากขั้นตอนสุดท้าย ({lastOp.op}) ของงานหน้าเครื่อง
-                </div>
-              )}
-              {totalInProgress > 0 && (
-                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
-                  กำลังทำ: {fmtNum(totalInProgress)} ชิ้น
-                </div>
-              )}
-            </>
-          )}
-        </Card>
-      </div>
-
-      {!statsLoading && opAgg.length > 0 && (
-        <Card title="ความคืบหน้าตามขั้นตอน (งานหน้าเครื่อง)">
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-            นับจากงานที่บันทึกหน้าเครื่องจริง แยกแต่ละขั้นตอน (ตัด/เจาะ/บาก) — <b>ทำแล้ว</b> = ทุกสถานะ · <b>เสร็จ</b> = กด Finished · เทียบกับจำนวนสั่ง {fmtNum(totalQty)} ชิ้น
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {opAgg.map((o) => {
-              const pct = totalQty > 0 ? Math.round((o.done / totalQty) * 100) : 0;
-              const over = o.done > totalQty;
-              return (
-                <div key={o.op}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600 }}>{o.op}</span>
-                    <span style={{ color: "var(--muted)" }}>
-                      ทำแล้ว {fmtNum(o.done)} / {fmtNum(totalQty)} ชิ้น
-                      {o.finished > 0 ? <span style={{ color: "var(--success)" }}> · เสร็จ {fmtNum(o.finished)}</span> : null}
-                      {over ? <span style={{ color: "var(--alert, #d97a00)" }}> · เกิน (สแปร์)</span> : null}
-                    </span>
-                  </div>
-                  <ProgressBar pct={Math.min(pct, 100)} finished={o.done} total={totalQty} />
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-      )}
-
-      <Card title="รายละเอียดแต่ละ Part ในล็อตนี้">
-        <SortControl sort={sort} options={[
-          { k: "part_no", label: "Part No." }, { k: "part_name", label: "ชื่อ Part" }, { k: "qty", label: "จำนวน" },
-          { k: "finished", label: "เสร็จแล้ว" }, { k: "progress", label: "ความคืบหน้า" },
-          ...(!isAsmGroup ? [{ k: "uw", label: "น้ำหนัก/ชิ้น" }, { k: "tw", label: "น้ำหนักรวม" }] : []), { k: "len", label: "ความยาว/ชิ้น" },
-        ]} />
-        <div className="table-wrap tall-scroll">
-          <table className="data-table responsive-cards">
-            <thead>
-              <tr>
-                <SortTh k="part_no" sort={sort}>Part No.</SortTh>
-                <SortTh k="part_name" sort={sort}>ชื่อ Part</SortTh>
-                <SortTh k="qty" sort={sort}>จำนวน</SortTh>
-                <SortTh k="finished" sort={sort}>เสร็จแล้ว</SortTh>
-                <SortTh k="progress" sort={sort}>ความคืบหน้า</SortTh>
-                {!isAsmGroup && <SortTh k="uw" sort={sort}>น้ำหนัก/ชิ้น</SortTh>}
-                {!isAsmGroup && <SortTh k="tw" sort={sort}>น้ำหนักรวม</SortTh>}
-                <SortTh k="len" sort={sort}>ความยาว/ชิ้น</SortTh>
-                <th>หมายเหตุ</th>
-                {canEdit && <th>จัดการ</th>}
-                <th>พิมพ์</th>
-                <th>ขั้นตอน</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sort.sortRows(releases, {
-                part_no: (r) => r.part_master?.part_no || "", part_name: (r) => r.part_master?.part_name || "",
-                qty: (r) => Number(r.qty) || 0,
-                finished: (r) => unitStats[r.id]?.finished ?? 0,
-                progress: (r) => { const t = unitStats[r.id]?.total ?? r.qty; return t > 0 ? (unitStats[r.id]?.finished ?? 0) / t : 0; },
-                uw: (r) => Number(r.unit_weight) || 0,
-                tw: (r) => (Number(r.unit_weight) || 0) * (Number(r.qty) || 0),
-                len: (r) => Number(r.length_mm) || 0,
-              }).map((r) => {
-                const st = unitStats[r.id] || null;
-                const finished = st?.finished ?? 0;
-                const total = st?.total ?? r.qty;
-                const pct = total > 0 ? Math.round((finished / total) * 100) : 0;
-                return (
-                  <tr key={r.id} className="release-row" onClick={() => setViewPart(r)} title="กดเพื่อดูความคืบหน้าแยกขั้นตอน">
-                    <td data-label="Part No." style={{ fontWeight: 600, whiteSpace: "nowrap" }}>{r.part_master?.part_no || "-"}</td>
-                    <td data-label="ชื่อ Part" style={{ whiteSpace: "nowrap" }}>{r.part_master?.part_name || "-"}</td>
-                    <td data-label="จำนวน">{fmtNum(r.qty)}</td>
-                    <td data-label="เสร็จแล้ว">
-                      {statsLoading ? (
-                        <span style={{ color: "var(--muted)", fontSize: 12 }}>...</span>
-                      ) : (
-                        <span style={{ fontWeight: 600, color: finished > 0 ? "var(--success)" : "var(--muted)" }}>
-                          {fmtNum(finished)} ชิ้น
-                        </span>
-                      )}
-                    </td>
-                    <td data-label="ความคืบหน้า" style={{ minWidth: 180 }}>
-                      {statsLoading ? (
-                        <span style={{ color: "var(--muted)", fontSize: 12 }}>...</span>
-                      ) : (
-                        <ProgressBar pct={pct} finished={finished} total={total} />
-                      )}
-                    </td>
-                    {!isAsmGroup && <td data-label="น้ำหนัก/ชิ้น">{r.unit_weight ? `${fmtNum(r.unit_weight)} กก.` : "-"}</td>}
-                    {!isAsmGroup && <td data-label="น้ำหนักรวม">{r.unit_weight ? `${fmtNum(r.qty * r.unit_weight)} กก.` : "-"}</td>}
-                    <td data-label="ความยาว/ชิ้น">{r.length_mm ? `${fmtNum(r.length_mm)} มม.` : "-"}</td>
-                    <td data-label="หมายเหตุ">{r.note || "-"}</td>
-                    {canEdit && (
-                      <td data-label="จัดการ" style={{ whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
-                        <span onClick={() => setEditing(r)} style={{ color: "var(--accent-dk)", cursor: "pointer" }}>
-                          {busyId === r.id ? "กำลังลบ..." : "แก้ไข"}
-                        </span>
-                      </td>
-                    )}
-                    <td data-label="พิมพ์">
-                      <span onClick={(e) => { e.stopPropagation(); goTo && goTo("labels", { releaseId: r.id }); }} style={{ color: "var(--accent-dk)", cursor: "pointer", whiteSpace: "nowrap" }}>
-                        <Icon name="printer" size={13} /> พิมพ์ QR
-                      </span>
-                    </td>
-                    <td data-label="" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
-                      ดูขั้นตอน <Icon name="arrowLeft" size={12} style={{ transform: "rotate(180deg)", verticalAlign: "-1px" }} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-      {noteLabel !== "-" && notes.size > 1 && (
-        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>หมายเหตุทั้งหมด: {[...notes].join(" · ")}</div>
-      )}
-
-      {viewPart && <PartProgressModal release={viewPart} user={user} onClose={() => { setViewPart(null); loadStats(); }} />}
-      {editing && (
-        <ReleaseEditModal
-          release={editing}
-          onClose={() => setEditing(null)}
-          onSaved={afterEdit}
-          onDelete={() => { const r = editing; setEditing(null); handleDelete(r); }}
-        />
-      )}
-      {editHeader && (
-        <ReleaseHeaderEditModal
-          group={group}
-          releases={releases}
-          curRO={hdr.ro}
-          curDate={hdr.date}
-          onClose={() => setEditHeader(false)}
-          onSaved={({ ro, dateIso, mdf }) => {
-            // อัปเดตค่าที่โชว์ + แถวในตารางให้เห็นผลทันที (ไม่ต้องกลับออกไปโหลดใหม่)
-            setHdr({ ro, date: dateIso || hdr.date });
-            setReleases((prev) => prev.map((r) => ({
-              ...r,
-              release_order: ro || null,
-              release_date: dateIso || r.release_date,
-              part_master: r.part_master ? { ...r.part_master, mdf_no: mdf ?? r.part_master.mdf_no } : r.part_master,
-            })));
-            setEditHeader(false);
-            onChanged && onChanged();   // ให้หน้ารายการหลักรีเฟรชด้วย
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── แท็บแผนก (ใช้ร่วม 3 หน้า: รายงาน · ปล่อยงาน · พิมพ์ QR) — แยก แผง / ซับ ออกจากกัน ──
-const DEPT_TABS = [
-  { value: "machine", label: "เครื่องจักร", sub: "งานตัด / เจาะ", color: "#b45309", soft: "rgba(217,164,65,.14)", icon: "bolt" },
-  { value: "panel",   label: "แผง",         sub: "panel",         color: "#0e9d63", soft: "rgba(16,185,129,.11)", icon: "grid" },
-  { value: "sub",     label: "ซับ",         sub: "subassembly",    color: "#7c3aed", soft: "rgba(124,58,237,.10)", icon: "check" },
-  { value: "packing", label: "แพ็ก",        sub: "package",        color: "#2563eb", soft: "rgba(37,99,235,.09)",  icon: "box" },
-];
-// ชนิด part → แผนก: package=แพ็ก · panel=แผง · subassembly=ซับ · อื่น ๆ=เครื่องจักร
-const deptOfKind = (k) => (k === "package" ? "packing" : k === "panel" ? "panel" : k === "subassembly" ? "sub" : "machine");
-function DeptTabs({ value, onChange }) {
-  return (
-    <div style={{ display: "flex", gap: 10, margin: "0 0 16px", flexWrap: "wrap" }}>
-      {DEPT_TABS.map((d) => {
-        const active = value === d.value;
-        return (
-          <button key={d.value} type="button" onClick={() => onChange(d.value)}
-            style={{ flex: "1 1 160px", display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", borderRadius: 14, cursor: "pointer", textAlign: "left", font: "inherit", appearance: "none",
-              border: active ? `2px solid ${d.color}` : "1px solid var(--border, #e5e7eb)",
-              background: active ? d.soft : "var(--card, #fff)",
-              boxShadow: active ? "0 4px 16px rgba(0,0,0,.06)" : "none", transition: "border-color .15s, background .15s, box-shadow .15s" }}>
-            <div style={{ width: 40, height: 40, borderRadius: 11, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: active ? d.color : "var(--bg-soft, #f1f5f9)", color: active ? "#fff" : "var(--muted, #64748b)" }}>
-              <Icon name={d.icon} size={20} />
-            </div>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: active ? d.color : "var(--text, #0f172a)" }}>{d.label}</div>
-              <div style={{ fontSize: 11, color: "var(--muted, #64748b)", marginTop: 1 }}>{d.sub}</div>
-            </div>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ReleasePage({ user, goTo }) {
-  const [projects, setProjects] = useState([]);
-  const [parts, setParts] = useState([]);
-  const [recent, setRecent] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [showImport, setShowImport] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
-  const [showSubAsm, setShowSubAsm] = useState(false);
-  const [showBunk, setShowBunk] = useState(false);
-  const [showNewProject, setShowNewProject] = useState(false);
-  const [viewGroup, setViewGroup] = useState(null); // group ที่กำลังดูรายละเอียดอยู่ (null = แสดงตารางสรุป)
-  const sort = useTableSort();   // เรียงตารางประวัติ Release ตามหัวข้อ
-  // สถิติความคืบหน้า (finished / total) ของแต่ละ release — โหลดหลังได้รายการ
-  const [allUnitStats, setAllUnitStats] = useState({});
-
-  // ── ค้นหา/กรองประวัติ: วันที่ (จาก–ถึง) · โปรเจค · เลข Release Order ──
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [projectFilter, setProjectFilter] = useState("");
-  const [orderSearch, setOrderSearch] = useState("");
-  const [deptFilter, setDeptFilter] = useState("machine"); // แยกตามแผนก (เหมือนรายงาน): machine / assembly / packing
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setProjects(await listRows("projects", { order: "code" }));
-    setParts(await listRows("part_master", { order: "part_no" }));
-    const releases = await getReleasesFull();
-    setRecent(releases);
-    setLoading(false);
-    // โหลด stats ความคืบหน้าแบบ background (ไม่บล็อก UI)
-    if (releases.length > 0) {
-      const ids = releases.map((r) => r.id);
-      getUnitStatsByReleaseIds(ids).then(setAllUnitStats);
-    }
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  // กรองที่ระดับ release ก่อน แล้วค่อยจัดกลุ่ม เพื่อให้ค้นหาครอบคลุมทั้งประวัติ (deptOfKind = ตัวกลาง)
-  const filteredReleases = recent.filter((r) => {
-    if (deptFilter && deptOfKind(r.part_master?.kind) !== deptFilter) return false;
-    if (projectFilter && r.part_master?.projects?.code !== projectFilter) return false;
-    if (fromDate && new Date(r.release_date) < new Date(`${fromDate}T00:00:00`)) return false;
-    if (toDate && new Date(r.release_date) > new Date(`${toDate}T23:59:59.999`)) return false;
-    if (orderSearch) {
-      const q = orderSearch.trim().toLowerCase();
-      const hay = [r.release_order, r.part_master?.part_no, r.part_master?.projects?.name, r.note]
-        .some((v) => (v || "").toLowerCase().includes(q));
-      if (!hay) return false;
-    }
-    return true;
-  });
-  const groups = groupReleases(filteredReleases);
-  const hasFilter = fromDate || toDate || projectFilter || orderSearch;
-  function clearFilters() { setFromDate(""); setToDate(""); setProjectFilter(""); setOrderSearch(""); }
-
-  if (viewGroup) {
-    return <ReleaseGroupDetail group={viewGroup} user={user} onBack={() => setViewGroup(null)} goTo={goTo} onHome={() => { setViewGroup(null); goTo && goTo("release"); }} onChanged={load} />;
-  }
-
-  return (
-    <div>
-      <div className="page-head page-head-release">
-        <div>
-          <div className="page-title">ปล่อยงาน (Release)</div>
-          <div className="page-sub">ค้นหา Release ที่เคยปล่อยงาน หรือกด "เพิ่ม Release" เพื่อปล่อยงานใหม่ (วางข้อมูลจาก Excel ได้) · แตะแถวเพื่อดูความคืบหน้า แก้ไข หรือลบ</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <Btn variant="accent" className="release-import-btn" onClick={() => setShowAdd(true)}>
-            <Icon name="plus" size={15} />เพิ่ม Release
-          </Btn>
-          <Btn variant="accent" className="release-import-btn" onClick={() => setShowImport(true)}>
-            <Icon name="folder" size={15} />นำเข้า Release จาก Excel
-          </Btn>
-          <Btn variant="accent" className="release-import-btn" onClick={() => setShowSubAsm(true)}>
-            <Icon name="box" size={15} />เบอร์ประกอบ / แผง
-          </Btn>
-          <Btn variant="accent" className="release-import-btn" onClick={() => setShowBunk(true)}>
-            <Icon name="weight" size={15} />นำเข้าฟอร์มบั้ง (แพ็ก)
-          </Btn>
-        </div>
-      </div>
-
-      <Card title="ค้นหา Release">
-        <div className="grid-2">
-          <Field label="จากวันที่">
-            <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
-          </Field>
-          <Field label="ถึงวันที่">
-            <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
-          </Field>
-          <Field label="โปรเจค">
-            <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}
-              options={projects.map((p) => ({ value: p.code, label: `${p.code} — ${p.name}` }))} />
-          </Field>
-          <Field label="ค้นหา Release Order / Part / หมายเหตุ">
-            <Input value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)} placeholder="เช่น P-009" />
-          </Field>
-        </div>
-        {hasFilter && (
-          <div style={{ marginTop: 4 }}>
-            <Btn variant="ghost" size="sm" onClick={clearFilters}><Icon name="close" size={13} /> ล้างตัวกรอง</Btn>
-          </div>
-        )}
-      </Card>
-
-      <DeptTabs value={deptFilter} onChange={setDeptFilter} />
-
-      <Card title={hasFilter ? `ผลการค้นหา (${groups.length})` : "ประวัติการ Release ล่าสุด"}>
-        <SortControl sort={sort} options={[
-          { k: "date", label: "วันที่" }, { k: "project", label: "โปรเจค" }, { k: "order", label: "Release Order" },
-          { k: "parts", label: "Part No." }, { k: "qty", label: "จำนวน" }, { k: "progress", label: "ความคืบหน้า" }, { k: "weight", label: "น้ำหนักรวม" },
-        ]} />
-        <div className="table-wrap tall-scroll">
-          <table className="data-table responsive-cards">
-            <thead><tr>
-              <SortTh k="date" sort={sort}>วันที่</SortTh>
-              <SortTh k="project" sort={sort}>โปรเจค</SortTh>
-              <SortTh k="order" sort={sort}>Release Order</SortTh>
-              <SortTh k="parts" sort={sort}>Part No.</SortTh>
-              <SortTh k="qty" sort={sort}>จำนวน</SortTh>
-              <SortTh k="progress" sort={sort}>ความคืบหน้า</SortTh>
-              <SortTh k="weight" sort={sort}>น้ำหนักรวม</SortTh>
-              <th>หมายเหตุ</th>
-            </tr></thead>
-            <tbody>
-              {sort.sortRows(groups, {
-                date: (g) => new Date(g.date).getTime() || 0,
-                project: (g) => g.projectCode || "",
-                order: (g) => g.releaseOrder || (g.releases[0]?.part_master?.part_no ?? ""),
-                parts: (g) => g.releases.length,
-                qty: (g) => g.totalQty || 0,
-                weight: (g) => g.totalWeight || 0,
-                progress: (g) => {
-                  const t = g.releases.reduce((s, r) => s + (allUnitStats[r.id]?.total ?? r.qty), 0);
-                  const f = g.releases.reduce((s, r) => s + (allUnitStats[r.id]?.finished || 0), 0);
-                  return t > 0 ? f / t : 0;
-                },
-              }).map((g) => {
-                // รวม stats ของทุก release ในกลุ่มนี้
-                const gFinished = g.releases.reduce((s, r) => s + (allUnitStats[r.id]?.finished || 0), 0);
-                const gTotal = g.releases.reduce((s, r) => s + (allUnitStats[r.id]?.total ?? r.qty), 0);
-                const gPct = gTotal > 0 ? Math.round((gFinished / gTotal) * 100) : null;
-                const statsReady = g.releases.every((r) => r.id in allUnitStats);
-                return (
-                  <tr key={g.key} className="release-row" onClick={() => setViewGroup(g)}>
-                    <td data-label="วันที่">{fmtD(g.date)}</td>
-                    <td data-label="โปรเจค">{g.projectCode}</td>
-                    <td data-label="Release Order">{g.releaseOrder || (g.releases[0]?.part_master?.part_no ?? "-")}</td>
-                    <td data-label="Part No.">{fmtNum(g.releases.length)} Part</td>
-                    <td data-label="จำนวน">{fmtNum(g.totalQty)} ชิ้น</td>
-                    <td data-label="ความคืบหน้า" style={{ minWidth: 160 }}>
-                      {statsReady && gPct !== null ? (
-                        <ProgressBar pct={gPct} finished={gFinished} total={gTotal} />
-                      ) : (
-                        <span style={{ fontSize: 12, color: "var(--muted)" }}>—</span>
-                      )}
-                    </td>
-                    <td data-label="น้ำหนักรวม">{g.totalWeight ? `${fmtNum(g.totalWeight)} กก.` : "-"}</td>
-                    <td data-label="หมายเหตุ">{g.notes.size === 0 ? "-" : g.notes.size === 1 ? [...g.notes][0] : `${g.notes.size} หมายเหตุ`}</td>
-                  </tr>
-                );
-              })}
-              {!loading && groups.length === 0 && (
-                <tr><td colSpan={8} style={{ textAlign: "center", color: "var(--muted)", padding: 20 }}>
-                  {hasFilter ? "ไม่พบ Release ตามเงื่อนไขที่ค้นหา" : "ยังไม่มี Release — กด \"เพิ่ม Release\" เพื่อเริ่ม"}
-                </td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      {showAdd && (
-        <AddReleaseModal
-          user={user}
-          projects={projects}
-          parts={parts}
-          onClose={() => setShowAdd(false)}
-          onNeedProject={() => setShowNewProject(true)}
-          onSaved={async ({ releaseOrder, releasesCreated, partsCreated, unitsCreated }) => {
-            setShowAdd(false);
-            await load();
-            mlsToast(
-              `บันทึก ${releaseOrder} สำเร็จ: ${releasesCreated} รายการ Part` +
-              (unitsCreated ? ` · สร้าง QR ${unitsCreated} ใบ` : "") +
-              (partsCreated > 0 ? ` · สร้าง Part ใหม่ ${partsCreated} รายการ` : ""),
-              "success"
-            );
-          }}
-        />
-      )}
-
-      {showImport && (
-        <ImportReleaseModal
-          user={user}
-          projects={projects}
-          parts={parts}
-          onClose={() => setShowImport(false)}
-          onImported={async ({ unitsCreated, releasesCreated, partsCreated }) => {
-            await load();
-            mlsToast(
-              `นำเข้าสำเร็จ: สร้าง ${releasesCreated} release (${unitsCreated} QR)` +
-              (partsCreated > 0
-                ? ` · สร้าง Part ใหม่ ${partsCreated} รายการ · ⚠ Part ใหม่ยังไม่มี Routing — ไปตั้งขั้นตอนที่ Setup > Part Master ก่อน ไม่งั้นชิ้นงานจะไม่ขึ้นสถานะ "เสร็จ"`
-                : ""),
-              partsCreated > 0 ? "warn" : "success"
-            );
-          }}
-        />
-      )}
-
-      {showSubAsm && (
-        <AssemblyReleaseModal
-          user={user}
-          projects={projects}
-          onClose={() => setShowSubAsm(false)}
-          onNeedProject={() => setShowNewProject(true)}
-          onSaved={async ({ releaseOrder, groups }) => {
-            setShowSubAsm(false);
-            await load();
-            mlsToast(`บันทึก ${releaseOrder} สำเร็จ — ${groups} เบอร์ (ตั้ง BOM/ปล่อยงานแล้ว)`, "success");
-          }}
-        />
-      )}
-
-      {showBunk && (
-        <BunkImportModal
-          user={user}
-          projects={projects}
-          onClose={() => setShowBunk(false)}
-          onNeedProject={() => setShowNewProject(true)}
-          onSaved={async ({ releaseOrder, bunks, createdUnits }) => {
-            setShowBunk(false);
-            await load();
-            const warn = createdUnits && createdUnits.length;
-            mlsToast(
-              `นำเข้าบั้งสำเร็จ: ${bunks} บั้ง (${releaseOrder})` +
-              (warn ? ` · ⚠ สร้างยูนิตใหม่ ${createdUnits.length} รายการที่ยังไม่มีในระบบ (ยังไม่มี QR ให้สแกน) — ${createdUnits.slice(0, 8).join(", ")}${createdUnits.length > 8 ? "…" : ""} · ปล่อยงานยูนิตเหล่านี้ก่อนถึงจะสแกนแพ็กได้` : ""),
-              warn ? "warn" : "success"
-            );
-          }}
-        />
-      )}
-
-      {showNewProject && (
-        <QuickAddProjectModal
-          onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setProjects((prev) => [...prev, project].sort((a, b) => a.code.localeCompare(b.code)));
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 2) SCAN — station setup, then a dedicated full-screen scan flow
-// ══════════════════════════════════════════════════════════════════════════
-// เครื่องจักร + ขั้นตอนไม่ให้เลือกเองอีกต่อไป — ผูกไว้กับตัวพนักงานแล้วตั้งแต่ตอนล็อกอิน
-// (ตั้งค่าที่ Setup > พนักงาน) พนักงานที่ยังไม่ได้ตั้งค่าจะสแกนไม่ได้ จนกว่า Admin จะตั้งให้
-// ── Scan mode constants ────────────────────────────────────────────────────
-// "station" = หน้าเครื่อง: auto-save ทันทีที่สแกน ตามลำดับ routing เลย ไม่ต้องกดยืนยัน
-// "mobile"  = มือถือ: แสดงข้อมูลชิ้นงาน + รอกดยืนยันก่อนบันทึก (ป้องกันสแกนผิด)
-const SCAN_MODES = [
-  {
-    value: "station",
-    label: "หน้าเครื่อง",
-    sub: "สแกนทีละชิ้น มีเสียง · ค้าง 4 วิ แล้วต่อเอง",
-    icon: "machine",
-    tone: "accent",
-  },
-  {
-    value: "mobile",
-    label: "มือถือ",
-    sub: "ตรวจสอบแล้วกดยืนยันก่อนบันทึก",
-    icon: "camera",
-    tone: "steel",
-  },
-];
-
-function ScanPage({ user }) {
-  const [stationOpen, setStationOpen] = useState(false);
-  // จำโหมดที่เลือกไว้ในหน้านี้ (ไม่ข้ามหน้า)
-  const [scanMode, setScanMode] = useState("station");
-  const ready = !!(user.machine && user.operation);
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div className="page-title">สแกนหน้าเครื่องจักร</div>
-          <div className="page-sub">เลือกโหมดให้ตรงกับวิธีใช้งาน แล้วกด "เริ่มสแกน"</div>
-        </div>
-      </div>
-
-      {/* ── สถานีของคุณ ─────────────────────────────────────── */}
-      <Card title="สถานีของคุณ">
-        {ready ? (
-          <div className="grid-2" style={{ marginBottom: 0 }}>
-            <div>
-              <div className="label-el">เครื่อง/สถานีประจำ</div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>{user.machine.code} — {user.machine.name}</div>
-            </div>
-            <div>
-              <div className="label-el">ขั้นตอนประจำ</div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>{user.operation.name}</div>
-            </div>
-          </div>
-        ) : (
-          <div className="empty-state">
-            <Icon name="scan" size={32} />
-            <div className="empty-state-title">ยังไม่ได้ตั้งค่าเครื่อง/สถานี/ขั้นตอนประจำ</div>
-            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
-              แจ้ง Admin ให้ตั้งค่าที่ Setup → พนักงาน ก่อน จึงจะเริ่มสแกนได้
-            </div>
-          </div>
-        )}
-      </Card>
-
-      {/* ── เลือกโหมดสแกน ────────────────────────────────────── */}
-      {ready && (
-        <Card title="เลือกโหมดสแกน">
-          <div className="scan-mode-grid">
-            {SCAN_MODES.map((m) => (
-              <button
-                key={m.value}
-                className={`scan-mode-card${scanMode === m.value ? " active" : ""}`}
-                onClick={() => setScanMode(m.value)}
-              >
-                <div className={`scan-mode-icon tone-${m.tone}`}>
-                  <Icon name={m.icon} size={22} />
-                </div>
-                <div className="scan-mode-label">{m.label}</div>
-                <div className="scan-mode-sub">{m.sub}</div>
-                {scanMode === m.value && (
-                  <div className="scan-mode-badge">
-                    <Icon name="check" size={11} /> เลือกอยู่
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* คำอธิบายโหมดที่เลือก */}
-          <div className="scan-mode-hint">
-            {scanMode === "station" ? (
-              <>
-                <Icon name="bolt" size={13} style={{ flexShrink: 0 }} />
-                <span>
-                  <strong>หน้าเครื่อง</strong> — สแกน <strong>ทีละชิ้น</strong>: ยิง QR 1 ชิ้น → มีเสียงและแจ้งเตือนผล
-                  → ค้างผล 4 วิ แล้ว<strong>สแกนชิ้นถัดไปได้เองอัตโนมัติ</strong> (ไม่ต้องกด · กันยิงรัวและสแกนซ้ำในจังหวะเดียว) เครื่อง/ขั้นตอน/พนักงานบันทึกอัตโนมัติ
-                </span>
-              </>
-            ) : (
-              <>
-                <Icon name="check" size={13} style={{ flexShrink: 0 }} />
-                <span>
-                  <strong>มือถือ</strong> — สแกน QR แล้วดูข้อมูลชิ้นงานก่อน กดยืนยันเองเพื่อบันทึก
-                  เหมาะสำหรับตรวจสอบหรือสแกนนอกสถานีเครื่อง
-                </span>
-              </>
-            )}
-          </div>
-
-          <Btn variant="accent" size="lg" className="btn-block" style={{ marginTop: 14 }} onClick={() => setStationOpen(true)}>
-            <Icon name="scan" size={18} /> เริ่มสแกน — โหมด{scanMode === "station" ? "หน้าเครื่อง" : "มือถือ"}
-          </Btn>
-        </Card>
-      )}
-
-      {stationOpen && (
-        <ScanStation
-          user={user} machine={user.machine} operation={user.operation}
-          mode={scanMode}
-          onExit={() => setStationOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// กรอบวงเล็บสีขาว (แบบกล้องมือถือ) ที่ขยับไปสวมพอดีกับตำแหน่ง QR ที่กำลังอ่านอยู่จริง —
-// ไม่ใช่กรอบคงที่กลางจอ เพื่อให้รู้ชัดว่ากำลังอ่าน QR อันไหนเวลามีหลายอันอยู่ในเฟรมเดียวกัน
-// box: { left, top, width, height } เป็นเปอร์เซ็นต์เทียบกับพื้นที่วิดีโอ (มาจากตำแหน่งจริงที่ jsQR ตรวจเจอ)
-function QrBracketFrame({ box, frozen }) {
-  if (!box) return null;
-  const c = frozen ? "#22c55e" : "#ffffff";
-  const corner = (top, left, right, bottom) => ({
-    position: "absolute", width: 22, height: 22,
-    top, left, right, bottom,
-    borderTop: top !== undefined ? `3px solid ${c}` : undefined,
-    borderBottom: bottom !== undefined ? `3px solid ${c}` : undefined,
-    borderLeft: left !== undefined ? `3px solid ${c}` : undefined,
-    borderRight: right !== undefined ? `3px solid ${c}` : undefined,
-    borderTopLeftRadius: top !== undefined && left !== undefined ? 8 : undefined,
-    borderTopRightRadius: top !== undefined && right !== undefined ? 8 : undefined,
-    borderBottomLeftRadius: bottom !== undefined && left !== undefined ? 8 : undefined,
-    borderBottomRightRadius: bottom !== undefined && right !== undefined ? 8 : undefined,
-    filter: "drop-shadow(0 0 2px rgba(0,0,0,.6))",
-  });
-  return (
-    <div
-      style={{
-        position: "absolute", pointerEvents: "none",
-        left: `${box.left}%`, top: `${box.top}%`, width: `${box.width}%`, height: `${box.height}%`,
-        transition: "left .08s linear, top .08s linear, width .08s linear, height .08s linear",
-      }}
-    >
-      <div style={corner(-2, -2, undefined, undefined)} />
-      <div style={corner(-2, undefined, -2, undefined)} />
-      <div style={corner(undefined, -2, undefined, -2)} />
-      <div style={corner(undefined, undefined, -2, -2)} />
-    </div>
-  );
-}
-
-// แปลงจุดมุมทั้ง 4 ที่ jsQR หาเจอ (พิกัดพิกเซลของเฟรม) ให้เป็นกรอบสี่เหลี่ยม (เปอร์เซ็นต์) พร้อม padding เผื่อขอบเล็กน้อย
-function boxFromQrLocation(location, frameW, frameH) {
-  const xs = [location.topLeftCorner.x, location.topRightCorner.x, location.bottomLeftCorner.x, location.bottomRightCorner.x];
-  const ys = [location.topLeftCorner.y, location.topRightCorner.y, location.bottomLeftCorner.y, location.bottomRightCorner.y];
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const padX = (maxX - minX) * 0.12, padY = (maxY - minY) * 0.12;
-  const left = Math.max(0, minX - padX), top = Math.max(0, minY - padY);
-  const right = Math.min(frameW, maxX + padX), bottom = Math.min(frameH, maxY + padY);
-  return {
-    left: (left / frameW) * 100, top: (top / frameH) * 100,
-    width: ((right - left) / frameW) * 100, height: ((bottom - top) / frameH) * 100,
-  };
-}
-
-function ScanStation({ user, machine, operation, mode = "station", onExit }) {
-  const isStation = mode === "station"; // true = หน้าเครื่อง (auto-save), false = มือถือ (ยืนยันก่อน)
-
-  const [qrInput, setQrInput] = useState("");
-  const [unit, setUnit] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [msg, setMsg] = useState("");
-  const [msgTone, setMsgTone] = useState("muted");
-  // เปิดกล้องอัตโนมัติทันทีที่เข้าหน้าสแกน — พร้อมสแกนเลยไม่ต้องกดเปิดเอง
-  const [cameraOn, setCameraOn] = useState(true);
-  // frozen = เจอ QR แล้ว ภาพค้างไว้ (ไม่สแกนซ้ำ) จนกว่าจะยืนยันหรือกดรีเฟรช
-  const [frozen, setFrozen] = useState(false);
-  const [qrBox, setQrBox] = useState(null); // ตำแหน่ง QR ล่าสุดที่เจอ (เปอร์เซ็นต์) ใช้วาดกรอบให้สวมพอดี
-  const [videoAspect, setVideoAspect] = useState("3 / 4");
-  const [sessionCount, setSessionCount] = useState(0);
-  // station mode: toast ชั่วคราวบนกล้อง (success / warning / danger) แทน bottom sheet
-  const [toast, setToast] = useState(null); // { text, tone }
-  const toastTimerRef = useRef(null);
-  // หน้าเครื่อง: ผลสแกนล่าสุดที่ "ค้างไว้" 4 วิ (สแกนทีละชิ้น) แล้วสแกนชิ้นถัดไปได้เองอัตโนมัติ
-  const [stationResult, setStationResult] = useState(null); // { ok, msg, tone, finished, code }
-  const [countdown, setCountdown] = useState(0);            // วินาทีที่เหลือก่อนสแกนต่ออัตโนมัติ
-  const STATION_HOLD_SEC = 4;
-
-  const [torchOn, setTorchOn] = useState(false);
-  const [torchSupported, setTorchSupported] = useState(false);
-  const [pending, setPending] = useState(scanQueueCount()); // จำนวนสแกนค้างในคิวออฟไลน์
-
-  const inputRef = useRef(null);
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null); // แคนวาสที่ซ่อนไว้ ใช้แค่ถอดพิกเซลไปให้ jsQR อ่าน ไม่ได้แสดงผล
-  const streamRef = useRef(null);
-  const trackRef = useRef(null);  // video track (ใช้เปิด/ปิดไฟฉาย)
-  const rafRef = useRef(null);
-  const frozenRef = useRef(false);
-  const lastScanRef = useRef({ code: "", at: 0 }); // debounce กันอ่านโค้ดเดิมซ้ำรัวๆ
-  const lastDecodeRef = useRef(0);                  // throttle การถอด jsQR
-  const stationTimerRef = useRef(null);             // ตัวจับเวลานับถอยหลัง 4 วิ (auto-advance)
-
-  useEffect(() => { inputRef.current?.focus(); }, [unit]);
-  useEffect(() => { frozenRef.current = frozen; }, [frozen]);
-
-  // ติดตามจำนวนคิวออฟไลน์ + พยายามซิงค์เมื่อเข้าหน้าสแกน
-  useEffect(() => {
-    flushScanQueue().then(() => setPending(scanQueueCount()));
-    const off = onScanQueue((n) => setPending(n));
-    return off;
-  }, []);
-
-  // แสดง toast บนกล้อง (station mode) แล้วหายเองหลัง delay ms
-  function showToast(text, tone = "success", delay = 2000) {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setToast({ text, tone });
-    toastTimerRef.current = setTimeout(() => setToast(null), delay);
-  }
-  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
-
-  // เปิดกล้อง — บังคับใช้กล้องหลัง (ตัวหลัก ไม่ใช่ ultra-wide/telephoto) พร้อมสแกนทันที
-  // และวนอ่านเฟรมด้วย jsQR เพื่อรู้ตำแหน่งจริงของ QR ในภาพ (เอาไว้วาดกรอบให้สวมพอดี)
-  useEffect(() => {
-    if (!cameraOn) return;
-    let cancelled = false;
-
-    function onDecoded(decodedText) {
-      if (frozenRef.current) return; // มีผลค้างอยู่แล้ว รอยืนยัน/รีเฟรชก่อน
-      // debounce: กันอ่านโค้ดเดิมซ้ำรัวๆ (เช่น QR เดิมยังค้างในเฟรมหลังบันทึกไปแล้ว)
-      const nowT = Date.now();
-      if (decodedText === lastScanRef.current.code && nowT - lastScanRef.current.at < 2500) return;
-      lastScanRef.current = { code: decodedText, at: nowT };
-      frozenRef.current = true;
-      setFrozen(true);
-      videoRef.current?.pause(); // ค้างภาพไว้ให้เห็นว่าเจอชิ้นไหน
-      setQrInput(decodedText);
-      lookup(decodedText);
-    }
-
-    async function pickRearDeviceId() {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const back = devices.filter((d) => d.kind === "videoinput" && /back|rear|environment/i.test(d.label || ""));
-        // เลี่ยงเลนส์ ultra-wide / telephoto ถ้ามีตัวเลือก เอากล้องหลังตัวหลักจริงๆ
-        const main = back.find((d) => !/ultra|wide[\s-]?angle|tele(photo)?|0\.5x/i.test(d.label || "")) || back[0];
-        return main?.deviceId || null;
-      } catch (_) {
-        return null; // ยังไม่ได้สิทธิ์กล้อง (ชื่อกล้องจะยังไม่ขึ้น) — ไปใช้ facingMode แทน
-      }
-    }
-
-    async function openCamera() {
-      const deviceId = await pickRearDeviceId();
-      if (cancelled) return;
-      const attempts = [
-        deviceId ? { video: { deviceId: { exact: deviceId } } } : null,
-        { video: { facingMode: { exact: "environment" } } },
-        { video: { facingMode: "environment" } },
-      ].filter(Boolean);
-      let stream = null;
-      for (const constraints of attempts) {
-        try { stream = await navigator.mediaDevices.getUserMedia(constraints); break; } catch (_) { /* ลองตัวถัดไป */ }
-      }
-      if (cancelled) { stream?.getTracks().forEach((t) => t.stop()); return; }
-      if (!stream) { setMsg("เปิดกล้องไม่สำเร็จ — ตรวจสอบสิทธิ์การเข้าถึงกล้อง"); setMsgTone("danger"); return; }
-      streamRef.current = stream;
-      const video = videoRef.current;
-      if (!video) { stream.getTracks().forEach((t) => t.stop()); return; }
-      video.srcObject = stream;
-      video.onloadedmetadata = () => {
-        if (video.videoWidth && video.videoHeight) setVideoAspect(`${video.videoWidth} / ${video.videoHeight}`);
-      };
-      try { await video.play(); } catch (_) {}
-      // เก็บ track ไว้เปิด/ปิดไฟฉาย + ตรวจว่ารองรับไหม
-      const track = stream.getVideoTracks?.()[0] || null;
-      trackRef.current = track;
-      try { const caps = track?.getCapabilities?.(); setTorchSupported(!!(caps && caps.torch)); } catch (_) { setTorchSupported(false); }
-      setTorchOn(false);
-      decodeLoop();
-    }
-
-    async function decodeLoop() {
-      const jsQRModule = await import("jsqr");
-      const jsQR = jsQRModule.default || jsQRModule;
-      if (cancelled) return;
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas) return;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-      const tick = () => {
-        if (cancelled) return;
-        // throttle การถอด QR ~9 ครั้ง/วินาที (พอสำหรับสแกน แต่ลดภาระ CPU/แบตมือถือ)
-        const nowT = Date.now();
-        if (!frozenRef.current && video.readyState === video.HAVE_ENOUGH_DATA && nowT - lastDecodeRef.current > 110) {
-          lastDecodeRef.current = nowT;
-          const w = video.videoWidth, h = video.videoHeight;
-          if (w && h) {
-            canvas.width = w; canvas.height = h;
-            ctx.drawImage(video, 0, 0, w, h);
-            const imageData = ctx.getImageData(0, 0, w, h);
-            const code = jsQR(imageData.data, w, h, { inversionAttempts: "dontInvert" });
-            if (code) { setQrBox(boxFromQrLocation(code.location, w, h)); onDecoded(code.data); }
-            else setQrBox(null);
-          }
-        }
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      tick();
-    }
-
-    openCamera();
-
-    return () => {
-      cancelled = true;
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-      trackRef.current = null;
-      setTorchSupported(false); setTorchOn(false);
-      setQrBox(null);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraOn]);
-
-  // เปิด/ปิดไฟฉาย (ถ้าอุปกรณ์รองรับ) — ช่วยสแกนในพื้นที่มืด
-  async function toggleTorch() {
-    const track = trackRef.current;
-    if (!track) return;
-    try { await track.applyConstraints({ advanced: [{ torch: !torchOn }] }); setTorchOn((v) => !v); }
-    catch (_) { setTorchSupported(false); }
-  }
-
-  // กลับไปสแกนต่อ — เล่นวิดีโอต่อ + เคลียร์กรอบเดิม ให้ jsQR เริ่มตามหา QR ใหม่
-  function resumeScanning() {
-    frozenRef.current = false;
-    setFrozen(false);
-    setQrBox(null);
-    videoRef.current?.play().catch(() => {});
-  }
-
-  function clearStationTimer() {
-    if (stationTimerRef.current) { clearInterval(stationTimerRef.current); stationTimerRef.current = null; }
-  }
-
-  // ยกเลิกผลที่ค้างไว้ แล้วสแกนใหม่ (โดยไม่ต้องกดยืนยัน)
-  function rescan() {
-    clearStationTimer(); setCountdown(0);
-    setUnit(null); setHistory([]); setMsg(""); setQrInput(""); setStationResult(null);
-    resumeScanning();
-  }
-
-  // หน้าเครื่อง: สแกนชิ้นถัดไป (เคลียร์ผลที่ค้าง + เริ่มสแกนใหม่) — เรียกอัตโนมัติเมื่อครบ 4 วิ หรือกดเอง
-  function nextScan() {
-    clearStationTimer(); setCountdown(0);
-    setStationResult(null);
-    setQrInput(""); setUnit(null); setHistory([]);
-    // คงการ debounce โค้ดล่าสุดไว้ชั่วครู่ กันสแกน "ชิ้นเดิม" ที่ยังค้างในเฟรมซ้ำทันที
-    lastScanRef.current = { code: lastScanRef.current.code, at: Date.now() };
-    resumeScanning();
-    inputRef.current?.focus();
-  }
-
-  // เริ่มนับถอยหลัง 4 วิ แล้วสแกนชิ้นถัดไปให้เองอัตโนมัติ
-  function startStationHold() {
-    clearStationTimer();
-    let n = STATION_HOLD_SEC;
-    setCountdown(n);
-    stationTimerRef.current = setInterval(() => {
-      n -= 1;
-      if (n <= 0) { nextScan(); }
-      else setCountdown(n);
-    }, 1000);
-  }
-
-  // เคลียร์ timer เมื่อออกจากหน้าสแกน
-  useEffect(() => () => clearStationTimer(), []);
-
-  // ── core save logic — shared between both modes ────────────────────────
-  // คืนค่า { ok, msg, tone } เพื่อให้ caller ตัดสินใจจะแสดงผลยังไง (toast vs sheet-msg)
-  // แปลงผลลัพธ์ RPC เป็นข้อความ/โทน (+ เสียง/สั่น) — ใช้ร่วมทั้ง 2 โหมด
-  function interpret(res) {
-    if (res.queued) {
-      const r = { ok: true, msg: "บันทึกออฟไลน์ไว้แล้ว — จะซิงค์อัตโนมัติเมื่อเน็ตกลับ", tone: "warning" };
-      feedback("warning"); return r;
-    }
-    if (!res.ok) {
-      const reasonMsg = {
-        not_found: "ไม่พบชิ้นงานนี้ในระบบ",
-        machine_cannot: `เครื่อง ${machine?.code || ""} ไม่ได้ตั้งค่าให้ทำขั้นตอน "${operation?.name || ""}"`,
-        duplicate: `ผ่านขั้นตอน "${operation?.name || ""}" ไปแล้ว — ไม่บันทึกซ้ำ`,
-        no_station: "บัญชีนี้ยังไม่ได้ตั้งเครื่อง/สถานี/ขั้นตอนประจำ — แจ้ง Admin",
-        unauthorized: "เซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่",
-        storage_full: "ที่เก็บข้อมูลในเครื่องเต็ม — บันทึกไม่สำเร็จ ลบข้อมูล/แอปอื่นแล้วลองใหม่",
-        error: "บันทึกไม่สำเร็จ" + (res.message ? ": " + res.message : ""),
-      };
-      const tone = res.reason === "duplicate" ? "warning" : "danger";
-      feedback(tone);
-      return { ok: false, msg: reasonMsg[res.reason] || "บันทึกไม่สำเร็จ", tone };
-    }
-    const total = res.total || 0, step = res.step || 0;
-    let msg, tone;
-    if (res.finished) { msg = "✓ ครบทุกขั้นตอนแล้ว!"; tone = "success"; }
-    else if (res.out_of_order) { msg = `⚠ บันทึกแล้ว (ขั้นตอน "${operation?.name || ""}" — ลำดับไม่ตรง routing)`; tone = "warning"; }
-    else { msg = total > 0 ? `✓ บันทึกแล้ว — ขั้น ${step}/${total}` : "✓ บันทึกการสแกนเรียบร้อย"; tone = "success"; }
-    feedback(tone);
-    return { ok: true, msg, tone, finished: res.finished };
-  }
-
-  // โหมดมือถือ: บันทึกด้วย unit ที่ lookup ไว้แล้ว (เครื่อง/ขั้นตอน/พนักงานมาจาก token)
-  async function doSave(u) {
-    if (!u) return { ok: false, msg: "ข้อมูลไม่ครบ", tone: "danger" };
-    return interpret(await recordScan({ unitId: u.id }));
-  }
-
-  async function lookup(code) {
-    const c = (code ?? qrInput).trim();
-    if (!c) return;
-    // หน้าเครื่อง: ถ้ายังมีผลสแกนค้างอยู่ ไม่รับสแกนใหม่ (รวมถึงเครื่องยิงบาร์โค้ด) จนกดสแกนชิ้นถัดไป
-    if (isStation && stationResult) return;
-    if (isStation) {
-      // หน้าเครื่อง: สแกน "ทีละชิ้น" — บันทึกแล้วค้างภาพ + ค้างผลไว้ (มีเสียง+แจ้งเตือน)
-      // ต้องกด "สแกนชิ้นถัดไป" ก่อนจึงจะสแกนต่อ → กันยิงรัว และกันสแกนซ้ำในจังหวะเดียวกัน
-      frozenRef.current = true; setFrozen(true); videoRef.current?.pause();
-      const result = interpret(await recordScanByQr(c)); // interpret เล่นเสียง/สั่นให้แล้ว
-      if (result.ok) setSessionCount((n) => n + 1);
-      setStationResult({ ...result, code: c });
-      startStationHold(); // ค้างผล 4 วิ แล้วสแกนชิ้นถัดไปเองอัตโนมัติ
-    } else {
-      // มือถือ: lookup แล้วแสดงใน sheet รอกดยืนยัน
-      setMsg("กำลังค้นหา..."); setMsgTone("muted");
-      const u = await findUnitByQr(c);
-      if (!u) { setUnit(null); setHistory([]); setMsg("ไม่พบ QR นี้ในระบบ"); setMsgTone("danger"); return; }
-      const h = await getUnitHistory(u.id);
-      setUnit(u); setHistory(h); setMsg("");
-      const doneOps = h.map((x) => x.operation?.name).filter(Boolean);
-      const next = nextOpFor(u.part_master?.routing, doneOps);
-      if (next && operation && next !== operation.name) {
-        setMsg(`ขั้นตอนถัดไปของชิ้นนี้คือ "${next}" ไม่ใช่ "${operation.name}" — ตรวจสอบก่อนบันทึก`);
-        setMsgTone("warning");
-      }
-    }
-  }
-
-  function onQrKeyDown(e) { if (e.key === "Enter") { e.preventDefault(); lookup(); } }
-
-  // มือถือ mode เท่านั้น — กดยืนยันก่อนบันทึก
-  async function confirmScan() {
-    if (!unit) return;
-    const result = await doSave(unit);
-    if (result.ok) {
-      setMsg(result.msg);
-      setMsgTone(result.tone);
-      setSessionCount((c) => c + 1);
-      setQrInput(""); setUnit(null); setHistory([]);
-      resumeScanning();
-      setTimeout(() => setMsg(""), 2500);
-    } else {
-      setMsg(result.msg);
-      setMsgTone(result.tone);
-    }
-    inputRef.current?.focus();
-  }
-
-  const doneOps = history.map((x) => x.operation?.name).filter(Boolean);
-
-  return (
-    <div className="scan-station">
-      <div className="scan-topbar">
-        <div className="icon-btn" onClick={onExit} style={{ background: "rgba(255,255,255,.08)", borderColor: "rgba(255,255,255,.14)" }}>
-          <Icon name="arrowLeft" size={18} style={{ stroke: "#fff" }} />
-        </div>
-        <div className="scan-topbar-info">
-          <div className="scan-topbar-title">{machine?.code} — {machine?.name}</div>
-          <div className="scan-topbar-sub">
-            ขั้นตอน: {operation?.name}
-            <span className={`scan-mode-pill ${isStation ? "station" : "mobile"}`}>
-              {isStation ? "หน้าเครื่อง" : "มือถือ"}
-            </span>
-          </div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-          <div className="scan-counter">สแกนแล้ว {sessionCount} ชิ้น</div>
-          {pending > 0 && (
-            <div className="scan-counter" style={{ color: "var(--warning)", background: "rgba(245,158,11,.16)", borderColor: "rgba(245,158,11,.4)" }}
-              title="สแกนที่ยังไม่ได้ส่งขึ้นเซิร์ฟเวอร์ (จะซิงค์อัตโนมัติเมื่อเน็ตกลับ)">
-              <Icon name="clock" size={13} style={{ verticalAlign: "-2px", marginInlineEnd: 4 }} />ค้างซิงค์ {pending}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="scan-viewport">
-        {cameraOn ? (
-          <div style={{ position: "relative", width: "min(92vw,420px)", aspectRatio: videoAspect, overflow: "hidden", borderRadius: 16, background: "#000" }}>
-            <video ref={videoRef} playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-            <canvas ref={canvasRef} style={{ display: "none" }} />
-            <QrBracketFrame box={qrBox} frozen={frozen} />
-            {!qrBox && !frozen && (
-              <div style={{
-                position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)",
-                whiteSpace: "nowrap", fontSize: 12, color: "#fff", background: "rgba(0,0,0,.5)",
-                padding: "4px 10px", borderRadius: 20, pointerEvents: "none",
-              }}>
-                เล็งกล้องไปที่ QR code
-              </div>
-            )}
-            {/* Toast overlay — แสดงเฉพาะ station mode */}
-            {toast && (
-              <div className={`scan-toast tone-${toast.tone}`}>
-                {toast.tone === "success" && <Icon name="check" size={15} />}
-                {toast.tone === "warning" && <Icon name="clock" size={15} />}
-                {toast.tone === "danger" && <Icon name="close" size={15} />}
-                {toast.text}
-              </div>
-            )}
-          </div>
-        ) : unit ? (
-          <div className="scan-idle-hint">
-            <Icon name="check" size={40} />
-            <div>พบชิ้นงานแล้ว — ดูรายละเอียดด้านล่าง</div>
-          </div>
-        ) : (
-          <div className="scan-frame">
-            <div className="corner tl" /><div className="corner tr" /><div className="corner bl" /><div className="corner br" />
-            <div className="scan-line" />
-            {/* Toast overlay เมื่อกล้องปิด */}
-            {toast && (
-              <div className={`scan-toast scan-toast-center tone-${toast.tone}`}>
-                {toast.text}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="scan-manual">
-        <div style={{ display: "flex", gap: 8 }}>
-          <Input ref={inputRef} value={qrInput} onChange={(e) => setQrInput(e.target.value)} onKeyDown={onQrKeyDown}
-            placeholder="ยิงบาร์โค้ด หรือพิมพ์รหัส QR แล้วกด Enter" autoFocus />
-          <Btn variant="accent" onClick={() => lookup()}><Icon name="search" size={16} /></Btn>
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <button className="btn scan-toggle-cam" style={{ marginTop: 0, flex: 1 }} onClick={() => setCameraOn((v) => !v)}>
-            <Icon name="camera" size={15} style={{ marginRight: 6 }} />{cameraOn ? "ปิดกล้อง" : "เปิดกล้องสแกน QR"}
-          </button>
-          {cameraOn && torchSupported && (
-            <button className="btn scan-toggle-cam" style={{ marginTop: 0, width: 120, borderStyle: "solid",
-              background: torchOn ? "rgba(245,158,11,.18)" : "transparent",
-              borderColor: torchOn ? "var(--warning)" : "rgba(255,255,255,.22)",
-              color: torchOn ? "var(--warning)" : "rgba(255,255,255,.75)" }} onClick={toggleTorch}>
-              <Icon name="bolt" size={15} style={{ marginRight: 6 }} />{torchOn ? "ปิดไฟ" : "ไฟฉาย"}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Station mode: ผลสแกนทีละชิ้น — ค้างไว้จนกดสแกนชิ้นถัดไป */}
-      {isStation && stationResult && (
-        <div className="scan-sheet">
-          <div className="scan-sheet-handle" />
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: "2px 4px 6px", textAlign: "center" }}>
-            <div style={{
-              width: 56, height: 56, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-              background: stationResult.tone === "success" ? "rgba(34,197,94,.15)" : stationResult.tone === "warning" ? "rgba(245,158,11,.15)" : "rgba(239,68,68,.15)",
-            }}>
-              <Icon
-                name={stationResult.tone === "success" ? "check" : stationResult.tone === "warning" ? "clock" : "close"}
-                size={30}
-                style={{ stroke: stationResult.tone === "success" ? "var(--success)" : stationResult.tone === "warning" ? "var(--warning)" : "var(--danger)" }}
-              />
-            </div>
-            <div style={{
-              fontSize: 15.5, fontWeight: 700, lineHeight: 1.4,
-              color: stationResult.tone === "success" ? "var(--success)" : stationResult.tone === "warning" ? "var(--warning)" : "var(--danger)",
-            }}>{stationResult.msg}</div>
-            {stationResult.code && (
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--muted)", wordBreak: "break-all" }}>{stationResult.code}</div>
-            )}
-          </div>
-          <div style={{ textAlign: "center", fontSize: 13, color: "var(--muted)", marginBottom: 10 }}>
-            พร้อมสแกนชิ้นถัดไปใน <b style={{ color: "var(--accent-dk)", fontSize: 15 }}>{countdown}</b> วิ…
-          </div>
-          <Btn variant="ghost" size="lg" className="btn-block" onClick={nextScan}>
-            <Icon name="scan" size={18} /> สแกนต่อทันที
-          </Btn>
-        </div>
-      )}
-
-      {/* Mobile mode only: bottom sheet ยืนยันก่อนบันทึก */}
-      {!isStation && (msg || unit) && (
-        <div className="scan-sheet">
-          <div className="scan-sheet-handle" />
-          {msg && (
-            <div className="scan-msg" style={{
-              color: msgTone === "danger" ? "var(--danger-hi)" : msgTone === "warning" ? "var(--warning)" : msgTone === "success" ? "var(--success-hi)" : "var(--text)",
-            }}>{msg}</div>
-          )}
-          {unit && (
-            <div style={{ padding: "0 2px" }}>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--text)", fontWeight: 600, marginBottom: 4 }}>
-                {unit.qr_code}
-              </div>
-              <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 10 }}>
-                {unit.part_master?.part_no} — {unit.part_master?.part_name}
-              </div>
-              <RoutingRail routing={unit.part_master?.routing} doneOps={doneOps} />
-              <div className="scan-info-grid">
-                <div className="scan-info-cell">
-                  <div className="scan-info-label">โปรเจค</div>
-                  <div className="scan-info-value">{unit.part_master?.projects?.name || "-"}</div>
-                </div>
-                <div className="scan-info-cell">
-                  <div className="scan-info-label">Release</div>
-                  <div className="scan-info-value">{unit.release?.release_date ? fmtDT(unit.release.release_date) : "-"}</div>
-                </div>
-                <div className="scan-info-cell">
-                  <div className="scan-info-label">น้ำหนัก</div>
-                  <div className="scan-info-value">{unit.weight ? `${fmtNum(unit.weight)} กก.` : "-"}</div>
-                </div>
-                <div className="scan-info-cell">
-                  <div className="scan-info-label">ความยาว</div>
-                  <div className="scan-info-value">{unit.length_mm ? `${fmtNum(unit.length_mm)} มม.` : "-"}</div>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <Btn variant="success" size="lg" className="btn-block" onClick={confirmScan}>
-                  <Icon name="check" size={17} /> ยืนยันการสแกน
-                </Btn>
-                <Btn variant="ghost" size="lg" onClick={rescan} title="สแกนใหม่โดยไม่บันทึกรายการนี้">
-                  <Icon name="refresh" size={17} />
-                </Btn>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 3) FINISHED PART
-// ══════════════════════════════════════════════════════════════════════════
-// เนื้อหา Finished Part (สถิติ + ตาราง) — ใช้ซ้ำได้ทั้งหน้าเดี่ยวและฝังใน Report
-function FinishedPartSection() {
-  const [units, setUnits] = useState([]);
-  const sort = useTableSort();
-  useEffect(() => { getAllUnitsFull("finished").then(setUnits); }, []);
-  const totalWeight = units.reduce((s, u) => s + Number(u.weight || u.part_master?.unit_weight || 0), 0);
-  return (
-    <>
-      <div className="stat-row">
-        <StatCard label="ชิ้นที่เสร็จทั้งหมด" value={units.length.toLocaleString()} icon="check" />
-        <StatCard label="น้ำหนักวัสดุ (กก.)" value={fmtNum(totalWeight)} icon="weight" />
-      </div>
-      <Card title="รายการชิ้นงานที่เสร็จสมบูรณ์">
-        {units.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="check" size={32} />
-            <div className="empty-state-title">ยังไม่มีชิ้นงานที่เสร็จสมบูรณ์</div>
-            <div className="empty-state-sub">รายการจะปรากฏที่นี่เมื่อชิ้นงานผ่านครบทุกขั้นตอนตาม Routing</div>
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead><tr>
-                <SortTh k="qr" sort={sort}>QR</SortTh>
-                <SortTh k="part" sort={sort}>Part</SortTh>
-                <SortTh k="proj" sort={sort}>โปรเจค</SortTh>
-                <SortTh k="weight" sort={sort}>น้ำหนัก</SortTh>
-                <SortTh k="len" sort={sort}>ความยาว</SortTh>
-              </tr></thead>
-              <tbody>
-                {sort.sortRows(units, {
-                  qr: (u) => u.qr_code || "", part: (u) => u.part_master?.part_no || "",
-                  proj: (u) => u.part_master?.projects?.name || "",
-                  weight: (u) => Number(u.weight || u.part_master?.unit_weight || 0),
-                  len: (u) => Number(u.length_mm || u.part_master?.default_length_mm || 0),
-                }).map((u) => (
-                  <tr key={u.id}>
-                    <td style={{ fontFamily: "var(--font-mono)" }}>{u.qr_code}</td>
-                    <td style={{ whiteSpace: "nowrap" }}>{u.part_master?.part_no} — {u.part_master?.part_name}</td>
-                    <td>{u.part_master?.projects?.name || "-"}</td>
-                    <td>{fmtNum(u.weight || u.part_master?.unit_weight)}</td>
-                    <td>{u.length_mm || u.part_master?.default_length_mm ? `${fmtNum(u.length_mm || u.part_master?.default_length_mm)} มม.` : "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-    </>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 4) QR / LABELS — reprint labels for any past release lot, true-size (2×2cm default)
-// ══════════════════════════════════════════════════════════════════════════
-function QrLabelsPage({ initialReleaseId, onConsumeInitial }) {
-  const [releases, setReleases] = useState([]);
-  const [parts, setParts] = useState([]);
-  const [projects, setProjects] = useState([]);
-  const [releaseId, setReleaseId] = useState("");
-  const [units, setUnits] = useState([]);
-  const [selected, setSelected] = useState(new Set());
-  const [loading, setLoading] = useState(false);
-
-  const [labelPreset, setLabelPreset] = useState("76x12");
-  const [customW, setCustomW] = useState(20);
-  const [customH, setCustomH] = useState(20);
-  const [showCode, setShowCode] = useState(false);
-  const [printMode, setPrintMode] = useState("roll");   // ค่าเริ่มต้น: 1 ป้าย/หน้า ขนาดเท่าจริง
-  // ชนิดป้าย: 'unit' = ป้ายรายชิ้น (ติดทุกชิ้น — ชิ้นใหญ่) | 'lot' = ป้ายรวมล็อต 1 ใบ (ชิ้นเล็ก สแกนแล้วกรอกจำนวน)
-  const [labelScope, setLabelScope] = useState("unit");
-  // กรองล็อตแบบดรอปดาวลูกโซ่: Projects → Release (Release Order) → Part (ล็อต) + ช่องค้นหาอิสระ
-  const [projectFilter, setProjectFilter] = useState("");
-  const [releaseOrder, setReleaseOrder] = useState("");
-  const [search, setSearch] = useState("");
-  const [deptFilter, setDeptFilter] = useState("machine"); // แยกแผนก (เหมือนหน้า Release/รายงาน): machine/assembly/packing
-  const gridRef = useRef(null);   // กรอบเลื่อนตาราง QR (ใช้ปุ่ม "ขึ้นบนสุด")
-  const [committedKey, setCommittedKey] = useState(""); // ★ โหลด QR เฉพาะหลังกด "ค้นหา" (กันโหลดหมื่นใบทันที)
-
-  useEffect(() => {
-    (async () => {
-      setReleases(await listRows("releases", { order: "release_date", ascending: false }));
-      setParts(await listRows("part_master", { order: "part_no" }));
-      setProjects(await listRows("projects", { order: "code" }));
-    })();
-  }, []);
-
-  // มาจากปุ่ม "พิมพ์ QR" ในหน้ารายละเอียด Release — เลือกล็อต + ค้นหาให้อัตโนมัติ
-  useEffect(() => {
-    if (initialReleaseId) {
-      setReleaseId(initialReleaseId);
-      setCommittedKey(initialReleaseId);   // จากปุ่มพิมพ์ QR = โชว์เลย ไม่ต้องกดค้นหา
-      onConsumeInitial && onConsumeInitial();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialReleaseId]);
-
-  function partOf(r) { return parts.find((p) => p.id === r.part_master_id); }
-
-  // ── ตัวกรองลูกโซ่ + ช่องค้นหาอิสระ (คำนวณก่อน effect โหลด QR) ─────────────
-  const q = search.trim().toLowerCase();
-  const relHay = (r) => {
-    const part = partOf(r);
-    const proj = projects.find((p) => p.id === part?.project_id);
-    return [fmtDT(r.release_date), part?.part_no, part?.part_name, r.release_order, proj?.code, proj?.name]
-      .filter(Boolean).join(" ").toLowerCase();
-  };
-  const matchSearch = (r) => !q || relHay(r).includes(q);
-  const relsInProject = releases.filter((r) =>
-    (!deptFilter || deptOfKind(partOf(r)?.kind) === deptFilter)
-    && (!projectFilter || partOf(r)?.project_id === projectFilter) && matchSearch(r));
-  const releaseOrders = Array.from(new Set(relsInProject.map((r) => r.release_order).filter(Boolean))).sort();
-  const filteredReleases = relsInProject.filter((r) => !releaseOrder || r.release_order === releaseOrder);
-  const hasFilter = !!(projectFilter || releaseOrder || q || releaseId);
-
-  // ★ ล็อตที่จะโชว์ QR: เลือก Part เจาะจง = ล็อตนั้น · เลือกแค่ Project/Release = "ทุกล็อต" ในตัวกรอง
-  const activeReleaseIds = releaseId
-    ? [releaseId]
-    : ((projectFilter || releaseOrder || q) ? filteredReleases.map((r) => r.id) : []);
-  const activeIdsKey = activeReleaseIds.join(",");
-
-  // โหลดชิ้นงาน (QR) — เฉพาะ "หลังกดค้นหา" (committedKey) เท่านั้น · แบ่ง batch กัน URL ยาว + แบ่งหน้ากันเกิน 1000
-  useEffect(() => {
-    if (!committedKey) { setUnits([]); setSelected(new Set()); return; }
-    let alive = true;
-    setLoading(true);
-    (async () => {
-      const ids = committedKey.split(",");
-      const out = [];
-      for (let i = 0; i < ids.length; i += 60) {
-        const chunk = ids.slice(i, i + 60);
-        let from = 0;
-        for (;;) {
-          const { data, error } = await supabase
-            .from("part_units")
-            .select("id, unit_no, qr_code, release_id, part_master_id")
-            .in("release_id", chunk)
-            .order("release_id", { ascending: true }).order("unit_no", { ascending: true })
-            .range(from, from + 999);
-          if (error || !data || !data.length) break;
-          out.push(...data);
-          if (data.length < 1000) break;
-          from += 1000;
-        }
-      }
-      if (alive) { setUnits(out); setLoading(false); }
-    })();
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committedKey]);
-
-  // 1 ใบต่อ 1 พาร์ท (ตัวแทนใบแรกของแต่ละล็อต) — สำหรับป้ายรวมล็อต / เลือกหลายพาร์ท
-  const lotReps = (() => {
-    const seen = new Set(); const reps = [];
-    for (const u of units) if (!seen.has(u.release_id)) { seen.add(u.release_id); reps.push(u); }
-    return reps;
-  })();
-  const multi = lotReps.length > 1;                  // เลือกหลายพาร์ท (ใช้ปรับข้อความอธิบาย)
-  const effScope = labelScope;                       // เลือกป้ายรายชิ้น (รันเบอร์) ได้แม้เลือกหลายพาร์ท
-  const displayed = effScope === "unit" ? units : lotReps;
-
-  // เลือกทุกใบที่แสดงโดยอัตโนมัติ
-  useEffect(() => {
-    setSelected(new Set(displayed.map((u) => u.id)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committedKey, effScope, units.length]);
-
-  // ป้าย QR ที่ต้องเรนเดอร์ "ซ่อน" เพิ่มตอนพิมพ์ (เฉพาะใบที่เลือกแต่ไม่อยู่ในพรีวิว 600 ใบแรก)
-  //   ★ ไม่เรนเดอร์ล่วงหน้าทั้งหมดตอนค้นหา → เลิกจอค้างเวลาล็อตใหญ่ (หมื่นใบ)
-  const [printHidden, setPrintHidden] = useState([]);
-  const [preparingPrint, setPreparingPrint] = useState(false);
-  const pendingPrintRef = useRef(null);
-
-  function toggle(id) {
-    setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  }
-  function toggleAll() {
-    setSelected((s) => (s.size === displayed.length ? new Set() : new Set(displayed.map((u) => u.id))));
-  }
-
-  function currentSize() {
-    if (labelPreset === "custom") return { w: Number(customW) || 20, h: Number(customH) || 20 };
-    const p = LABEL_PRESETS.find((x) => x.value === labelPreset);
-    return { w: p.w, h: p.h };
-  }
-  function doPrint() {
-    const picked = displayed.filter((u) => selected.has(u.id));
-    if (!picked.length) { mlsToast("กรุณาเลือกอย่างน้อย 1 ใบ", "warn"); return; }
-    // ใบที่เลือกแต่ไม่อยู่ในพรีวิว 600 ใบแรก ต้องเรนเดอร์ QR ซ่อนก่อน (printLabels อ่านจาก DOM)
-    const first600 = new Set(displayed.slice(0, 600).map((u) => u.id));
-    const needHidden = picked.filter((u) => !first600.has(u.id));
-    if (needHidden.length) {
-      pendingPrintRef.current = picked;
-      setPreparingPrint(true);
-      setPrintHidden(needHidden);        // เรนเดอร์เสร็จแล้ว effect จะสั่งพิมพ์ต่อ
-      return;
-    }
-    runPrint(picked);
-  }
-
-  // เมื่อ QR ซ่อนถูกเรนเดอร์ครบใน DOM แล้ว → สั่งพิมพ์ (แล้วเก็บกวาด)
-  useEffect(() => {
-    if (!preparingPrint || !pendingPrintRef.current) return;
-    const picked = pendingPrintRef.current;
-    pendingPrintRef.current = null;
-    // รอ 1 เฟรมให้ DOM วาด QR ที่เพิ่งเพิ่มเสร็จก่อนพิมพ์
-    const id = requestAnimationFrame(() => requestAnimationFrame(() => {
-      runPrint(picked);
-      setPreparingPrint(false);
-      setPrintHidden([]);                // เคลียร์ QR ซ่อนออกจาก DOM หลังพิมพ์
-    }));
-    return () => cancelAnimationFrame(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [printHidden, preparingPrint]);
-
-  function runPrint(picked) {
-    const { w, h } = currentSize();
-    // เติมข้อมูลลงแต่ละป้าย: อ้างอิง Release ของแต่ละใบเอง (รองรับหลายพาร์ท)
-    const chosen = picked.map((u) => {
-      const rel = releases.find((r) => r.id === u.release_id) || {};
-      const total = rel.qty;
-      const part = parts.find((p) => p.id === u.part_master_id) || {};
-      const proj = projects.find((p) => p.id === part.project_id) || {};
-      return {
-        ...u,
-        _label: {
-          projectNumber: proj.code || "",
-          projectName: proj.name || "",
-          partNo: part.part_no || "",
-          mdfNo: part.mdf_no ?? "-",
-          relNo: rel.release_order || "",
-          qtyText: effScope === "lot"
-            ? (total != null ? `รวม ${total} ชิ้น` : "")   // ป้ายรวมล็อต: โชว์จำนวนทั้งล็อต
-            : ((u.unit_no != null && total != null)          // ป้ายรายชิ้น: X OF Y
-                ? `${u.unit_no} OF ${total}`
-                : (u.unit_no != null ? String(u.unit_no) : "")),
-        },
-      };
-    });
-    printLabels(chosen, { widthMm: w, heightMm: h, mode: printMode, title: "Part labels" });
-  }
-
-  function doSearch() { setCommittedKey(activeIdsKey); }   // กดค้นหา = โหลด/แสดง QR ตามตัวกรองปัจจุบัน
-  function clearSearch() { setProjectFilter(""); setReleaseOrder(""); setSearch(""); setReleaseId(""); setCommittedKey(""); }   // ล้างทั้งหมด
-  const searchDirty = activeIdsKey !== committedKey;   // ตัวกรองเปลี่ยนหลังค้นหา → ต้องกดค้นหาใหม่
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div className="page-title">พิมพ์ QR / ป้าย</div>
-          <div className="page-sub">ค้นหาล็อตที่เคย Release แล้วพิมพ์ป้ายซ้ำได้ทุกเมื่อ — ค่าเริ่มต้นขนาด 2×2 ซม.</div>
-        </div>
-      </div>
-
-      <DeptTabs value={deptFilter} onChange={(v) => { setDeptFilter(v); setReleaseOrder(""); setReleaseId(""); }} />
-
-      <Card title="เลือกล็อตที่ต้องการพิมพ์">
-        {/* ช่องค้นหาอิสระ (กรองตัวเลือกในดรอปดาวน์) */}
-        <div className={`lot-search ${hasFilter ? "has" : ""}`}>
-          <svg className="lot-search-ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
-          </svg>
-          <input className="lot-search-in" value={search} onChange={(e) => setSearch(e.target.value)}
-            placeholder="ค้นหา Part No. / Release Order / โปรเจค / วันที่..." />
-        </div>
-
-        {/* ดรอปดาวลูกโซ่: เลือกโปรเจค → รายการ Release แคบลง → เลือก Part */}
-        <div className="grid-3" style={{ gap: 12, marginTop: 14 }}>
-          <Field label="Projects">
-            <Select value={projectFilter}
-              onChange={(e) => { setProjectFilter(e.target.value); setReleaseOrder(""); setReleaseId(""); }}
-              options={projects.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))} />
-          </Field>
-          <Field label={`Release${releaseOrders.length ? ` (${releaseOrders.length})` : ""}`}>
-            <Select value={releaseOrder}
-              onChange={(e) => { setReleaseOrder(e.target.value); setReleaseId(""); }}
-              options={releaseOrders.map((ro) => ({ value: ro, label: ro }))} />
-          </Field>
-          <Field label={`Part${hasFilter ? ` (${filteredReleases.length})` : ""}`}>
-            <Select value={releaseId} onChange={(e) => setReleaseId(e.target.value)}
-              options={filteredReleases.map((r) => ({ value: r.id, label: `${partOf(r)?.part_no || "-"}${r.release_order ? ` · ${r.release_order}` : ""} × ${r.qty} ชิ้น` }))} />
-          </Field>
-        </div>
-
-        {/* ★ เลือกก่อน แล้วกด "ค้นหา" ค่อยโหลด/แสดง QR · ปุ่มล้างอยู่ข้างกัน */}
-        <div style={{ display: "flex", gap: 10, marginTop: 16, alignItems: "center", flexWrap: "wrap" }}>
-          <Btn variant="accent" onClick={doSearch} disabled={!activeIdsKey}>
-            <Icon name="qr" size={15} /> ค้นหา QR
-          </Btn>
-          <Btn variant="ghost" onClick={clearSearch} disabled={!hasFilter && !committedKey}>
-            <Icon name="close" size={14} /> ล้าง
-          </Btn>
-          {searchDirty && committedKey && (
-            <span style={{ fontSize: 12, color: "var(--warn, #b45309)", fontWeight: 600 }}>ตัวกรองเปลี่ยนแล้ว — กด “ค้นหา QR” เพื่ออัปเดต</span>
-          )}
-        </div>
-        {hasFilter && filteredReleases.length === 0 && (
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 10 }}>ไม่พบล็อตที่ตรงกับการค้นหา — กด “ล้าง” เพื่อดูทั้งหมด</div>
-        )}
-      </Card>
-
-      {loading && <Card><div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div></Card>}
-
-      {!loading && displayed.length > 0 && (
-        <Card title={`ป้ายที่จะพิมพ์ (${fmtNum(displayed.length)})`} right={
-          <Btn size="sm" onClick={toggleAll}>{selected.size === displayed.length ? "ยกเลิกทั้งหมด" : "เลือกทั้งหมด"}</Btn>
-        }>
-          <Field label="ชนิดป้าย">
-            <div className="chip-row">
-              <span className={`chip ${effScope === "unit" ? "active" : ""}`} onClick={() => setLabelScope("unit")}>ป้ายรายชิ้น · รันเบอร์ 1 OF N (ชิ้นใหญ่)</span>
-              <span className={`chip ${effScope === "lot" ? "active" : ""}`} onClick={() => setLabelScope("lot")}>ป้ายรวมล็อต · 1 ใบต่อพาร์ท (ชิ้นเล็ก)</span>
-            </div>
-          </Field>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 12px", lineHeight: 1.6 }}>
-            {effScope === "unit"
-              ? (multi
-                  ? `ป้ายรายชิ้น (รันเบอร์) — ทุกพาร์ทที่เลือก (${fmtNum(lotReps.length)} พาร์ท) จะได้ป้ายครบทุกชิ้น เลขวิ่ง 1 OF N แยกตามแต่ละพาร์ท`
-                  : "พิมพ์ป้าย 1 ใบต่อ 1 ชิ้น เลขวิ่ง 1 OF N — ติดสติกเกอร์รายชิ้น")
-              : (multi
-                  ? `ป้ายรวมล็อต — ${fmtNum(lotReps.length)} พาร์ท ได้ 1 ใบต่อพาร์ท (สแกน 1 ครั้งแล้วกรอกจำนวน)`
-                  : "พิมพ์ป้ายเดียวแทนทั้งล็อต — สแกน 1 ครั้งที่หน้าเครื่องแล้วกรอกจำนวนที่ทำ")}
-          </div>
-          {effScope === "unit" && displayed.length > 1500 && (
-            <div style={{ fontSize: 12, color: "var(--warn, #b45309)", margin: "-4px 2px 10px", fontWeight: 600 }}>
-              ⚠ ป้ายรายชิ้นรวม {fmtNum(displayed.length)} ใบ — พิมพ์เยอะมาก อาจใช้เวลาโหลด/พิมพ์นาน (เลือกเฉพาะพาร์ทที่ต้องการได้)
-            </div>
-          )}
-
-          {/* ── แถบเครื่องมือ (ย้ายขึ้นบน + sticky) ─────────────────────────── */}
-          <div className="qr-toolbar">
-            <Field label="ขนาดป้าย">
-              <Select value={labelPreset} onChange={(e) => setLabelPreset(e.target.value)}
-                options={LABEL_PRESETS.map((p) => ({ value: p.value, label: p.label }))} style={{ minWidth: 160 }} />
-            </Field>
-            {labelPreset === "custom" && (
-              <>
-                <Field label="กว้าง (มม.)"><Input type="number" value={customW} onChange={(e) => setCustomW(e.target.value)} style={{ width: 78 }} /></Field>
-                <Field label="สูง (มม.)"><Input type="number" value={customH} onChange={(e) => setCustomH(e.target.value)} style={{ width: 78 }} /></Field>
-              </>
-            )}
-            <Field label="รูปแบบการพิมพ์">
-              <div className="chip-row">
-                <span className={`chip ${printMode === "roll" ? "active" : ""}`} onClick={() => setPrintMode("roll")}>1 ป้าย/หน้า · เท่าจริง</span>
-                <span className={`chip ${printMode === "sheet" ? "active" : ""}`} onClick={() => setPrintMode("sheet")}>หลายป้าย/แผ่น A4</span>
-              </div>
-            </Field>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted)", paddingBottom: 9 }}>
-              <input type="checkbox" checked={showCode} onChange={(e) => setShowCode(e.target.checked)} style={{ accentColor: "var(--accent)" }} /> แสดงรหัสใต้ QR
-            </label>
-            <div className="qr-toolbar-print">
-              <span className="qr-count">เลือก {fmtNum(selected.size)} / {fmtNum(displayed.length)}</span>
-              <Btn variant="accent" onClick={doPrint} disabled={preparingPrint}>
-                <Icon name="printer" size={15} />{preparingPrint ? "กำลังเตรียมป้าย..." : `พิมพ์ (${fmtNum(selected.size)})`}
-              </Btn>
-            </div>
-          </div>
-
-          {/* ── ตาราง QR เลื่อนได้ (มีสกอลบาร์ด้านข้าง) ───────────────────── */}
-          <div ref={gridRef} className="qr-grid-scroll">
-            <div className="qr-grid">
-              {displayed.slice(0, 600).map((u) => {
-                const part = parts.find((p) => p.id === u.part_master_id);
-                return (
-                  <label key={u.id} className={`unit-check ${selected.has(u.id) ? "checked" : ""}`} style={{ alignItems: "center", textAlign: "center", gap: 6 }}>
-                    <input type="checkbox" checked={selected.has(u.id)} onChange={() => toggle(u.id)} style={{ accentColor: "var(--accent)", alignSelf: "flex-start" }} />
-                    <QRCodeSVG id={`pq-${u.id}`} value={u.qr_code} size={82} fgColor="#000000" bgColor="#ffffff" />
-                    {part?.part_no ? <span style={{ fontSize: 12, fontWeight: 600 }}>{part.part_no}</span> : null}
-                    {showCode ? <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)", wordBreak: "break-all" }}>{u.qr_code}</span> : null}
-                  </label>
-                );
-              })}
-            </div>
-            {/* QR ซ่อนสำหรับพิมพ์ — เรนเดอร์เฉพาะตอนกดพิมพ์ (ไม่ทำล่วงหน้าตอนค้นหา กันจอค้าง) */}
-            {printHidden.length > 0 && (
-              <div style={{ display: "none" }}>
-                {printHidden.map((u) => <QRCodeSVG key={u.id} id={`pq-${u.id}`} value={u.qr_code} size={82} fgColor="#000000" bgColor="#ffffff" />)}
-              </div>
-            )}
-            {displayed.length > 600 && (
-              <div style={{ fontSize: 12, color: "var(--muted)", margin: "10px 2px 2px", textAlign: "center" }}>* แสดงตัวอย่าง 600 ใบแรก — เวลาพิมพ์จะพิมพ์ครบทุกใบที่เลือก ({fmtNum(selected.size)})</div>
-            )}
-          </div>
-
-          {/* ── ปุ่มกลับขึ้นด้านบนสุด ─────────────────────────────────────── */}
-          <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-            <Btn variant="ghost" size="sm" onClick={() => gridRef.current?.scrollTo({ top: 0, behavior: "smooth" })}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign: "-2px" }}><path d="M12 19V5M5 12l7-7 7 7" /></svg>
-              &nbsp;ขึ้นไปด้านบนสุด
-            </Btn>
-          </div>
-        </Card>
-      )}
-
-      {!loading && committedKey && displayed.length === 0 && (
-        <div className="empty-state">
-          <Icon name="qr" size={32} />
-          <div className="empty-state-title">ไม่พบชิ้นงาน (QR) ในตัวกรองนี้</div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// แปลง ISO/timestamp → "yyyy-mm-dd" ตามเวลาเครื่อง (สำหรับ <input type="date">)
-//   ใช้ส่วนวันของเวลาท้องถิ่น (ไทย = UTC+7) ให้ตรงกับ dateToIso ตอนบันทึกกลับ
-function isoToDateInput(iso) {
+  return { ...p, supplier, paymentType, creditDays, items };
+};
+
+const poItems = (p) => migratePO(p).items;
+const poTotal = (p) => poItems(p).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
+const poAmountForCode = (p, code) => poItems(p).filter(it => it.code===code).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
+
+// ─── Supplier helpers (now exactly one supplier per PO) ─────────────────────
+const poSupplier      = (p) => migratePO(p).supplier || { name:"", poNumber:"" };
+const poSupplierName   = (p) => poSupplier(p).name || "—";
+const poSupplierText   = (p) => poSupplier(p).name || "";
+const poSupplierLabel  = (p) => poSupplier(p).name || "—";
+const poNumbersLabel   = (p) => poSupplier(p).poNumber || "—";
+const itemSupplier     = (p) => poSupplier(p);
+const itemSupplierName = (p) => poSupplierName(p);
+// Back-compat: some views still map over a suppliers[] array. There's now
+// always exactly one supplier, so return it as a single-element list.
+const poSuppliers = (p) => { const s = poSupplier(p); return [{ id:"main", name:s.name, poNumber:s.poNumber, rounds:[] }]; };
+
+// Every round across every item, tagged with its item code. `plan`/`actual`/
+// `amount` aliases are kept so older readers (tracking tab, exports) still work.
+const poRounds = (p) => migratePO(p).items.flatMap(it =>
+  (it.rounds && it.rounds.length ? it.rounds : []).map(r => ({
+    ...r,
+    plan: r.planDate, actual: r.actualDate, amount: r.planAmount,
+    itemId: it.id, code: it.code,
+  })));
+const poDeliveries = poRounds;
+const poRoundsAmount = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
+
+// ─── Auto-pay: a round is paid once its due date has arrived ────────────────
+// Cash pays on the received date; credit adds the PO's credit term (in days).
+const roundPayDate  = (p, r) => {
+  const P = migratePO(p);
+  if (!r.actualDate) return "";
+  if (P.paymentType === "cash") return r.actualDate;
+  const d = parseInt(P.creditDays,10);
+  return addDays(r.actualDate, isNaN(d) ? DEFAULT_CREDIT_DAYS : d);
+};
+// Received once the actual date has really arrived (a future date typed ahead
+// of time doesn't count yet) and a quantity was recorded.
+const roundReceived = (r) => !!r.actualDate && r.actualDate <= todayStr() && (parseFloat(r.actualAmount)||0) > 0;
+// ตั้งสถานะ PO เป็น "Paid" เอง = ถือว่าจ่ายครบทุกงวดทันที (ไม่ต้องรอวันครบกำหนดเครดิต)
+const roundPaid     = (p, r) => { if (migratePO(p).status === "Paid") return true; const d = roundPayDate(p,r); return !!d && d <= todayStr(); };
+const itemOrdered   = (it) => parseFloat(it.amount)||0;
+const itemReceived  = (it) => (it.rounds||[]).filter(roundReceived).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+const itemEntered   = (it) => (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+// ปัดเป็นสตางค์ (2 ตำแหน่ง) กันเศษย่อยกว่าสตางค์ทำให้ "เหลือรับ 0.00" แต่ระบบยังคิดว่าไม่ครบ
+const itemRemaining = (it) => Math.max(Math.round((itemOrdered(it) - itemEntered(it)) * 100) / 100, 0);
+
+// ─── Edit history / audit log ──────────────────────────────────────────────
+// Every PO keeps a short log of who changed what and when, so procurement
+// can update a status in one click and everyone can still see the trail
+// later (e.g. "ใครเปลี่ยนเป็น Delivered เมื่อไหร่"). Capped at 40 entries per
+// PO so it never grows unbounded.
+const HISTORY_ICON = { created:"🆕", status:"🔄", edited:"✏️" };
+const historyEntry = (session, action, message) => ({
+  id: uid(), at: new Date().toISOString(),
+  user: session?.name || "—", role: session?.role ? (ROLE_LABELS[session.role] || session.role) : "",
+  action, message,
+});
+const poHistory     = (p) => (p.history && p.history.length) ? p.history.slice().sort((a,b)=>(b.at||"").localeCompare(a.at||"")) : [];
+const poLastUpdate  = (p) => poHistory(p)[0] || null;
+const withHistory   = (po, entry) => ({ ...po, history: [entry, ...(po.history||[])].slice(0,40) });
+
+// "2026-07-31T09:12:00Z" -> "2 วันที่แล้ว" — short, glanceable, always in Thai.
+const relativeTime = (iso) => {
   if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const min = Math.floor(diffMs/60000);
+  if (min < 1)  return t("เมื่อสักครู่","just now");
+  if (min < 60) return `${min} ${t("นาทีที่แล้ว","min ago")}`;
+  const hr = Math.floor(min/60);
+  if (hr < 24)  return `${hr} ${t("ชม.ที่แล้ว","hr ago")}`;
+  const day = Math.floor(hr/24);
+  if (day < 30) return `${day} ${t("วันที่แล้ว","days ago")}`;
+  return new Date(iso).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{day:"numeric",month:"short",year:"2-digit"});
+};
+const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:"numeric",month:"short",year:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
 
-// ─── แก้หัวเอกสาร Release ทั้งใบ (Modify / เลขที่ Release Order / วันที่) — Admin เท่านั้น ───
-// ค่าทั้ง 3 เป็นระดับ "ทั้งใบ" → บันทึกทีเดียวเปลี่ยนครบทุก Part (ผ่าน RPC admin-gated)
-function ReleaseHeaderEditModal({ group, releases, curRO, curDate, onClose, onSaved }) {
-  const [modify, setModify] = useState("");
-  const [releaseOrder, setReleaseOrder] = useState(curRO || "");
-  const [date, setDate] = useState(() => isoToDateInput(curDate));
-  const [origMdf, setOrigMdf] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
+// ─── Actual received / paid dates ──────────────────────────────────────────
+// Every round already carries its own "received" date; a PO's overall
+// received date(s) are just the distinct actual dates across every round.
+const poReceivedDates = (p) => [...new Set(poRounds(p).filter(roundReceived).map(r=>r.actualDate).filter(Boolean))].sort();
+// Paid date = วันจ่ายที่กำหนดเอง (ถ้าตั้งสถานะ Paid เอง) มิฉะนั้นใช้วันครบกำหนดอัตโนมัติ
+const poPaidDate = (p) => {
+  const P = migratePO(p);
+  if (P.status === "Paid" && P.paidDate) return P.paidDate;
+  const paid = poRounds(P).filter(r=>roundPaid(P,r)).map(r=>roundPayDate(P,r)).filter(Boolean).sort();
+  return paid.length ? paid[paid.length-1] : null;
+};
+// วันครบกำหนดจ่าย "แบบพยากรณ์" ของงวด — ใช้วันรับจริงถ้ามี ไม่มีก็ใช้วันแผน (+เทอมเครดิต)
+// ต่างจาก roundPayDate (ที่ใช้วันจริงเท่านั้น เพื่อคุมตรรกะ "จ่ายแล้ว") — อันนี้ใช้ "แสดงผล"
+// เท่านั้น (หน้าติดตาม/Export) ให้ตรงกับหน้าแผนจ่ายเงินที่คิดจากวันแผนด้วย
+const roundDueForecast = (p, r) => {
+  const P = migratePO(p);
+  const incoming = r.actualDate || r.planDate;
+  if (!incoming) return "";
+  if (P.paymentType === "cash") return incoming;
+  const d = parseInt(P.creditDays,10);
+  return addDays(incoming, isNaN(d) ? DEFAULT_CREDIT_DAYS : d);
+};
+// Earliest upcoming/known payment due date across all rounds (for list/export display).
+// Falls back to the plan date so a PO that only has a plan (no actual receipt yet)
+// still shows its forecast due date, matching the Payment-plan page.
+const poNextDueDate = (p) => {
+  const due = poRounds(p).map(r=>roundDueForecast(p,r)).filter(Boolean).sort();
+  return due.length ? due[0] : "";
+};
 
-  // ดึงค่า Modify ปัจจุบัน (เก็บที่ part_master — ตัวแทน 1 Part ในใบ, ปกติทั้งใบใช้ค่าเดียวกัน)
+// ─── แผนจ่ายเงิน (Payment forecast lines) ───────────────────────────────────
+// คืน "งวดจ่าย" ของ PO หนึ่งใบ สำหรับหน้าแผนจ่าย/Export. ปกติแตกตามงวดส่งของ
+// (แต่ละงวดมียอด planAmount/actualAmount ของตัวเอง ซึ่งควรรวมกัน = ยอด item)
+// แต่ถ้ายอดรวมของงวดไม่ตรงกับยอด item (เช่นมีงวดซ้ำยอดเต็ม) จะยุบเหลือ "หนึ่ง
+// บรรทัดต่อ item" โดยยึดยอด item.amount เป็นหลัก เพื่อกันการนับซ้ำ. วันครบกำหนด
+// จ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้วันแผน) + เทอมเครดิต; เงินสดจ่ายวันรับของ.
+const poPayLines = (p) => {
+  const P = migratePO(p);
+  const isCash = P.paymentType === "cash";
+  const term = isCash ? 0 : (parseInt(P.creditDays,10) || DEFAULT_CREDIT_DAYS);
+  const method = isCash ? "เงินสด" : `เครดิต ${term} วัน`;
+  const dueOf = (incoming) => incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
+  const roundAmt = (r) => (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
+  const out = [];
+  poItems(P).forEach(it => {
+    const itemAmt = parseFloat(it.amount)||0;
+    const rounds  = it.rounds || [];
+    const roundSum = rounds.reduce((s,r)=>s+roundAmt(r), 0);
+    // งวดกระทบยอดตรงกับ item → เชื่อถือได้ ให้แตกเป็นรายงวดจริง
+    const reconciled = rounds.length>0 && itemAmt>0 && Math.abs(roundSum - itemAmt) <= 0.5;
+    if (reconciled) {
+      rounds.forEach(r => {
+        const amount = roundAmt(r);
+        if (amount <= 0) return;
+        const incoming = r.actualDate || r.planDate || "";
+        // "จ่ายแล้ว" ต้อง (1) รับของจริงแล้ว และ (2) ถึงวันครบกำหนดจ่าย — ถ้ามีแต่
+        // วันรับของแต่ยังไม่กรอกจำนวนที่รับจริง ถือว่ายังไม่รับ = ยังไม่จ่าย
+        const received = roundReceived(r);
+        const paid = received && roundPaid(P, r);
+        out.push({ code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
+          payDate: dueOf(incoming), amount, received, paid, paidAmount: paid ? amount : 0 });
+      });
+    } else if (itemAmt > 0) {
+      // ยอดงวดไม่ตรง (หรือไม่มีงวด) → ยุบเหลือบรรทัดเดียว ใช้ยอด item เป็นหลัก
+      // จ่ายบางส่วน: เก็บ paidAmount ไว้ให้ยอด "คงเหลือต้องจ่าย" หักออกถูกต้อง
+      const actualDates = rounds.map(r=>r.actualDate).filter(Boolean).sort();
+      const planDates   = rounds.map(r=>r.planDate).filter(Boolean).sort();
+      const incoming = actualDates[0] || planDates[0] || "";
+      const paidAmt  = Math.min(rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0), itemAmt);
+      out.push({ code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
+        payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: paidAmt >= itemAmt-0.5, paidAmount: paidAmt });
+    }
+  });
+  const today = todayStr();
+  return out.map(l => ({
+    ...l, isCash, method,
+    supplier: poSupplierName(P), poNo: poNumbersLabel(P),
+    accName: (ACCOUNTS.find(a=>a.code===l.code)?.name)||"",
+    month: l.payDate ? l.payDate.slice(0,7) : "",
+    // "เกินกำหนดจ่าย" เฉพาะของที่รับแล้วแต่ยังไม่จ่ายและเลยกำหนด; ของที่ยังไม่รับ = "รอจ่าย"
+    status: l.paid ? "paid" : (l.received && l.payDate && l.payDate < today ? "late" : "pending"),
+  }));
+};
+
+// ─── Lock completed POs ─────────────────────────────────────────────────────
+// Once a PO has been fully received AND fully paid, its numbers are final —
+// only an admin can still edit or delete it, so the paper trail for a closed
+// PO can't quietly change after the fact.
+const isPOLocked = (p) => incomingStatus(p)==="received" && paymentStatus(p)==="paid";
+const canEditPO  = (p, session) => !isPOLocked(p) || session?.role==="admin";
+
+const deliveryStatus = (d) => {
+  // Works on a round object (planDate/actualDate) or its aliases (plan/actual).
+  const plan = d.planDate ?? d.plan, actual = d.actualDate ?? d.actual;
+  if (actual) return actual <= todayStr() ? "received" : "pending";
+  if (plan && plan < todayStr()) return "late";
+  if (plan) return "pending";
+  return "unset";
+};
+// PO-level incoming status by value received across all item rounds: fully
+// received once received ≥ ordered; "partial" once some (but not all) is in.
+const incomingStatus = (p) => {
+  const rounds = poRounds(p);
+  if (!rounds.length) return "unset";
+  // เช็ค "รับครบ" ต่อ item — ถ้ารับเกินใน item หนึ่งจะได้ไม่ไปกลบ item ที่ยังรับไม่ครบ
+  // (ก่อนหน้านี้เทียบยอดรวมกับ poTotal จึงล็อก PO เร็วเกินจริง)
+  const items = poItems(p).filter(it => itemOrdered(it) > 0);
+  const allReceived = items.length > 0 && items.every(it => Math.round(itemReceived(it)*100) >= Math.round(itemOrdered(it)*100)); // เทียบระดับสตางค์ ให้ตรงกับที่แสดง
+  const anyReceived = rounds.some(roundReceived);
+  // "ล่าช้า" เฉพาะงวดที่ยังไม่รับ และ "ยังไม่ได้ใส่วันรับ" และเลยวันแผนแล้ว
+  // (ถ้าใส่วันรับไว้ล่วงหน้า = นัดไว้แล้ว ยังไม่ถือว่าล่าช้าจนกว่าจะเลยวันรับ)
+  const anyLate  = rounds.some(r => !roundReceived(r) && !r.actualDate && r.planDate && r.planDate < todayStr());
+  if (allReceived) return "received";
+  if (anyLate) return "late";
+  if (anyReceived) return "partial";
+  // มีนัด (วันแผน) หรือมีวันรับล่วงหน้าที่ยังไม่ถึง = "รอของเข้า" (ให้ตรงกับป้ายระดับงวด)
+  if (rounds.some(r=>r.planDate || r.actualDate)) return "pending";
+  return "unset";
+};
+// Auto-pay: reaching a round's due date is what marks it paid, so payment is
+// never "late" — it's "pending" until the due date, then "paid".
+const paymentStatus = (p) => {
+  const rounds = poRounds(p);
+  const recvRounds = rounds.filter(roundReceived);
+  if (!recvRounds.length) return "unset";
+  // จ่ายครบต่อ item: งวดที่ทั้งรับแล้วและถึงกำหนดจ่าย ต้องครอบคลุมยอด item ทุก item
+  // (กันไม่ให้ "จ่ายแล้ว" เกิดขึ้นทั้งที่บาง item ยังจ่ายไม่ครบ)
+  const items = poItems(p).filter(it => itemOrdered(it) > 0);
+  const itemPaid = (it) => (it.rounds||[]).filter(r => roundReceived(r) && roundPaid(p,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+  const allPaid = items.length > 0 && items.every(it => Math.round(itemPaid(it)*100) >= Math.round(itemOrdered(it)*100)); // เทียบระดับสตางค์
+  if (allPaid) return "paid";
+  return "pending";
+};
+const INCOMING_LABEL = { received:"รับแล้ว", partial:"รับบางส่วน", late:"ของเข้าล่าช้า", pending:"รอของเข้า", unset:"ยังไม่กำหนด" };
+const INCOMING_CLR   = { received:"#10b981", partial:"#3b82f6", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
+const INCOMING_BG    = { received:"#f0fdf4", partial:"#eff6ff", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
+const PAYMENT_LABEL  = { paid:"จ่ายแล้ว", late:"เกินกำหนดจ่าย", pending:"รอจ่ายเงิน", unset:"ยังไม่กำหนด" };
+const PAYMENT_CLR    = { paid:"#10b981", late:"#ef4444", pending:"#f59e0b", unset:"#94a3b8" };
+const PAYMENT_BG     = { paid:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
+// Payment method — cash pays right away, credit gives suppliers a 30-day term,
+// so a credit PO's payment due date is auto-suggested as order date + 30 days.
+const PAYMENT_TYPE_LABEL = { cash:"เงินสด", credit:"เครดิต", credit30:"เครดิต 30 วัน" };
+const PAYMENT_TYPE_ICON  = { cash:"💵", credit:"💳", credit30:"💳" };
+const PAYMENT_TYPE_CLR   = { cash:"#10b981", credit:"#2563eb", credit30:"#2563eb" };
+const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit:"#eff6ff", credit30:"#eff6ff" };
+// Label for a PO's payment method including its credit term, e.g. "เครดิต 45 วัน".
+const paymentTypeLabel = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return "เงินสด"; if (P.paymentType==="credit") return `เครดิต ${P.creditDays||DEFAULT_CREDIT_DAYS} วัน`; return "—"; };
+// Bilingual runtime labels for the on-screen UI (the *_LABEL maps above stay Thai
+// for Excel exports). These call t() at render time so they follow the toggle.
+const INCOMING_LABEL_EN = { received:"Received", partial:"Partial", late:"Late", pending:"Awaiting", unset:"Unset" };
+const PAYMENT_LABEL_EN  = { paid:"Paid", late:"Overdue", pending:"Awaiting pay", unset:"Unset" };
+const incLabel = (k) => t(INCOMING_LABEL[k]||k, INCOMING_LABEL_EN[k]||k);
+const payLabel = (k) => t(PAYMENT_LABEL[k]||k, PAYMENT_LABEL_EN[k]||k);
+const payTypeLabelT = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return t("เงินสด","Cash"); if (P.paymentType==="credit") return t(`เครดิต ${P.creditDays||DEFAULT_CREDIT_DAYS} วัน`,`Credit ${P.creditDays||DEFAULT_CREDIT_DAYS}d`); return "—"; };
+const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
+// บาทเต็ม (ไม่มีทศนิยม) — ใช้กับตัวเลขพาดหัวการ์ด/ยอดรวม ให้กวาดตาอ่านง่าย
+const fmt0 = n => new Intl.NumberFormat("th-TH",{maximumFractionDigits:0}).format(Math.round(n||0));
+const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
+// "2026-08" -> "ส.ค. 69" (TH, Buddhist year) or "Aug 25" (EN, Gregorian) — used
+// wherever a month key needs a short label (QS Monthly tab's chips/headers, chart
+// X-axis, and sub-item "เพิ่มเมื่อ ..." badges). Follows the current UI language.
+const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{month:"short",year:"2-digit"});
+const uid  = () => Math.random().toString(36).slice(2,10);
+
+// ─── Design Tokens ────────────────────────────────────────────────────────────
+const T = {
+  // Layout
+  bg:        "#f0f4f8",
+  sidebar:   "#1e293b",
+  card:      "#ffffff",
+  cardBorder:"#e2e8f0",
+  // Text
+  textPrimary:  "#0f172a",
+  textSecondary:"#64748b",
+  textMuted:    "#94a3b8",
+  // Brand blue
+  blue:     "#2563eb",
+  blueDark: "#1d4ed8",
+  blueLight:"#eff6ff",
+  blueMid:  "#dbeafe",
+  // Accent
+  green:    "#10b981",
+  greenBg:  "#f0fdf4",
+  amber:    "#f59e0b",
+  amberBg:  "#fffbeb",
+  purple:   "#8b5cf6",
+  purpleBg: "#f5f3ff",
+  red:      "#ef4444",
+  redBg:    "#fef2f2",
+  // Header gradient
+  headerGrad: "linear-gradient(135deg, #1e40af 0%, #2563eb 50%, #3b82f6 100%)",
+};
+
+// ─── ภาษา (2 ภาษา: ไทย / English) — สลับได้ทั้งแอป ─────────────────────────────
+//  ใช้ t("ไทย", "English") ทุกที่ที่แสดงข้อความ · เก็บภาษาที่เลือกไว้ใน localStorage
+//  toggleLang() แจ้งทุก component ที่ subscribe (useLang) ให้ re-render ทันที
+let _LANG = "th";
+try { const s = localStorage.getItem("tcs-lang"); if (s === "en" || s === "th") _LANG = s; } catch { /* ignore */ }
+const _langSubs = new Set();
+const t = (th, en) => (_LANG === "en" ? (en ?? th) : th);
+const setLang = (l) => {
+  if (l !== "en" && l !== "th") return;
+  _LANG = l;
+  try { localStorage.setItem("tcs-lang", l); } catch { /* ignore */ }
+  _langSubs.forEach(fn => { try { fn(l); } catch { /* ignore */ } });
+};
+const toggleLang = () => setLang(_LANG === "th" ? "en" : "th");
+// subscribe a component to language changes (re-render on toggle)
+function useLang() {
+  const [, force] = useState(0);
   useEffect(() => {
-    let alive = true;
-    const pmId = releases[0]?.part_master_id;
-    if (!pmId) { setLoading(false); return; }
-    listRows("part_master", { filters: { id: pmId } })
-      .then((rows) => { if (!alive) return; const m = (rows[0]?.mdf_no ?? "").toString(); setModify(m); setOrigMdf(m); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, [releases]);
-
-  async function doSave() {
-    const ro = normalizeReleaseOrder(releaseOrder);
-    if (ro && !RELEASE_ORDER_RE.test(ro)) { setErr('เลขที่ Release Order ต้องเป็นรูปแบบ "P-ตัวเลข" เช่น P-009 (หรือเว้นว่าง)'); return; }
-    if (!date) { setErr("กรุณาเลือกวันที่"); return; }
-    setBusy(true); setErr("");
-    try {
-      const dateChanged = date !== isoToDateInput(curDate);
-      const dateIso = dateChanged ? dateToIso(date) : null;
-      const mdfTrim = modify.trim();
-      const mdfChanged = mdfTrim !== (origMdf ?? "").trim();
-      const mdfVal = mdfChanged ? (mdfTrim || "0") : null;
-
-      const res = await updateReleaseHeader({
-        releaseIds: releases.map((r) => r.id),
-        releaseOrder: ro || null,
-        releaseDate: dateIso,
-        mdfNo: mdfVal,
-      });
-      if (!res?.ok) { setErr("บันทึกไม่สำเร็จ" + (res?.reason ? ` (${res.reason})` : "")); setBusy(false); return; }
-
-      auditRecord("edit_release_header", "release_group", group.releaseOrder || releases[0]?.id, {
-        project: group.projectCode, parts: releases.length,
-        release_order: ro || null,
-        mdf: mdfChanged ? (mdfTrim || "0") : undefined,
-        date: dateChanged ? date : undefined,
-      });
-      mlsToast(`บันทึกหัวเอกสารแล้ว — อัปเดต ${fmtNum(res.releases || releases.length)} Part`, "success");
-      onSaved({
-        ro: ro || null,
-        dateIso: dateChanged ? dateIso : curDate,
-        mdf: mdfChanged ? (mdfTrim || "0") : origMdf,
-      });
-    } catch (e) {
-      setErr("บันทึกไม่สำเร็จ: " + (e?.message || e));
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="แก้ไขหัวเอกสาร Release"
-      sub={`${group.projectCode} — ${group.projectName} · ${releases.length} Part ในใบนี้`}
-      onClose={onClose} locked={busy}
-    >
-      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.6 }}>
-        แก้ค่าหัวเอกสารที่ใช้ “ทั้งใบ” — บันทึกครั้งเดียวจะเปลี่ยนให้ครบทุก Part ({releases.length} รายการ) ในใบนี้พร้อมกัน
-      </div>
-      {loading ? (
-        <div style={{ fontSize: 13, color: "var(--muted)" }}>กำลังโหลด...</div>
-      ) : (
-        <>
-          <div className="grid-2">
-            <Field label="Modify (Release)">
-              <Input value={modify} onChange={(e) => setModify(e.target.value)} placeholder="เช่น M-001 (เว้นว่าง = 0)" />
-            </Field>
-            <Field label="เลขที่ Release Order">
-              <Input value={releaseOrder} onChange={(e) => setReleaseOrder(e.target.value)}
-                onBlur={(e) => setReleaseOrder(normalizeReleaseOrder(e.target.value))} placeholder="เช่น P-009 (ไม่บังคับ)" />
-            </Field>
-            <Field label="วันที่">
-              <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-            </Field>
-          </div>
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 8, lineHeight: 1.6 }}>{err}</div>}
-          <div className="modal-actions" style={{ marginTop: 16 }}>
-            <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-            <Btn type="button" variant="accent" onClick={doSave} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึกทั้งใบ"}</Btn>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
+    const fn = () => force(x => x + 1);
+    _langSubs.add(fn);
+    return () => { _langSubs.delete(fn); };
+  }, []);
+  return _LANG;
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// 4.5) MANAGE RELEASES — แก้ไข/ลบ Release ที่เคยปล่อยงานไปแล้ว
-// ══════════════════════════════════════════════════════════════════════════
-// แก้ไขได้: จำนวน / น้ำหนักต่อชิ้น / ความยาวต่อชิ้น / หมายเหตุ / เลข Release Order
-// - เพิ่มจำนวน  → สร้าง QR ใหม่ต่อท้าย (unit_no ต่อจากใบล่าสุด)
-// - ลดจำนวน    → ลบเฉพาะ QR ที่ "ยังไม่ถูกสแกน" (status = released) เท่านั้น
-//                ลบต่ำกว่าจำนวนที่สแกนไปแล้วไม่ได้ เพื่อไม่ให้ประวัติการทำงานหาย
-// - แก้น้ำหนัก/ความยาว → จ่ายค่าลงทุกชิ้นในล็อตนี้ใหม่ (เหมือนตอน Release ครั้งแรก)
-// ลบทั้ง Release → ลบ QR (part_units) และประวัติสแกน (scan_logs) ของล็อตนั้นทั้งหมด
-function ReleaseEditModal({ release, onClose, onSaved, onDelete }) {
-  const [qty, setQty] = useState(release.qty);
-  const [unitWeight, setUnitWeight] = useState(release.unit_weight ?? "");
-  const [lengthMm, setLengthMm] = useState(release.length_mm ?? "");
-  const [note, setNote] = useState(release.note ?? "");
-  const [releaseOrder, setReleaseOrder] = useState(release.release_order ?? "");
-  const [units, setUnits] = useState(null); // null = ยังโหลดไม่เสร็จ
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  useEffect(() => {
-    listRows("part_units", { filters: { release_id: release.id }, order: "unit_no" }).then(setUnits);
-  }, [release.id]);
-
-  const scannedCount = units ? units.filter((u) => u.status !== "released").length : 0;
-  const releasedCount = units ? units.length - scannedCount : 0;
-  const qtyNum = Number(qty) || 0;
-  const delta = qtyNum - release.qty;
-
-  async function doSave() {
-    if (!units) return;
-    if (qtyNum < 1) { setErr("จำนวนต้องมากกว่า 0"); return; }
-    if (qtyNum < scannedCount) {
-      setErr(`ลดจำนวนต่ำกว่านี้ไม่ได้ — มีชิ้นที่สแกนไปแล้ว ${scannedCount} ชิ้นในล็อตนี้`);
-      return;
-    }
-    if (delta < 0 && Math.abs(delta) > releasedCount) {
-      setErr(`ลบได้สูงสุด ${releasedCount} ชิ้น (เหลือเฉพาะชิ้นที่ยังไม่สแกน)`);
-      return;
-    }
-    const ro = normalizeReleaseOrder(releaseOrder);
-    if (ro && !RELEASE_ORDER_RE.test(ro)) { setErr('เลขที่ Release Order ต้องเป็นรูปแบบ "P-ตัวเลข" เช่น P-009 (หรือเว้นว่าง)'); return; }
-    setBusy(true); setErr("");
-    try {
-      const patch = {
-        qty: qtyNum,
-        unit_weight: unitWeight === "" ? null : Number(unitWeight),
-        length_mm: lengthMm === "" ? null : Number(lengthMm),
-        note: note || null,
-        release_order: ro || null,
-      };
-      await updateRow("releases", release.id, patch);
-
-      // ถ้าน้ำหนัก/ความยาวเปลี่ยน ให้จ่ายค่าลงทุกชิ้นของล็อตนี้ใหม่ทั้งหมด
-      if (patch.unit_weight !== (release.unit_weight ?? null) || patch.length_mm !== (release.length_mm ?? null)) {
-        await updateRows("part_units", { release_id: release.id }, { weight: patch.unit_weight, length_mm: patch.length_mm });
-      }
-
-      if (delta > 0) {
-        const maxUnitNo = units.reduce((m, u) => Math.max(m, u.unit_no), 0);
-        const suffix = release.id.slice(0, 6).toUpperCase();
-        const partNo = release.part_master?.part_no || "PART";
-        const newUnits = Array.from({ length: delta }, (_, i) => ({
-          release_id: release.id,
-          part_master_id: release.part_master_id,
-          unit_no: maxUnitNo + i + 1,
-          qr_code: `${partNo}-${suffix}-${String(maxUnitNo + i + 1).padStart(4, "0")}`,
-          status: "released",
-          weight: patch.unit_weight,
-          length_mm: patch.length_mm,
-        }));
-        await insertRows("part_units", newUnits);
-      } else if (delta < 0) {
-        const removable = units.filter((u) => u.status === "released").sort((a, b) => b.unit_no - a.unit_no);
-        const toRemove = removable.slice(0, Math.abs(delta)).map((u) => u.id);
-        await deleteRows("part_units", toRemove);
-      }
-
-      onSaved();
-    } catch (e) {
-      setErr("บันทึกไม่สำเร็จ: " + e.message);
-    }
-    setBusy(false);
+// ─── Global CSS ───────────────────────────────────────────────────────────────
+const GLOBAL_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300..800&family=JetBrains+Mono:wght@400..700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', sans-serif; background: ${T.bg}; color: ${T.textPrimary}; }
+  input, select, textarea, button { font-family: 'Inter', sans-serif; }
+  input[type=number]::-webkit-inner-spin-button { opacity: 0.4; }
+  ::-webkit-scrollbar { width: 16px; height: 16px; }
+  ::-webkit-scrollbar-track { background: #eef2f7; border-radius: 10px; }
+  ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 10px; border: 3px solid #eef2f7; min-height: 48px; min-width: 48px; }
+  ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  * { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: auto; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
+  .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
+  .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
+  .btn-primary:hover { background: ${T.blueDark}; box-shadow: 0 4px 12px rgba(37,99,235,0.3); }
+  .btn-ghost { background: transparent; color: ${T.textSecondary}; border: 1.5px solid ${T.cardBorder}; border-radius: 10px; padding: 9px 18px; font-size: 13px; font-weight: 500; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+  .btn-ghost:hover { border-color: ${T.blue}; color: ${T.blue}; }
+  .input-base { background: ${T.bg}; border: 1.5px solid ${T.cardBorder}; border-radius: 10px; padding: 10px 13px; color: ${T.textPrimary}; font-size: 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; width: 100%; }
+  .input-base:focus { border-color: ${T.blue}; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+  .tag { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  /* กล่องเลื่อนแนวนอน (ใช้กับตารางที่คอลัมน์เยอะ) — สกรอลบาร์เห็นชัดเสมอ */
+  .hscroll { overflow-x: auto; overflow-y: hidden; }
+  .hscroll::-webkit-scrollbar { height: 24px; }
+  .hscroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 12px; }
+  .hscroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 12px; border: 4px solid #e2e8f0; min-width: 56px; }
+  .hscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .hscroll { scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
+  /* ตารางรายเดือน: เลื่อนในกล่องเอง (สูงไม่เกิน 70vh) + ตรึงหัวตาราง + สกรอลบาร์เห็นชัด */
+  .mscroll { overflow: auto; max-height: 70vh; }
+  .mscroll::-webkit-scrollbar { height: 24px; width: 24px; }
+  .mscroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 12px; }
+  .mscroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 12px; border: 4px solid #e2e8f0; min-width: 56px; min-height: 56px; }
+  .mscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .mscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
+  .mscroll { scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
+  .mscroll thead th { position: sticky; background: #f8fafc; z-index: 2; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
+  .mscroll thead tr:first-child th { top: 0; }
+  .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 2; }
+  /* สกรอลบาร์แนวนอนแบบใหญ่ คลิก/ลากง่าย — ใช้กับตารางรายเดือน (กว้างมาก) */
+  .fatscroll { overflow: auto; -webkit-overflow-scrolling: touch; scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
+  .fatscroll::-webkit-scrollbar { height: 28px; width: 28px; }
+  .fatscroll::-webkit-scrollbar-track { background: #dbe2ec; border-radius: 14px; }
+  .fatscroll::-webkit-scrollbar-thumb { background: #556274; border-radius: 14px; border: 5px solid #dbe2ec; min-width: 64px; min-height: 64px; }
+  .fatscroll::-webkit-scrollbar-thumb:hover { background: #3b4756; }
+  .fatscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
+  /* เลื่อนลื่นบน iOS */
+  .hscroll, .mscroll { -webkit-overflow-scrolling: touch; }
+  /* ── มือถือ/จอแคบ: ปุ่มแตะง่ายขึ้น + ช่องกรอกไม่โดน iOS ซูมอัตโนมัติ (ต้อง ≥16px) ── */
+  @media (max-width: 640px) {
+    .btn-primary, .btn-ghost { min-height: 40px; padding-top: 10px; padding-bottom: 10px; }
+    .input-base { font-size: 16px; }
+    .hscroll::-webkit-scrollbar, .mscroll::-webkit-scrollbar { height: 18px; width: 18px; }
+    .fatscroll::-webkit-scrollbar { height: 22px; width: 22px; }
   }
+`;
 
-  return (
-    <Modal title="แก้ไข Release" sub={`Part ${release.part_master?.part_no || "-"} — โปรเจค ${release.part_master?.projects?.code || "-"}`} onClose={onClose}>
-      {units === null ? (
-        <div style={{ fontSize: 13, color: "var(--muted)" }}>กำลังโหลด...</div>
-      ) : (
-        <>
-          <div className="grid-2">
-            <Field label="จำนวน (ชิ้น)">
-              <Input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} />
-            </Field>
-            <Field label="เลขที่ Release Order">
-              <Input value={releaseOrder} onChange={(e) => setReleaseOrder(e.target.value)}
-                onBlur={(e) => setReleaseOrder(normalizeReleaseOrder(e.target.value))} placeholder="เช่น P-009 (ไม่บังคับ)" />
-            </Field>
-            <Field label="น้ำหนัก/ชิ้น (กก.)">
-              <Input type="number" step="0.01" value={unitWeight} onChange={(e) => setUnitWeight(e.target.value)} />
-            </Field>
-            <Field label="ความยาว/ชิ้น (มม.)">
-              <Input type="number" step="0.1" value={lengthMm} onChange={(e) => setLengthMm(e.target.value)} />
-            </Field>
-          </div>
-          <Field label="หมายเหตุ">
-            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="ไม่บังคับ" />
-          </Field>
-
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.6 }}>
-            ตอนนี้มี {units.length} ชิ้น — สแกนไปแล้ว {scannedCount} ชิ้น, ยังไม่สแกน {releasedCount} ชิ้น
-            {delta > 0 && <><br />จะสร้าง QR เพิ่มอีก <b>{delta}</b> ใบ ต่อท้ายล็อตเดิม</>}
-            {delta < 0 && <><br />จะลบ QR ที่ยังไม่สแกนออก <b>{Math.abs(delta)}</b> ใบ</>}
-          </div>
-
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-
-          <div className="modal-actions" style={{ justifyContent: "space-between" }}>
-            {onDelete ? (
-              <Btn type="button" variant="ghost" onClick={onDelete} disabled={busy}
-                style={{ color: "var(--danger-hi)" }}>
-                ลบ Part นี้
-              </Btn>
-            ) : <span />}
-            <div style={{ display: "flex", gap: 8 }}>
-              <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-              <Btn type="button" variant="accent" onClick={doSave} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึก"}</Btn>
-            </div>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 5) REPORT
-// ══════════════════════════════════════════════════════════════════════════
-const RANGE_MODES = [
-  { value: "preset", label: "ช่วงเวลาด่วน" },
-  { value: "month", label: "รายเดือน" },
-  { value: "custom", label: "กำหนดเอง (จาก–ถึง)" },
+// ─── Excel Export ─────────────────────────────────────────────────────────────
+// Every department gets its own styled workbook — xlsx-js-style (a SheetJS
+// fork) lets us actually write cell colors/fonts/borders, which the plain
+// community "xlsx" package silently drops on write.
+// ยอดเพิ่มของ Acc. Code ในเดือน m = ค่าธรรมดา (code) ซึ่งคือ "ยอดรวมที่ roll-up
+// ไว้แล้ว" ของเดือนนั้น (handleSave ตั้ง code = ผลรวมคอลัมน์ย่อย/รายการย่อยเสมอ)
+// จึงอ่านตัวเดียว — ไม่บวกคีย์คอลัมน์ย่อย ":" ซ้ำ (กันนับซ้ำ) และคอลัมน์ที่ลบไป
+// แล้วก็ไม่ถูกนับ เพราะยอด roll-up ถูกคำนวณใหม่โดยไม่รวมคอลัมน์นั้น
+const monthAddValue = (additions, m, code) => parseFloat(additions?.[m]?.[code]) || 0;
+const buildCombinedBudget = (tenderCosts, additions) => {
+  const combined = {...tenderCosts};
+  Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
+    if (mKey.startsWith("$")) return;
+    Object.entries(monthObj || {}).forEach(([code, val]) => {
+      // ข้ามคีย์ meta ($…) และคีย์คอลัมน์ย่อย (code:colId) — ค่าเหล่านี้ถูก roll-up
+      // เข้าไปในค่าธรรมดา (code) แล้ว การบวกอีกจะนับซ้ำ
+      if (code.startsWith("$") || code.includes(":")) return;
+      combined[code] = (parseFloat(combined[code]) || 0) + (parseFloat(val) || 0);
+    });
+  });
+  return combined;
+};
+const exportAccountList = (extraItems=[], hiddenAccounts=[]) => [
+  ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)),
+  ...extraItems.filter(e => !e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group||"Other" })),
 ];
 
-// ── วิวรายงาน "ประกอบ / แพ็ก" — ลูกที่ประกอบเข้าเบอร์แม่ (เบอร์ + ความยาว + จำนวน) จาก assembly_links ──
-//   แยกแพ็ก/ประกอบด้วยชนิดเบอร์แม่: package = แพ็ก · อื่น ๆ (sub/แผง) = ประกอบ
-function AssemblyReportView({ from, to, parentKind, projectFilter, partFilter, goTo }) {
-  const isPack = parentKind === "package";
-  const kindWord = parentKind === "package" ? "แพ็ก" : parentKind === "panel" ? "แผง" : "ซับ";
-  const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let alive = true; setLoading(true);
-    getAssemblyLogsBetween(from, to)
-      .then((d) => { if (alive) { setLogs(Array.isArray(d) ? d : []); setLoading(false); } })
-      .catch(() => { if (alive) { setLogs([]); setLoading(false); } });
-    return () => { alive = false; };
-  }, [from, to]);
+// ─── Styling helper ─────────────────────────────────────────────────────────
+// Lays down a colored title bar (merged across every column), optional gray
+// info sub-rows, a bold colored header row with autofilter, zebra-striped
+// bordered data rows with right-aligned money/% columns, and an optional
+// bold total row — everything an aoa_to_sheet grid needs to read like a
+// real report instead of a raw data dump.
+const BORDER_THIN = (rgb) => ({ style:"thin", color:{rgb} });
+const BORDER_MED  = (rgb) => ({ style:"medium", color:{rgb} });
+// สีพิลล์ตามสถานะ (เขียว=เสร็จ/จ่ายแล้ว, เหลือง=กำลังทำ/รอ, แดง=ค้าง/เกินกำหนด)
+// ใช้คีย์เวิร์ดจับ ครอบคลุมทั้งไทย/อังกฤษ สถานะอื่นเป็นพิลล์เทากลาง ๆ
+const STATUS_PILL = [
+  [/(completed|complete|เสร็จ|จ่ายแล้ว|รับของแล้ว|รับครบ|ปิดงาน|ปิด|อนุมัติ|approved|done|paid)/i, { bg:"D1FAE5", fg:"065F46" }],
+  [/(in\s*progress|progress|กำลัง|ระหว่าง|บางส่วน|partial|สั่งซื้อ|สั่ง|รอรับ|รอจ่าย|pending|รอ)/i,        { bg:"FEF3C7", fg:"92400E" }],
+  [/(to\s*do|todo|ร่าง|ยังไม่|ค้างจ่าย|ค้าง|เกินกำหนด|overdue|ยกเลิก|cancel|reject)/i,               { bg:"FEE2E2", fg:"991B1B" }],
+];
+function statusPill(val) {
+  const s = String(val == null ? "" : val);
+  if (!s.trim() || s === "-") return null;
+  for (const [re, st] of STATUS_PILL) if (re.test(s)) return st;
+  return { bg:"E5E7EB", fg:"374151" };
+}
 
-  const kindTh = (k) => (k === "subassembly" ? "sub" : k === "panel" ? "แผง" : k === "package" ? "แพ็ก" : "part");
-  const filtered = logs.filter((l) => {
-    if ((l.parent_kind || "part") !== parentKind) return false;   // เฉพาะเบอร์แม่ชนิดนี้ (แผง / ซับ / แพ็ก)
-    if (projectFilter && l.parent_project !== projectFilter) return false;
-    if (partFilter && l.parent_no !== partFilter && l.child_no !== partFilter) return false;
-    return true;
+// ผสมสีให้อ่อนลง (เข้าหาสีขาว) ratio 0..1 — ใช้ทำโทนพาสเทลนุ่ม ๆ
+function lighten(hex, ratio) {
+  const n = parseInt(hex, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const L = x => Math.round(x + (255 - x) * ratio);
+  return ((L(r) << 16) | (L(g) << 8) | L(b)).toString(16).padStart(6, "0").toUpperCase();
+}
+
+// ─── Excel styling ─────────────────────────────────────────────────────────
+function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart, dataEnd,
+                           totalRow=null, moneyCols=[], usdCols=[], pctCols=[], centerCols=[], statusCols=[], theme,
+                           // rowGroups: array aligned to dataStart..dataEnd holding a "group key" per
+                           // row. When given, rows are shaded in solid blocks per group (instead of
+                           // plain every-other-row zebra) and a heavier divider line marks where one
+                           // group ends and the next begins — a long list then reads as clustered
+                           // sections instead of a flat grid.
+                           // groupDisplayCol: column index holding the group's label, bolded/tinted so
+                           // the eye can track straight down that column.
+                           // codeCol: column index whose text is tinted blue (เช่น Acc. Code) ให้ตรงกับหน้าจอ
+                           rowGroups = null, groupDisplayCol = null, codeCol = null }) {
+  ws["!rows"]   = ws["!rows"] || [];
+  ws["!merges"] = ws["!merges"] || [];
+  // ── ตารางสะอาด: เส้นตารางบาง ๆ สีเทาอ่อนทุกช่อง หัวตารางพื้นอ่อน (แบบรูปตัวอย่าง) ──
+  const HFILL = lighten(theme.main, 0.88); // หัวตาราง พื้นอ่อน
+  const GRID  = "CBD5E1";                  // เส้นตารางสีเทา (เข้มขึ้นให้เห็นชัด)
+  const HRULE = "9AA7BA";                  // เส้นใต้หัวตาราง (เข้มกว่าเส้นทั่วไป)
+  const BAND  = lighten(theme.main, 0.955);// แถบสลับสีจาง ๆ (โทนธีม)
+  const TFILL = lighten(theme.main, 0.86); // แถวรวม พื้นอ่อน
+  const TRULE = "9AA7BA";                  // เส้นเหนือแถวรวม
+  const GLINE = lighten(theme.main, 0.60); // เส้นแบ่งกลุ่ม (ชัดขึ้น)
+  const gridAll = { top:BORDER_THIN(GRID), bottom:BORDER_THIN(GRID), left:BORDER_THIN(GRID), right:BORDER_THIN(GRID) };
+
+  ws["!merges"].push({ s:{r:titleRow,c:0}, e:{r:titleRow,c:numCols-1} });
+  for (let c=0; c<numCols; c++) {
+    const ref = XLSX.utils.encode_cell({r:titleRow,c});
+    if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    // หัวเรื่อง: ตัวหนาใหญ่ พื้นขาว ไม่มีแถบสี
+    ws[ref].s = { font:{bold:true,sz:15,color:{rgb:theme.dark},name:"Tahoma"},
+      alignment:{vertical:"center",horizontal:"left"} };
+  }
+  ws["!rows"][titleRow] = { hpx:34 };
+
+  subRows.forEach(r => {
+    for (let c=0; c<numCols; c++) {
+      const ref = XLSX.utils.encode_cell({r,c});
+      if (ws[ref]) ws[ref].s = { font:{sz:9.5,color:{rgb:"94A3B8"},name:"Tahoma"} };
+    }
+    ws["!rows"][r] = { hpx:18 };
   });
 
-  const parentSet = new Set(filtered.map((l) => l.parent_unit_id));
-  const totalChildren = filtered.reduce((s, l) => s + (Number(l.qty) || 1), 0);   // รวม "จำนวนที่ใส่จริง" (นับจำนวนรวม) ไม่ใช่นับลิงก์
-  const totalLen = filtered.reduce((s, l) => s + (Number(l.length_mm) || 0), 0);
+  for (let c=0; c<numCols; c++) {
+    const ref = XLSX.utils.encode_cell({r:headerRow,c});
+    if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
+    ws[ref].s = { font:{bold:true,sz:10,color:{rgb:theme.dark},name:"Tahoma"},
+      fill:{fgColor:{rgb:HFILL}},
+      alignment:{vertical:"center",horizontal:isMoney||isPct?"right":isCenter?"center":"left",wrapText:true,indent:(isMoney||isPct||isCenter)?0:1},
+      // เส้นตารางบางทุกด้าน + เส้นใต้หัวตารางเข้มขึ้นนิด
+      border:{ ...gridAll, bottom:BORDER_THIN(HRULE) } };
+  }
+  ws["!rows"][headerRow] = { hpx:30 };
+  ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s:{r:headerRow,c:0}, e:{r:headerRow,c:numCols-1} }) };
+  // ตรึงทุกอย่างเหนือแถวข้อมูล (หัวข้อ+หัวตาราง) ให้ค้างไว้ตอนเลื่อน
+  ws["!freeze"] = { xSplit:0, ySplit:headerRow+1, topLeftCell: XLSX.utils.encode_cell({ r:headerRow+1, c:0 }), activePane:"bottomLeft", state:"frozen" };
 
-  // จับกลุ่ม (เบอร์แม่ยูนิต × เบอร์ลูก × ยาว) → รวมจำนวนที่ใช้จริง (assembly_links.qty)
-  const grp = {};
-  filtered.forEach((l) => {
-    const key = l.parent_unit_id + "|" + l.child_no + "|" + (l.length_mm ?? "");
-    if (!grp[key]) grp[key] = { parent_no: l.parent_no, parent_qr: l.parent_qr, child_no: l.child_no, child_kind: l.child_kind, length_mm: l.length_mm, qty: 0 };
-    grp[key].qty += (Number(l.qty) || 1);
+  // แถวสลับสีธรรมดาทีละแถว (ไม่ไล่สี/ไม่แบ่งเส้นตามกรุ๊ป) ให้ตารางเรียบเหมือนตัวอย่าง
+  for (let r=dataStart; r<=dataEnd; r++) {
+    const idx = r - dataStart;
+    const zebra = idx % 2 === 1;
+    const isGroupStart = false;
+    for (let c=0; c<numCols; c++) {
+      const ref = XLSX.utils.encode_cell({r,c});
+      if (!ws[ref]) continue;
+      const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
+      const isGroupLabel = groupDisplayCol != null && c === groupDisplayCol;
+      const isCode = codeCol != null && c === codeCol;
+      const isText = !isMoney && !isPct && !isCenter;
+      const s = { font: isGroupLabel
+          ? {sz:10,name:"Tahoma",bold:true,color:{rgb:theme.dark}}
+          : isCode
+          ? {sz:10,name:"Tahoma",color:{rgb:theme.dark}}
+          : {sz:10,name:"Tahoma",color:{rgb: isText ? "334155" : "475569"}},
+        alignment:{ vertical:"center", horizontal:isMoney||isPct?"right":isCenter?"center":"left", wrapText:true, indent: isText?1:0 },
+        // เส้นตารางบาง ๆ ทุกด้าน · ขึ้นกลุ่มใหม่ใช้เส้นบนเข้มขึ้นเป็นตัวแบ่ง
+        border:{ ...gridAll, ...(isGroupStart?{ top:BORDER_THIN(GLINE) }:{}) } };
+      if (zebra)   s.fill   = { fgColor:{rgb:BAND} };
+      if (isMoney) s.numFmt = usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0';   // แยกสัญลักษณ์ $ / ฿
+      if (isPct)   s.numFmt = "0.0%";
+      if (statusCols.includes(c)) {
+        const pill = statusPill(ws[ref].v);
+        if (pill) {
+          s.fill = { fgColor:{rgb:pill.bg} };
+          s.font = { sz:10, name:"Tahoma", bold:true, color:{rgb:pill.fg} };
+          s.alignment = { ...s.alignment, horizontal:"center", indent:0 };
+        }
+      }
+      ws[ref].s = s;
+    }
+    ws["!rows"][r] = ws["!rows"][r] || { hpx:22 };
+  }
+
+  if (totalRow != null) {
+    for (let c=0; c<numCols; c++) {
+      const ref = XLSX.utils.encode_cell({r:totalRow,c});
+      if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+      const isMoney = moneyCols.includes(c), isPct = pctCols.includes(c), isCenter = centerCols.includes(c);
+      const isText = !isMoney && !isPct && !isCenter;
+      ws[ref].s = { font:{bold:true,sz:10.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:TFILL}},
+        alignment:{vertical:"center",horizontal:isMoney||isPct?"right":isCenter?"center":"left",indent:isText?1:0},
+        // เส้นตารางบางทุกด้าน + เส้นเหนือแถวรวมเข้มขึ้นนิด
+        border:{ ...gridAll, top:BORDER_THIN(TRULE) },
+        numFmt: isMoney ? (usdCols.includes(c) ? '"$"#,##0.00' : '"฿"#,##0') : isPct?"0.0%":undefined };
+    }
+    ws["!rows"][totalRow] = { hpx:26 };
+  }
+
+  // จัดความกว้างคอลัมน์อัตโนมัติให้พอดีข้อความ (ดูจากหัวตาราง + ข้อมูล + แถวรวม)
+  const cols = [];
+  const scan = (r, c) => {
+    if (r == null) return;
+    const cell = ws[XLSX.utils.encode_cell({r,c})];
+    if (!cell) return;
+    let v = cell.v;
+    let s = (typeof v === "number") ? Math.round(v).toLocaleString("en-US") : String(v == null ? "" : v);
+    if (s.length > (cols[c]||0)) cols[c] = s.length;
+  };
+  for (let c=0; c<numCols; c++) {
+    cols[c] = 0;
+    scan(headerRow, c);
+    for (let r=dataStart; r<=dataEnd; r++) scan(r, c);
+    scan(totalRow, c);
+  }
+  ws["!cols"] = cols.map(w => ({ wch: Math.min(55, Math.max(8, w + 2)) }));
+}
+
+// จัดความกว้างคอลัมน์ให้พอดีข้อความ สำหรับตาราง ExcelJS (จากหัว + แถวข้อมูล)
+// ── ตัวช่วย USD สำหรับ Export ── ให้ไฟล์ Excel มีข้อมูลสอดคล้องกับหน้าจอ (บาท + ดอลลาร์)
+// exportRate: อัตราแลกเปลี่ยนของโปรเจกต์ (0 = ปิด USD → export เป็นบาทล้วนตามเดิม)
+function exportRate(project){ return (project?.showUsd !== false) ? (parseFloat(project?.usdRate)||0) : 0; }
+// toUsd: แปลงยอดบาท→USD (คืน "" ถ้าไม่ได้เปิด USD หรือค่าไม่ใช่ตัวเลข)
+function toUsd(thb, rate){ return (rate>0 && typeof thb==="number" && isFinite(thb)) ? Math.round((thb/rate)*100)/100 : ""; }
+
+// ── ลิงก์ข้ามชีต (hyperlink ภายในไฟล์) — คลิกแล้วกระโดดไปชีตปลายทาง ช่วยไล่ว่าข้อมูลมาจากไหน ──
+// ทำให้เซลล์ที่ ref เป็นลิงก์ไปยัง 'sheetName'  (สีน้ำเงินขีดเส้นใต้)
+function xLinkCell(ws, ref, sheetName, tip){
+  if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+  ws[ref].l = { Target:`#'${sheetName}'!A1`, Tooltip: tip || `ไปที่ชีต ${sheetName}` };
+  const prev = ws[ref].s || {};
+  ws[ref].s = { ...prev, font:{ ...(prev.font||{}), color:{rgb:"1D4ED8"}, underline:true } };
+}
+// วางแถวลิงก์ (links = [{text, sheet}]) ที่แถว r — ใช้ sheet_add_aoa เพื่อขยาย !ref ให้ด้วย
+function xLinkRow(ws, r, links){
+  if (!links || !links.length) return;
+  XLSX.utils.sheet_add_aoa(ws, [links.map(l=>l.text)], { origin:{ r, c:0 } });
+  links.forEach((l,i)=>{
+    const ref = XLSX.utils.encode_cell({ r, c:i });
+    ws[ref].l = { Target:`#'${l.sheet}'!A1`, Tooltip:`ไปที่ชีต ${l.sheet}` };
+    ws[ref].s = { font:{ color:{rgb:"1D4ED8"}, underline:true, bold:true, name:"Tahoma", sz:10 }, alignment:{ vertical:"center" } };
   });
-  const rows = Object.values(grp).sort((a, b) =>
-    String(a.parent_no).localeCompare(String(b.parent_no), undefined, { numeric: true })
-    || String(a.child_no).localeCompare(String(b.child_no), undefined, { numeric: true }));
-  const fmtL = (n) => (n == null || isNaN(Number(n)) ? "—" : Number(n).toLocaleString());
-
-  return (
-    <div>
-      <div className="stat-row">
-        <StatCard label={`จำนวนเบอร์แม่ (${kindWord})`} value={parentSet.size.toLocaleString()} icon="box" />
-        <StatCard label="จำนวนลูกที่ใส่รวม (ชิ้น)" value={totalChildren.toLocaleString()} icon="scan" />
-        <StatCard label="ความยาวรวม (มม.)" value={fmtL(totalLen)} icon="bolt" />
-      </div>
-      <Card title={`รายการ${kindWord} — เบอร์ลูกที่ใส่เข้าแต่ละเบอร์แม่`}>
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8 }}>
-          {isPack ? "แต่ละแพ็กมีลูก/แผงอะไรบ้าง ยาวเท่าไร กี่ชิ้น" : "แต่ละเบอร์แม่มีเบอร์ลูกอะไร ยาวเท่าไร กี่ชิ้น — ใช้เช็คว่าประกอบถูกไหม"}
-        </div>
-        {loading ? <div style={{ color: "var(--muted)", padding: 12 }}>กำลังโหลด…</div>
-          : rows.length === 0 ? <div style={{ color: "var(--muted)", padding: 12 }}>ไม่มีข้อมูลในช่วงนี้</div>
-          : (
-            <div style={{ overflowX: "auto" }}>
-              <table className="data-table" style={{ minWidth: 620 }}>
-                <thead><tr>
-                  <th>เบอร์แม่</th><th>เบอร์ลูก</th><th>ชนิด</th>
-                  <th style={{ textAlign: "right" }}>ยาว (มม.)</th><th style={{ textAlign: "right" }}>จำนวน (ชิ้น)</th>
-                </tr></thead>
-                <tbody>
-                  {rows.map((r, i) => (
-                    <tr key={i}
-                      onClick={() => goTo && goTo("verify", { qr: r.parent_qr })}
-                      title={goTo ? "กดเพื่อเปิดหน้าตรวจเบอร์นี้" : undefined}
-                      style={{ cursor: goTo ? "pointer" : "default" }}
-                      onMouseEnter={(e) => { if (goTo) e.currentTarget.style.background = "var(--accent-soft, rgba(16,185,129,.07))"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.background = ""; }}>
-                      <td>
-                        <span style={{ fontWeight: 700, color: goTo ? "var(--accent-dk, #0e9d63)" : "inherit" }}>{r.parent_no}</span>
-                        <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "monospace" }}>{r.parent_qr}</div>
-                      </td>
-                      <td>{r.child_no}</td>
-                      <td>{kindTh(r.child_kind)}</td>
-                      <td style={{ textAlign: "right", fontFamily: "monospace" }}>{fmtL(r.length_mm)}</td>
-                      <td style={{ textAlign: "right", fontFamily: "monospace", fontWeight: 700 }}>{r.qty}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-      </Card>
-    </div>
-  );
+  ws["!rows"] = ws["!rows"] || []; ws["!rows"][r] = { hpx:20 };
+}
+// ลิงก์ "↑ กลับหน้าสรุป" ที่แถว r คอลัมน์ท้าย ๆ ของชีตรายละเอียด
+function xBackLink(ws, r, c, backSheet){
+  XLSX.utils.sheet_add_aoa(ws, [["↑ กลับหน้าสรุป"]], { origin:{ r, c } });
+  const ref = XLSX.utils.encode_cell({ r, c });
+  ws[ref].l = { Target:`#'${backSheet}'!A1`, Tooltip:`กลับไปชีต ${backSheet}` };
+  ws[ref].s = { font:{ color:{rgb:"1D4ED8"}, underline:true, bold:true, name:"Tahoma", sz:10 }, alignment:{ horizontal:"right", vertical:"center" } };
 }
 
-function ReportPage({ goTo }) {
-  // ── Flexible date filter: quick preset / specific month / custom from–to ──
-  const [rangeMode, setRangeMode] = useState("preset");
-  const [preset, setPreset] = useState("week");
-  const [monthValue, setMonthValue] = useState(() => todayStr().slice(0, 7));
-  const [customFrom, setCustomFrom] = useState(() => daysAgoStr(7));
-  const [customTo, setCustomTo] = useState(() => todayStr());
-
-  // ── กรองรายโปรเจค + ราย Part ──
-  const [parts, setParts] = useState([]);
-  const [partFilter, setPartFilter] = useState("");
-  const [projectFilter, setProjectFilter] = useState("");   // "" = ทุกโปรเจค
-  const [projects, setProjects] = useState([]);              // รายชื่อโปรเจค (dedupe จาก releases)
-  const [relProj, setRelProj] = useState({});                // release_id → project_id (แม่นยำ ไม่ติดปัญหา part_no ซ้ำข้ามโปรเจค)
-
-  const [logs, setLogs] = useState([]);
-  const [deptFilter, setDeptFilter] = useState("machine");   // "machine"/"assembly"/"packing" — แต่ละแผนกดูคนละแบบ
-  const [operations, setOperations] = useState([]);   // ไว้แม็ป operation → แผนก (op_type)
-
-  // ── เลือกตารางก่อน export + สถานะระหว่างสร้างไฟล์ ──
-  const [exportOpen, setExportOpen] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [exportErr, setExportErr] = useState("");
-  const [pick, setPick] = useState({ op: true, machine: true, cycle: true, part: true, daily: true });
-
-  useEffect(() => { listRows("part_master", { order: "part_no" }).then(setParts); }, []);
-  useEffect(() => { listRows("operations").then(setOperations).catch(() => setOperations([])); }, []);
-
-  // โหลด releases ครั้งเดียว → map release→โปรเจค (สำหรับกรอง log) + รายชื่อโปรเจค (สำหรับ dropdown)
-  // ใช้ release_id เพราะ 1 release ผูกโปรเจคเดียวชัดเจน — เลี่ยงปัญหา part_no ซ้ำข้ามโปรเจค (K)
-  useEffect(() => {
-    getReleasesFull().then((rels) => {
-      const rp = {};
-      const pmap = new Map();
-      for (const r of rels || []) {
-        const pid = r.part_master?.project_id;
-        if (r.id && pid) rp[r.id] = pid;
-        if (pid && !pmap.has(pid)) {
-          const pj = r.part_master?.projects || {};
-          pmap.set(pid, { id: pid, code: pj.code || "", name: pj.name || "", status: pj.status || "" });
-        }
-      }
-      setRelProj(rp);
-      setProjects(Array.from(pmap.values()));
+function fitExcelCols(ws, header, dataRows, { min=8, max=55 } = {}) {
+  header.forEach((h, c) => {
+    let m = String(h == null ? "" : h).length;
+    dataRows.forEach(row => {
+      const v = row[c];
+      const s = (typeof v === "number") ? Math.round(v).toLocaleString("en-US") : String(v == null ? "" : v);
+      if (s.length > m) m = s.length;
     });
-  }, []);
-
-  useEffect(() => {
-    const range =
-      rangeMode === "month" ? monthRangeFor(monthValue) :
-      rangeMode === "custom" ? customRangeFor(customFrom, customTo) :
-      rangeFor(preset);
-    getScanLogsBetween(range.from, range.to).then(setLogs);
-  }, [rangeMode, preset, monthValue, customFrom, customTo]);
-
-  // อ่าน project ของแต่ละ log จาก release_id (เหมือน metrics.js) แล้วเทียบตัวกรอง
-  const logProjectId = (l) => {
-    const rid = l.release_id || l.part_unit?.release_id || null;
-    return rid ? relProj[rid] : undefined;
-  };
-  // แม็ป operation → แผนก (จาก op_type: assembly/packing · อื่น ๆ = เครื่องจักร)
-  const deptOfOpType = (ty) => (ty === "assembly" ? "sub" : ty === "panel" ? "panel" : (ty === "packing" || ty === "pack_panel" || ty === "pack_site") ? "packing" : "machine");
-  const opTypeById = {}, opTypeByName = {};
-  operations.forEach((o) => { if (o.id != null) opTypeById[o.id] = o.op_type; if (o.name) opTypeByName[o.name] = o.op_type; });
-  const deptOfLog = (l) => deptOfOpType(
-    l.operation?.op_type ?? opTypeById[l.operation?.id] ?? opTypeById[l.operation_id] ?? opTypeByName[l.operation?.name]
-  );
-  const filteredLogs = logs.filter((l) => {
-    if (projectFilter && logProjectId(l) !== projectFilter) return false;
-    if (partFilter && l.part_unit?.part_master?.part_no !== partFilter) return false;
-    if (deptFilter && deptOfLog(l) !== deptFilter) return false;
-    return true;
+    ws.getColumn(c+1).width = Math.min(max, Math.max(min, m + 2));
   });
+}
 
-  // ช่วงเวลาปัจจุบัน (ใช้ส่งให้วิวประกอบ/แพ็ก) — คำนวณเดียวกับ effect โหลด logs
-  const curRange =
-    rangeMode === "month" ? monthRangeFor(monthValue) :
-    rangeMode === "custom" ? customRangeFor(customFrom, customTo) :
-    rangeFor(preset);
-  // Part ที่โชว์ในตัวกรอง — เลือกโปรเจคแล้วโชว์เฉพาะ Part ของโปรเจคนั้น
-  const visibleParts = projectFilter ? parts.filter((p) => p.project_id === projectFilter) : parts;
-  // ตัวเลือกโปรเจค — ที่ยังทำอยู่ขึ้นก่อน · ปิดแล้วไว้ท้าย (มิเรอร์การ์ดล้างข้อมูลสแกน)
-  const projectOptions = [...projects]
-    .sort((a, b) => ((a.status === "closed") - (b.status === "closed"))
-      || String(a.code || "").localeCompare(String(b.code || ""), undefined, { numeric: true }))
-    .map((p) => ({ value: p.id, label: `${p.code || "?"} — ${p.name || ""}${p.status === "closed" ? " (ปิดแล้ว)" : ""}` }));
-  const selProj = projects.find((p) => p.id === projectFilter);
-
-  // แยกน้ำหนักเป็น 2 ตัวเลขคนละความหมาย (ดู metrics.js):
-  //   material  = น้ำหนักวัสดุจริง นับแต่ละชิ้นครั้งเดียว
-  //   processed = ปริมาณงานที่ประมวลผล นับทุกครั้งที่สแกน (ชิ้นผ่านหลายขั้น = นับหลายครั้ง)
-  const material = materialWeight(filteredLogs);
-  const processed = processedWeight(filteredLogs);
-  const distinctUnits = distinctUnitCount(filteredLogs);
-  const byOp = {};
-  filteredLogs.forEach((l) => {
-    const name = l.operation?.name || "ไม่ระบุ";
-    byOp[name] = byOp[name] || { name, count: 0, weight: 0 };
-    byOp[name].count += Number(l.quantity ?? 1) || 0;   // นับจำนวนชิ้น (งานหน้าเครื่อง = quantity)
-    byOp[name].weight += logWeight(l);   // ★ ใช้ตัวช่วยเดียวกับ metrics.js (fallback คูณ quantity ด้วย)
+// กราฟแท่งแนวตั้งที่ "วาดด้วยเซลล์" — ไลบรารีนี้ฝังกราฟจริง/รูปไม่ได้ จึงระบายสี
+// เซลล์ไล่จากล่างขึ้นบนตามค่าให้ออกมาเป็นกราฟแท่งในชีต Excel
+function addBarChartSheet(wb, sheetName, title, theme, items) {
+  items = (items || []).filter(Boolean);
+  if (!items.length) return;
+  const H = 12;
+  const max = Math.max(...items.map(i => i.value || 0), 1);
+  const n = items.length;
+  const LEFT = 1;                     // เว้นคอลัมน์แรกเป็นแกน
+  const totalCols = LEFT + n;
+  const valueRow = 2, chartTop = 3, labelRow = chartTop + H;
+  const aoa = [[title], []];
+  for (let r = 0; r < H + 2; r++) aoa.push(new Array(totalCols).fill(""));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = [{ s:{r:0,c:0}, e:{r:0,c:totalCols-1} }];
+  ws["!cols"] = [{ wch:4 }, ...items.map(()=>({ wch:11 }))];
+  ws["!rows"] = [];
+  ws["!rows"][0] = { hpx:26 };
+  for (let r = chartTop; r < chartTop + H; r++) ws["!rows"][r] = { hpx:15 };
+  ws["!rows"][labelRow] = { hpx:24 };
+  const setS = (r, c, s, v) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    if (v != null) ws[ref] = { t: typeof v === "number" ? "n" : "s", v };
+    else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    ws[ref].s = s;
+  };
+  setS(0, 0, { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Tahoma"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  const barOn = theme.main, barOff = "F3F4F6";
+  items.forEach((it, i) => {
+    const c = LEFT + i;
+    const filled = Math.max(0, Math.round(((it.value||0) / max) * H));
+    setS(valueRow, c, { font:{bold:true,sz:9,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
+    for (let k = 0; k < H; k++) {
+      const r = chartTop + (H - 1 - k); // k=0 = ล่างสุด
+      setS(r, c, { fill:{fgColor:{rgb: k < filled ? barOn : barOff }} });
+    }
+    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Tahoma"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
   });
-  const chartData = Object.values(byOp);
-  const matrix = machineOpMatrix(filteredLogs); // ตารางแยกน้ำหนักของเครื่อง × ขั้นตอน
-  const partMatrix = partOpMatrix(filteredLogs); // ตารางแยก Part No. × ขั้นตอน
-  const dailyMatrix = machineDailyMatrix(filteredLogs); // กก./จำนวน/เวลา ต่อวัน ต่อเครื่อง
-  // ── เรียงลำดับตารางรายงาน (กดหัวคอลัมน์) ──────────────────────────────────
-  const sortM = useTableSort();   // ตารางเครื่องจักร × ขั้นตอน (ปริมาณงาน + เฉลี่ย/วัน)
-  const sortW = useTableSort();   // ตารางปริมาณงานที่แต่ละเครื่องประมวลผล
-  const sortP = useTableSort();   // ตาราง Release × Part × ขั้นตอน
-  const dmByName = (name) => dailyMatrix.machines.find((x) => x.name === name);
-  const machineAcc = {
-    name: (m) => m.name, total: (m) => m.total.count, weight: (m) => m.total.weight,
-    time: (m) => m.total.seconds,
-    secPer: (m) => (m.total.count > 0 ? m.total.seconds / m.total.count : 0),   // cycle-time วินาที/ชิ้น
-    avgKg: (m) => dmByName(m.name)?.avg.weight || 0, avgPcs: (m) => dmByName(m.name)?.avg.count || 0,
-  };
-  matrix.opNames.forEach((op) => { machineAcc[`op:${op}`] = (m) => m.ops[op]?.count || 0; });
-  const partAcc = {
-    release: (p) => p.releaseOrder, part_no: (p) => p.partNo, part_name: (p) => p.partName,
-    total: (p) => p.total.count, weight: (p) => p.total.weight, finished: (p) => p.total.finished,
-  };
-  partMatrix.opNames.forEach((op) => { partAcc[`op:${op}`] = (p) => p.ops[op]?.count || 0; });
-  const noWeight = missingWeightParts(filteredLogs);     // Part ที่ยังไม่ตั้งน้ำหนัก → กก. = 0
-  const totalSeconds = filteredLogs.reduce((s, l) => s + (Number(l.process_seconds) || 0), 0);
-
-  // ── สร้างข้อมูลทุกตารางของหน้านี้ (คีย์ = ใช้กับกล่องเลือก · rows พร้อมเข้า exceljs) ──
-  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-  function buildAllSheets() {
-    const opRows = chartData.map((o) => ({ "ขั้นตอน": o.name, "จำนวน (ชิ้น)": o.count, "น้ำหนัก (กก.)": round2(o.weight) }));
-    const mOps = matrix.opNames;
-    const machineRows = matrix.machines.map((m) => {
-      const row = { "เครื่องจักร": m.name };
-      mOps.forEach((op) => { row[op] = m.ops[op]?.count || 0; });
-      row["รวม (ชิ้น)"] = m.total.count;
-      row["น้ำหนัก (กก.)"] = round2(m.total.weight);
-      row["เวลาเดินเครื่อง (วินาที)"] = Math.round(m.total.seconds || 0);
-      row["วินาที/ชิ้น"] = m.total.count > 0 ? round2(m.total.seconds / m.total.count) : "";
-      const dm = dmByName(m.name);
-      row["เฉลี่ย กก./วัน"] = dm ? round2(dm.avg.weight) : "";
-      row["เฉลี่ย ชิ้น/วัน"] = dm ? round2(dm.avg.count) : "";
-      return row;
-    });
-    const cycleRows = [];
-    matrix.machines.forEach((m) => mOps.forEach((op) => {
-      const c = m.ops[op];
-      if (!c || !c.count) return;
-      cycleRows.push({
-        "เครื่องจักร": m.name, "ขั้นตอน": op, "จำนวน (ชิ้น)": c.count,
-        "เวลา (วินาที)": Math.round(c.seconds || 0),
-        "วินาที/ชิ้น": c.count > 0 ? round2((c.seconds || 0) / c.count) : "",
-      });
-    }));
-    const pOps = partMatrix.opNames;
-    const partRows = partMatrix.parts.map((p) => {
-      const row = { "Release": p.releaseOrder, "Part No.": p.partNo, "ชื่อ Part": p.partName };
-      pOps.forEach((op) => { row[op] = p.ops[op]?.count || 0; });
-      row["รวม (ชิ้น)"] = p.total.count;
-      row["น้ำหนัก (กก.)"] = round2(p.total.weight);
-      row["เสร็จ (ชิ้น)"] = p.total.finished;
-      return row;
-    });
-    const dailyRows = [];
-    dailyMatrix.machines.forEach((m) => dailyMatrix.days.forEach((day) => {
-      const d = m.days[day];
-      if (!d) return;
-      dailyRows.push({
-        "เครื่องจักร": m.name, "วันที่": day, "จำนวน (ชิ้น)": d.count,
-        "น้ำหนัก (กก.)": round2(d.weight), "เวลา (วินาที)": Math.round(d.seconds || 0),
-      });
-    }));
-    return [
-      { key: "op", name: "สรุปตามขั้นตอน", rows: opRows },
-      { key: "machine", name: "เครื่องจักรxขั้นตอน", rows: machineRows },
-      { key: "cycle", name: "Cycle-time วินาทีต่อชิ้น", rows: cycleRows },
-      { key: "part", name: "ReleasexPart", rows: partRows },
-      { key: "daily", name: "รายวันต่อเครื่อง", rows: dailyRows },
-    ];
-  }
-  const allSheets = buildAllSheets();
-  const pickedCount = allSheets.filter((s) => pick[s.key]).length;
-
-  // ── ดาวน์โหลดเฉพาะตารางที่ติ๊กเลือก เป็นไฟล์ Excel มีสไตล์ (โหลด exceljs เฉพาะตอนกด) ──
-  async function doDownload() {
-    const chosen = allSheets.filter((s) => pick[s.key]);
-    if (!chosen.length) return;
-    setExporting(true); setExportErr("");
-    try {
-      const { downloadSheets } = await import("./excelExport.js");
-      await downloadSheets(
-        `report-${todayStr()}${selProj?.code ? "-" + selProj.code : ""}${partFilter ? "-" + partFilter : ""}.xlsx`,
-        chosen.map((s) => ({ name: s.name, rows: s.rows })),
-      );
-      setExportOpen(false);
-    } catch (e) {
-      console.warn("export excel error", e);
-      setExportErr("สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง");
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div className="page-title">รายงานข้อมูลสแกน</div>
-          <div className="page-sub">สรุปผลการสแกนตามช่วงเวลาและ Part ที่เลือก</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {deptFilter === "machine" && (
-            <Btn variant="accent" onClick={() => { setExportErr(""); setExportOpen(true); }} disabled={filteredLogs.length === 0}
-              title="เลือกตารางแล้วดาวน์โหลดเป็นไฟล์ Excel">
-              <Icon name="grid" size={15} /> ดาวน์โหลด Excel
-            </Btn>
-          )}
-        </div>
-      </div>
-
-      {exportOpen && (
-        <Modal title="เลือกตารางที่จะดาวน์โหลด" sub="ติ๊กเฉพาะตารางที่ต้องการ แล้วดาวน์โหลดเป็นไฟล์ Excel (.xlsx)"
-          onClose={() => { if (!exporting) setExportOpen(false); }} locked={exporting}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>เลือกแล้ว {pickedCount}/{allSheets.length} ตาราง</span>
-            <div style={{ display: "flex", gap: 6 }}>
-              <Btn variant="ghost" onClick={() => setPick({ op: true, machine: true, cycle: true, part: true, daily: true })} disabled={exporting}>เลือกทั้งหมด</Btn>
-              <Btn variant="ghost" onClick={() => setPick({ op: false, machine: false, cycle: false, part: false, daily: false })} disabled={exporting}>ล้าง</Btn>
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {allSheets.map((s) => (
-              <label key={s.key}
-                style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 11px", borderRadius: 10,
-                  cursor: exporting ? "default" : "pointer",
-                  background: pick[s.key] ? "var(--accent-soft, rgba(37,99,235,0.08))" : "transparent",
-                  border: "1px solid var(--border, #e5e7eb)" }}>
-                <input type="checkbox" checked={!!pick[s.key]} disabled={exporting}
-                  onChange={(e) => setPick((p) => ({ ...p, [s.key]: e.target.checked }))}
-                  style={{ accentColor: "var(--accent)", width: 16, height: 16, flexShrink: 0 }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{s.name}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                    {s.rows.length ? `${s.rows.length.toLocaleString()} แถว` : "ไม่มีข้อมูลในช่วงนี้"}
-                  </div>
-                </div>
-              </label>
-            ))}
-          </div>
-          {exportErr && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 10 }}>{exportErr}</div>}
-          <div className="modal-actions" style={{ marginTop: 16 }}>
-            <Btn variant="ghost" onClick={() => setExportOpen(false)} disabled={exporting}>ยกเลิก</Btn>
-            <Btn variant="accent" onClick={doDownload} disabled={exporting || pickedCount === 0}>
-              {exporting ? "กำลังสร้างไฟล์..." : `ดาวน์โหลด Excel (${pickedCount})`}
-            </Btn>
-          </div>
-        </Modal>
-      )}
-
-      <Card title="ช่วงเวลาที่ต้องการดู">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 22, alignItems: "start" }}>
-          {/* ── ซ้าย: ช่วงเวลา (โหมด + ค่า เรียงชิดกัน) ── */}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 9 }}>ช่วงเวลา</div>
-            <div className="chip-row" style={{ marginBottom: 12 }}>
-              {RANGE_MODES.map((m) => (
-                <span key={m.value} className={`chip ${rangeMode === m.value ? "active" : ""}`} onClick={() => setRangeMode(m.value)}>
-                  {m.label}
-                </span>
-              ))}
-            </div>
-            <div>
-              {rangeMode === "preset" && <PresetPicker value={preset} onChange={setPreset} />}
-              {rangeMode === "month" && (
-                <Input type="month" value={monthValue} onChange={(e) => setMonthValue(e.target.value)} style={{ maxWidth: 220 }} />
-              )}
-              {rangeMode === "custom" && (
-                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <Input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={{ maxWidth: 180 }} />
-                  <span style={{ color: "var(--muted)" }}>–</span>
-                  <Input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} style={{ maxWidth: 180 }} />
-                </div>
-              )}
-            </div>
-          </div>
-          {/* ── ขวา: กรองโปรเจค + Part (ป้ายบน · เต็มความกว้าง) ── */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>โปรเจค</div>
-              <Select value={projectFilter} style={{ width: "100%" }}
-                onChange={(e) => {
-                  const pid = e.target.value;
-                  setProjectFilter(pid);
-                  // ถ้า Part ที่เลือกไว้ไม่ได้อยู่ในโปรเจคใหม่ → ล้างตัวกรอง Part
-                  if (pid && partFilter && !parts.some((p) => p.project_id === pid && p.part_no === partFilter)) setPartFilter("");
-                }}
-                options={projectOptions} />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>Part</div>
-              <Select value={partFilter} onChange={(e) => setPartFilter(e.target.value)} style={{ width: "100%" }}
-                options={visibleParts.map((p) => ({ value: p.part_no, label: `${p.part_no} — ${p.part_name}` }))} />
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      {/* แยกดูตามแผนก — เครื่องจักร / แผง / ซับ / แพ็ก (กดสลับ · กรองทั้งรายงาน) */}
-      <DeptTabs value={deptFilter} onChange={setDeptFilter} />
-
-      {deptFilter === "machine" ? (
-      <>
-      <div className="stat-row">
-        <StatCard label="จำนวนที่บันทึก · นับต่อขั้นตอน" value={totalPieces(filteredLogs).toLocaleString()} icon="scan" />
-        <StatCard label="งาน/ล็อตที่มีความเคลื่อนไหว" value={distinctUnits.toLocaleString()} icon="box" />
-        <StatCard label="น้ำหนักวัสดุ · นับต่อชิ้น (กก.)" value={fmtNum(material)} icon="weight" />
-        <StatCard label="ปริมาณงานที่ประมวลผล · ทุกขั้นตอน (กก.)" value={fmtNum(processed)} icon="bolt" />
-        <StatCard label="เวลาเดินเครื่องรวม (จับจากหน้าเครื่อง)" value={fmtHrs(totalSeconds)} icon="bolt" />
-      </div>
-
-      {noWeight.length > 0 && (
-        <div className="card" style={{ background: "var(--danger-tint, #fff4f4)", borderColor: "var(--danger, #e11d1d)", color: "var(--danger-dk, #a01212)", fontSize: 12.5, padding: "10px 14px", marginBottom: 14, lineHeight: 1.6 }}>
-          <Icon name="warn" size={14} style={{ verticalAlign: "-2px", marginInlineEnd: 4 }} /><b>มี Part ที่ยังไม่ได้ตั้งน้ำหนัก/ชิ้น — น้ำหนักจะถูกนับเป็น 0 กก.</b><br />
-          {noWeight.map((p) => `${p.partNo} (${fmtNum(p.pieces)} ชิ้น)`).join(" · ")}
-          <br /><span style={{ opacity: .8 }}>ไปตั้งค่าน้ำหนัก/ชิ้นที่ Setup → Part Master เพื่อให้ กก. ครบถ้วน</span>
-        </div>
-      )}
-      <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-8px 2px 14px", lineHeight: 1.6 }}>
-        <b>น้ำหนักวัสดุ</b> = น้ำหนักของชิ้นงานจริง นับแต่ละชิ้นครั้งเดียว ·{" "}
-        <b>ปริมาณงานที่ประมวลผล</b> = รวมทุกครั้งที่สแกน ชิ้นที่ผ่านหลายขั้นตอนถูกนับซ้ำตามจำนวนขั้น (ใช้วัดภาระงานรวมของสายการผลิต)
-      </div>
-      <Card title="แยกตามขั้นตอนการทำงาน">
-        <SimpleBarChart data={chartData} color={CHART.accent} height={260} />
-      </Card>
-
-      <Card title="เครื่องจักร × ขั้นตอน (ปริมาณงาน + เฉลี่ย/วัน)">
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-          แต่ละเครื่องทำขั้นตอนอะไรไปเท่าไร (ชิ้น·กก.) + เวลาเดินเครื่อง + เฉลี่ย/วัน ในตารางเดียว · <b>เฉลี่ย/วัน</b> คิดจากเฉพาะวันที่มีงานจริง
-        </div>
-        {matrix.machines.length === 0 ? (
-          <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 2px" }}>ยังไม่มีการสแกนในช่วงเวลานี้</div>
-        ) : (
-          <div className="table-wrap tall-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <SortTh k="name" sort={sortM}>เครื่องจักร</SortTh>
-                  {matrix.opNames.map((op) => <SortTh k={`op:${op}`} sort={sortM} key={op}>{op}</SortTh>)}
-                  <SortTh k="total" sort={sortM}>รวม (ชิ้น)</SortTh>
-                  <SortTh k="weight" sort={sortM}>น้ำหนัก (กก.)</SortTh>
-                  <SortTh k="time" sort={sortM}>เวลาเดินเครื่อง</SortTh>
-                  <SortTh k="secPer" sort={sortM}>วินาที/ชิ้น</SortTh>
-                  <SortTh k="avgKg" sort={sortM}>เฉลี่ย กก./วัน</SortTh>
-                  <SortTh k="avgPcs" sort={sortM}>เฉลี่ย ชิ้น/วัน</SortTh>
-                </tr>
-              </thead>
-              <tbody>
-                {sortM.sortRows(matrix.machines, machineAcc).map((m) => {
-                  const dm = dailyMatrix.machines.find((x) => x.name === m.name);
-                  return (
-                    <tr key={m.name}>
-                      <td style={{ fontWeight: 600 }}>{m.name}</td>
-                      {matrix.opNames.map((op) => {
-                        const cell = m.ops[op];
-                        return (
-                          <td key={op}>
-                            {cell ? `${cell.count.toLocaleString()} ชิ้น` : <span style={{ color: "var(--surface-3)" }}>—</span>}
-                          </td>
-                        );
-                      })}
-                      <td style={{ fontWeight: 600, whiteSpace: "nowrap" }}>{m.total.count.toLocaleString()} ชิ้น</td>
-                      <td style={{ whiteSpace: "nowrap", color: "var(--accent-dk)" }}>{m.total.weight > 0 ? `${fmtNum(m.total.weight)} กก.` : "—"}</td>
-                      <td style={{ fontFamily: "var(--font-mono)" }}>{m.total.seconds ? fmtHrs(m.total.seconds) : "—"}</td>
-                      <td style={{ fontFamily: "var(--font-mono)", color: "var(--accent-dk)", whiteSpace: "nowrap" }}>{(m.total.seconds && m.total.count) ? `${(m.total.seconds / m.total.count).toFixed(1)} วิ` : "—"}</td>
-                      <td style={{ whiteSpace: "nowrap", color: "var(--accent-dk)" }}>{dm ? `${fmtNum(dm.avg.weight)} กก.` : "—"}</td>
-                      <td style={{ whiteSpace: "nowrap", color: "var(--accent-dk)" }}>
-                        {dm
-                          ? <span>{fmtNum(dm.avg.count)} ชิ้น{dm.avg.seconds ? <span style={{ color: "var(--muted)", fontSize: 11 }}> · {fmtHrs(dm.avg.seconds)}</span> : null}</span>
-                          : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.6 }}>
-          ตัวเลขคือปริมาณงาน (นับต่อการสแกน) ไม่ใช่จำนวนวัสดุ · <b>เวลาเดินเครื่อง</b> = เวลาที่จับจากกด START–SAVE บนหน้าเครื่อง (ไม่ใช่เวลาเครื่องเปิดจริง)
-        </div>
-      </Card>
-
-      <Card title="Release × Part × ขั้นตอน">
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-          แต่ละแถว = Part ในแต่ละ Release · คอลัมน์ขั้นตอน = จำนวนชิ้นที่ผ่านขั้นตอนนั้น · <b>น้ำหนัก</b> แยกคอลัมน์ · <b>เสร็จ</b> = ชิ้นที่กด Finished
-        </div>
-        {partMatrix.parts.length === 0 ? (
-          <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 2px" }}>ยังไม่มีการสแกนในช่วงเวลานี้</div>
-        ) : (
-          <div className="table-wrap tall-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <SortTh k="release" sort={sortP}>Release</SortTh>
-                  <SortTh k="part_no" sort={sortP}>Part No.</SortTh>
-                  <SortTh k="part_name" sort={sortP}>ชื่อ Part</SortTh>
-                  {partMatrix.opNames.map((op) => <SortTh k={`op:${op}`} sort={sortP} key={op}>{op}</SortTh>)}
-                  <SortTh k="total" sort={sortP}>รวม (ชิ้น)</SortTh>
-                  <SortTh k="weight" sort={sortP}>น้ำหนัก (กก.)</SortTh>
-                  <SortTh k="finished" sort={sortP}>เสร็จ (ชิ้น)</SortTh>
-                </tr>
-              </thead>
-              <tbody>
-                {sortP.sortRows(partMatrix.parts, partAcc).map((p) => (
-                  <tr key={`${p.releaseOrder} ${p.partNo}`}>
-                    <td style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{p.releaseOrder}</td>
-                    <td style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{p.partNo}</td>
-                    <td style={{ color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{p.partName}</td>
-                    {partMatrix.opNames.map((op) => {
-                      const cell = p.ops[op];
-                      return (
-                        <td key={op}>
-                          {cell ? `${cell.count.toLocaleString()} ชิ้น` : <span style={{ color: "var(--surface-3)" }}>—</span>}
-                        </td>
-                      );
-                    })}
-                    <td style={{ fontWeight: 600 }}>{p.total.count.toLocaleString()} ชิ้น</td>
-                    <td style={{ whiteSpace: "nowrap", color: "var(--accent-dk)" }}>{p.total.weight > 0 ? `${fmtNum(p.total.weight)} กก.` : "—"}</td>
-                    <td style={{ fontWeight: 700, color: p.total.finished > 0 ? "var(--success)" : "var(--muted)" }}>
-                      {p.total.finished > 0 ? `${p.total.finished.toLocaleString()} ชิ้น` : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      {/* ── Finished Part (รวมมาไว้ในหน้า Report) ──────────────────────────── */}
-      <div className="section-heading" style={{ margin: "26px 2px 12px", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
-        Finished Part — ชิ้นงานที่เสร็จสมบูรณ์
-      </div>
-      <FinishedPartSection />
-      </>
-      ) : (
-        <AssemblyReportView from={curRange.from} to={curRange.to} parentKind={deptFilter === "packing" ? "package" : deptFilter === "panel" ? "panel" : "subassembly"} projectFilter={projectFilter} partFilter={partFilter} goTo={goTo} />
-      )}
-    </div>
-  );
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// 6) MACHINES SUMMARY
-// ══════════════════════════════════════════════════════════════════════════
-function MachinesSummaryPage() {
-  const [preset, setPreset] = useState("week");
-  const [logs, setLogs] = useState([]);
-  useEffect(() => {
-    const { from, to } = rangeFor(preset);
-    getScanLogsBetween(from, to).then(setLogs);
-  }, [preset]);
-
-  // per-scan = ภาระงานของเครื่อง (ถูกต้อง: เครื่องทำงานกับชิ้นนั้นจริงทุกครั้งที่สแกน)
-  const matrix = machineOpMatrix(logs);
-  const rows = matrix.machines.map((m) => ({ name: m.name, count: m.total.count, weight: m.total.weight }));
-
-  // เรียงลำดับตาราง (กดหัวคอลัมน์) — ต้องมี sort + accessor ของหน้านี้เอง (เดิมอ้างของ ReportPage → จอขาว)
-  const sortW = useTableSort();
-  const machineAcc = {
-    name: (m) => m.name, total: (m) => m.total.count,
-    weight: (m) => m.total.weight, time: (m) => m.total.seconds,
-  };
-  matrix.opNames.forEach((op) => { machineAcc[`op:${op}`] = (m) => m.ops[op]?.count || 0; });
-
-  return (
-    <div>
-      <div className="page-head">
-        <div className="page-title">สรุปเครื่องจักร</div>
-        <PresetPicker value={preset} onChange={setPreset} />
-      </div>
-      <Card title="ปริมาณงานที่แต่ละเครื่องประมวลผล">
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-          นับตามจำนวนชิ้นที่ทำในแต่ละขั้นตอน — ชิ้นเดียวที่ผ่านหลายเครื่องจะถูกนับที่ทุกเครื่องที่ทำ (งานหน้าเครื่องนับตามจำนวนที่กรอก)
-        </div>
-        <div style={{ marginBottom: 16 }}>
-          <SimpleBarChart data={rows} color={CHART.success} height={240} />
-        </div>
-        <div className="table-wrap">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <SortTh k="name" sort={sortW}>เครื่องจักร</SortTh>
-                {matrix.opNames.map((op) => <SortTh k={`op:${op}`} sort={sortW} key={op}>{op}</SortTh>)}
-                <SortTh k="total" sort={sortW}>รวมทุกขั้นตอน</SortTh>
-                <SortTh k="weight" sort={sortW}>น้ำหนักรวม (กก.)</SortTh>
-                <SortTh k="time" sort={sortW}>เวลาเดินเครื่อง</SortTh>
-              </tr>
-            </thead>
-            <tbody>
-              {sortW.sortRows(matrix.machines, machineAcc).map((m) => (
-                <tr key={m.name}>
-                  <td style={{ fontWeight: 600 }}>{m.name}</td>
-                  {matrix.opNames.map((op) => {
-                    const cell = m.ops[op];
-                    return (
-                      <td key={op}>
-                        {cell
-                          ? <span>{cell.count} ชิ้น</span>
-                          : <span style={{ color: "var(--surface-3)" }}>—</span>}
-                      </td>
-                    );
-                  })}
-                  <td style={{ fontWeight: 600 }}>{m.total.count} ชิ้น</td>
-                  <td style={{ fontWeight: 600, color: "var(--accent-dk)" }}>{m.total.weight ? fmtNum(m.total.weight) : "—"}</td>
-                  <td style={{ fontFamily: "var(--font-mono)" }}>{m.total.seconds ? fmtHrs(m.total.seconds) : "—"}</td>
-                </tr>
-              ))}
-              {matrix.machines.length === 0 && (
-                <tr><td colSpan={matrix.opNames.length + 4} style={{ textAlign: "center", color: "var(--muted)", padding: 20 }}>ยังไม่มีการสแกนในช่วงเวลานี้</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 6.5) PROJECTS — รวม "จัดการ + สรุปความคืบหน้า" ไว้หน้าเดียว (เมนูแรกของขั้นตอนงาน)
-// ══════════════════════════════════════════════════════════════════════════
-// ─── ดู Release ทั้งหมดในโปรเจคเดียว → เจาะเข้า Release → Part → รายละเอียด ──────
-//   ใช้ ReleaseGroupDetail ตัวเดียวกับหน้า Release Production เพื่อให้รายละเอียดเหมือนกัน
-function ProjectReleasesView({ project, user, goTo, onBack }) {
-  const [groups, setGroups] = useState(null);   // null = กำลังโหลด
-  const [stats, setStats] = useState({});       // release_id → { total, finished, ... } (สแกนสำนักงาน)
-  const [opProg, setOpProg] = useState({});     // release_id → [{op,seq,done,finished}] (งานหน้าเครื่อง)
-  const [statsReady, setStatsReady] = useState(false);
-  const [viewGroup, setViewGroup] = useState(null);
-  const sort = useTableSort();
-
-  const load = useCallback(async () => {
-    const all = await getReleasesFull();
-    const mine = all.filter((r) => r.part_master?.project_id === project.id);
-    setGroups(groupReleases(mine));
-    const ids = mine.map((r) => r.id);
-    setStatsReady(false);
-    if (ids.length) {
-      // โหลดทั้งสแกนสำนักงาน + งานหน้าเครื่อง เพื่อคำนวณ %เสร็จ ให้ตรงกับหน้าอื่น
-      Promise.all([getUnitStatsByReleaseIds(ids), getReleaseOpProgress(ids)])
-        .then(([s, op]) => { setStats(s); setOpProg(op || {}); setStatsReady(true); });
-    } else { setStats({}); setOpProg({}); setStatsReady(true); }
-  }, [project.id]);
-  useEffect(() => { load(); }, [load]);
-
-  // เจาะเข้า Release Order → แสดง Part + รายละเอียด (เหมือนหน้า Release Production)
-  if (viewGroup) {
-    return (
-      <ReleaseGroupDetail
-        group={viewGroup} user={user} goTo={goTo}
-        onBack={() => setViewGroup(null)}
-        onHome={onBack}
-        onChanged={load}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-            <Btn variant="ghost" size="sm" onClick={onBack}><Icon name="arrowLeft" size={14} /> กลับไปหน้า Projects</Btn>
-          </div>
-          <div className="page-title">{project.code} — {project.name}</div>
-          <div className="page-sub">Release ทั้งหมดในโปรเจคนี้ · แตะแถวเพื่อดู Part และรายละเอียด</div>
-        </div>
-      </div>
-      <Card title={groups ? `Release ทั้งหมด (${groups.length})` : "Release ทั้งหมด"}>
-        <SortControl sort={sort} options={[
-          { k: "date", label: "วันที่" }, { k: "order", label: "Release Order" }, { k: "parts", label: "Part No." },
-          { k: "qty", label: "จำนวน" }, { k: "finished", label: "เสร็จแล้ว" }, { k: "progress", label: "ความคืบหน้า" }, { k: "weight", label: "น้ำหนักรวม" },
-        ]} />
-        {groups === null ? (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div>
-        ) : groups.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="box" size={32} />
-            <div className="empty-state-title">ยังไม่มี Release ในโปรเจคนี้</div>
-            <div className="empty-state-sub">ปล่อยงานที่หน้า Release Production เพื่อสร้าง Release แรก</div>
-          </div>
-        ) : (
-          <div className="table-wrap tall-scroll">
-            <table className="data-table responsive-cards">
-              <thead><tr>
-                <SortTh k="date" sort={sort}>วันที่</SortTh>
-                <SortTh k="order" sort={sort}>Release Order</SortTh>
-                <SortTh k="parts" sort={sort}>Part No.</SortTh>
-                <SortTh k="qty" sort={sort}>จำนวน</SortTh>
-                <SortTh k="finished" sort={sort}>เสร็จแล้ว</SortTh>
-                <SortTh k="progress" sort={sort}>ความคืบหน้า</SortTh>
-                <SortTh k="weight" sort={sort}>น้ำหนักรวม</SortTh>
-              </tr></thead>
-              <tbody>
-                {sort.sortRows(groups, {
-                  date: (g) => new Date(g.date).getTime() || 0,
-                  order: (g) => g.releaseOrder || (g.releases[0]?.part_master?.part_no ?? ""),
-                  parts: (g) => g.releases.length,
-                  qty: (g) => g.totalQty || 0,
-                  weight: (g) => g.totalWeight || 0,
-                  finished: (g) => computeGroupProgress(g.releases, stats, opProg, g.releases.reduce((s, r) => s + (stats[r.id]?.total ?? r.qty), 0)).finished,
-                  progress: (g) => {
-                    const t = g.releases.reduce((s, r) => s + (stats[r.id]?.total ?? r.qty), 0);
-                    return t > 0 ? computeGroupProgress(g.releases, stats, opProg, t).finished / t : 0;
-                  },
-                }).map((g) => {
-                  const gTotal = g.releases.reduce((s, r) => s + (stats[r.id]?.total ?? r.qty), 0);
-                  // ★ นิยาม "เสร็จ" เดียวกับหน้า Projects และรายละเอียด Release (max สำนักงาน/หน้าเครื่อง)
-                  const { finished: gFinished } = computeGroupProgress(g.releases, stats, opProg, gTotal);
-                  const gPct = gTotal > 0 ? Math.round((gFinished / gTotal) * 100) : null;
-                  return (
-                    <tr key={g.key} className="release-row" onClick={() => setViewGroup(g)}>
-                      <td data-label="วันที่">{fmtD(g.date)}</td>
-                      <td data-label="Release Order">{g.releaseOrder || (g.releases[0]?.part_master?.part_no ?? "-")}</td>
-                      <td data-label="Part No.">{fmtNum(g.releases.length)} Part</td>
-                      <td data-label="จำนวน">{fmtNum(g.totalQty)} ชิ้น</td>
-                      <td data-label="เสร็จแล้ว" style={{ fontWeight: 700, color: statsReady && gFinished > 0 ? "var(--success)" : "var(--muted)" }}>
-                        {statsReady ? `${fmtNum(gFinished)} ชิ้น` : "—"}
-                      </td>
-                      <td data-label="ความคืบหน้า" style={{ minWidth: 160 }}>
-                        {statsReady && gPct !== null ? (
-                          <ProgressBar pct={gPct} finished={gFinished} total={gTotal} />
-                        ) : (
-                          <span style={{ fontSize: 12, color: "var(--muted)" }}>—</span>
-                        )}
-                      </td>
-                      <td data-label="น้ำหนักรวม">{g.totalWeight ? `${fmtNum(g.totalWeight)} กก.` : "-"}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-    </div>
-  );
-}
-
-function ProjectsPage({ user, goTo }) {
-  const canEdit = canManage(user);
-  const [projects, setProjects] = useState([]);   // รายการโปรเจคเต็ม (รวม new ที่ยังไม่มีงาน)
-  const [statMap, setStatMap] = useState({});      // id → { total, finished, weight }
-  const [loading, setLoading] = useState(true);
-  const [showAdd, setShowAdd] = useState(false);
-  const [editing, setEditing] = useState(null);    // { project, impact }
-  const [viewProject, setViewProject] = useState(null); // โปรเจคที่กดเข้าไปดู Release อยู่
-  const sort = useTableSort("code");
-
-  const reload = useCallback(async () => {
-    setLoading(true);
-    const [ps, summary, station] = await Promise.all([
-      listRows("projects", { order: "code" }),
-      getProjectSummary(),
-      getProjectStationProgress(),   // B3: ความคืบหน้าจากงานหน้าเครื่อง
-    ]);
-    const m = {};
-    (summary || []).forEach((s) => { m[s.id] = { ...s }; });
-    // merge: ใช้ค่าที่ "มากกว่า" ระหว่างสแกนสำนักงาน (part_units.status) กับหน้าเครื่อง
-    Object.entries(station || {}).forEach(([pid, st]) => {
-      const base = m[pid] || { id: pid, total: 0, finished: 0, weight: 0 };
-      const stFin = Number(st?.finished) || 0;
-      if (stFin >= (Number(base.finished) || 0)) { base.finished = stFin; base.weight = Number(st?.weight) || base.weight; }
-      m[pid] = base;
-    });
-    setProjects(ps); setStatMap(m); setLoading(false);
-  }, []);
-  useEffect(() => { reload(); }, [reload]);
-
-  async function openEdit(p) {
-    if (!canEdit) return;
-    const impact = await getProjectImpact(p.id);
-    setEditing({ project: p, impact });
-  }
-
-  // แอดมินปิด/เปิดโปรเจคได้จากในกล่อง "แก้ไข" (ProjectEditModal) แล้ว — ไม่มีปุ่มแยกในแถว
-
-  // กดเข้าไปดู Release ในโปรเจคนี้ (แล้วเจาะเข้า Part / รายละเอียด ต่อได้)
-  if (viewProject) {
-    return (
-      <ProjectReleasesView
-        project={viewProject} user={user} goTo={goTo}
-        onBack={() => { setViewProject(null); reload(); }}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <div className="page-title">โปรเจค</div>
-          <div className="page-sub">เพิ่ม / แก้ไข / ลบ โปรเจค + ดูความคืบหน้าแยกตามโปรเจค · แตะแถวเพื่อดู Release และ Part ในโปรเจคนั้น</div>
-        </div>
-        {canEdit && (
-          <Btn variant="accent" onClick={() => setShowAdd(true)}><Icon name="folder" size={15} /> เพิ่มโปรเจค</Btn>
-        )}
-      </div>
-      <Card title={`โปรเจคทั้งหมด (${projects.length})`}>
-        <SortControl sort={sort} options={[
-          { k: "code", label: "รหัส" }, { k: "name", label: "ชื่อโปรเจค" }, { k: "total", label: "ปล่อยงาน" },
-          { k: "finished", label: "เสร็จแล้ว" }, { k: "pct", label: "% เสร็จ" }, { k: "weight", label: "น้ำหนักวัสดุ" },
-        ]} />
-        {loading ? (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div>
-        ) : projects.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="folder" size={32} />
-            <div className="empty-state-title">ยังไม่มีโปรเจค</div>
-            <div className="empty-state-sub">กด “เพิ่มโปรเจค” เพื่อสร้างโปรเจคแรก</div>
-          </div>
-        ) : (
-          <div className="table-wrap tall-scroll">
-            <table className="data-table responsive-cards">
-              <thead><tr>
-                <SortTh k="code" sort={sort}>รหัส</SortTh>
-                <SortTh k="name" sort={sort}>ชื่อโปรเจค</SortTh>
-                <SortTh k="total" sort={sort}>ปล่อยงาน (ชิ้น)</SortTh>
-                <SortTh k="finished" sort={sort}>เสร็จแล้ว</SortTh>
-                <SortTh k="pct" sort={sort}>% เสร็จ</SortTh>
-                <SortTh k="weight" sort={sort}>น้ำหนักวัสดุ (กก.)</SortTh>{canEdit && <th></th>}
-              </tr></thead>
-              <tbody>
-                {sort.sortRows(projects, {
-                  code: (p) => p.code, name: (p) => p.name,
-                  total: (p) => statMap[p.id]?.total || 0,
-                  finished: (p) => statMap[p.id]?.finished || 0,
-                  pct: (p) => { const s = statMap[p.id]; return s?.total ? s.finished / s.total : 0; },
-                  weight: (p) => statMap[p.id]?.weight || 0,
-                }).map((p) => {
-                  const s = statMap[p.id] || { total: 0, finished: 0, weight: 0 };
-                  const done = s.total > 0 && s.finished >= s.total;   // ครบจริง
-                  const pct = s.total ? (done ? 100 : Math.min(99, Math.round((s.finished / s.total) * 100))) : 0;
-                  return (
-                    <tr key={p.id} className="release-row" onClick={() => setViewProject(p)} title="กดเพื่อดู Release ในโปรเจคนี้"
-                      style={p.status === "closed" ? { opacity: 0.62 } : undefined}>
-                      <td data-label="รหัส" style={{ fontFamily: "var(--font-mono)" }}>{p.code}
-                        {p.status === "closed" && <span className="proj-closed-badge">ปิดแล้ว</span>}
-                      </td>
-                      <td data-label="ชื่อโปรเจค">{p.name}</td>
-                      <td data-label="ปล่อยงาน (ชิ้น)">{fmtNum(s.total)}</td>
-                      <td data-label="เสร็จแล้ว" style={{ fontWeight: 700, color: s.finished > 0 ? "var(--success)" : "var(--muted)" }}>{fmtNum(s.finished)}</td>
-                      <td data-label="% เสร็จ">
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <div style={{ width: 64, height: 6, borderRadius: 4, background: "var(--surface-3)", overflow: "hidden" }}>
-                            <div style={{ width: `${pct}%`, height: "100%", background: done ? "var(--success)" : "var(--accent)" }} />
-                          </div>
-                          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{pct}%</span>
-                        </div>
-                      </td>
-                      <td data-label="น้ำหนักวัสดุ (กก.)">{fmtNum(s.weight)}</td>
-                      {canEdit && (
-                        <td data-label="" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                          {p.status === "closed" && (
-                            <span title="โปรเจคนี้ปิดแล้ว — เปิด/แก้ได้ในปุ่มแก้ไข"
-                              style={{ fontSize: 11.5, fontWeight: 700, color: "#b45309", background: "#fff4e5",
-                                       border: "1px solid #f5c98a", borderRadius: 999, padding: "3px 10px", marginRight: 8 }}>
-                              ปิดแล้ว
-                            </span>
-                          )}
-                          <Btn variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); openEdit(p); }}><Icon name="settings" size={13} /> แก้ไข</Btn>
-                        </td>
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      {showAdd && (
-        <QuickAddProjectModal onClose={() => setShowAdd(false)} onCreated={() => { setShowAdd(false); reload(); }} />
-      )}
-      {editing && (
-        <ProjectEditModal
-          project={editing.project} impact={editing.impact} admin={isAdmin(getSession())}
-          onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); reload(); }}
-          onDeleted={() => { setEditing(null); reload(); }}
-        />
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 8) PARTS SUMMARY
-// ══════════════════════════════════════════════════════════════════════════
-function PartsSummaryPage() {
-  // รวมยอดฝั่ง DB ผ่าน RPC (เรียงตามจำนวนมาก→น้อยมาจาก DB แล้ว) — แก้ H6
-  const [rows, setRows] = useState([]);
-  const sort = useTableSort();
-  useEffect(() => { getPartSummary().then(setRows); }, []);
-  return (
-    <div>
-      <div className="page-head"><div className="page-title">สรุป Part</div></div>
-      <Card title="สรุปแยกตามชนิด Part (สะสมทั้งหมด)">
-        <SortControl sort={sort} options={[
-          { k: "part_no", label: "Part No." }, { k: "part_name", label: "ชื่อ Part" },
-          { k: "total", label: "ปล่อยงาน" }, { k: "finished", label: "เสร็จแล้ว" }, { k: "weight", label: "น้ำหนักวัสดุ" },
-        ]} />
-        <div className="table-wrap tall-scroll">
-          <table className="data-table responsive-cards">
-            <thead><tr>
-              <SortTh k="part_no" sort={sort}>Part No.</SortTh>
-              <SortTh k="part_name" sort={sort}>ชื่อ Part</SortTh>
-              <SortTh k="total" sort={sort}>ปล่อยงาน</SortTh>
-              <SortTh k="finished" sort={sort}>เสร็จแล้ว</SortTh>
-              <SortTh k="weight" sort={sort}>น้ำหนักวัสดุ (กก.)</SortTh>
-            </tr></thead>
-            <tbody>
-              {sort.sortRows(rows, {
-                part_no: (r) => r.part_no || "", part_name: (r) => r.part_name || "",
-                total: (r) => Number(r.total) || 0, finished: (r) => Number(r.finished) || 0, weight: (r) => Number(r.weight) || 0,
-              }).map((r) => (
-                <tr key={r.id}><td data-label="Part No." style={{ whiteSpace: "nowrap" }}>{r.part_no}</td><td data-label="ชื่อ Part" style={{ whiteSpace: "nowrap" }}>{r.part_name}</td><td data-label="ปล่อยงาน">{fmtNum(r.total)}</td><td data-label="เสร็จแล้ว" style={{ fontWeight: 600, color: r.finished > 0 ? "var(--success)" : "var(--muted)" }}>{fmtNum(r.finished)}</td><td data-label="น้ำหนักวัสดุ (กก.)">{fmtNum(r.weight)}</td></tr>
-              ))}
-              {rows.length === 0 && (
-                <tr><td colSpan={5}>
-                  <div className="empty-state" style={{ padding: "24px 0" }}>
-                    <Icon name="grid" size={30} />
-                    <div className="empty-state-title">ยังไม่มีข้อมูลการปล่อยงาน</div>
-                    <div className="empty-state-sub">เมื่อมีการปล่อยงาน/สแกน จะเห็นสรุปแยกตาม Part ที่นี่</div>
-                  </div>
-                </td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 9) SETUP
-// ══════════════════════════════════════════════════════════════════════════
-// ─── Projects: เพิ่ม/แก้ไข/ลบ พร้อมเช็คผลกระทบก่อนลบ (มี Part/Release/QR อยู่ใต้โปรเจคไหม) ──
-function ProjectEditModal({ project, impact, onClose, onSaved, onDeleted, admin }) {
-  const [code, setCode] = useState(project.code);
-  const [name, setName] = useState(project.name);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [rels, setRels] = useState(null);   // รายการ Release ในโปรเจคนี้
-  useEffect(() => {
-    getReleasesFull().then((all) => setRels(all.filter((r) => r.part_master?.project_id === project.id)));
-  }, [project.id]);
-
-  async function save() {
-    const c = code.trim(), n = name.trim();
-    if (!c || !n) { setErr("กรอกรหัสและชื่อโปรเจคให้ครบ"); return; }
-    setBusy(true); setErr("");
-    try {
-      await updateRow("projects", project.id, { code: c, name: n });
-      onSaved();
-    } catch (e) {
-      setErr(isDuplicateError(e) ? `รหัสโปรเจค "${c}" มีอยู่แล้ว กรุณาใช้รหัสอื่น` : "บันทึกไม่สำเร็จ: " + e.message);
-    }
-    setBusy(false);
-  }
-
-  // ปิด/เปิดโปรเจค (admin) — ย้ายมาจากปุ่มในแถวหน้า "โปรเจค" · ปิดแล้วหน้าเครื่องบันทึกงานเพิ่มไม่ได้
-  async function toggleStatus() {
-    const closing = project.status !== "closed";
-    if (closing && !(await askConfirm({
-      message: `ปิดโปรเจค "${project.code} — ${project.name}"?\nหน้าเครื่องจะบันทึกงานเพิ่มไม่ได้ จนกว่าจะเปิดใหม่`,
-      tone: "warn", confirmText: "ปิดโปรเจค", cancelText: "ยกเลิก",
-    }))) return;
-    setBusy(true); setErr("");
-    try {
-      await updateRow("projects", project.id, { status: closing ? "closed" : "active" });
-      auditRecord(closing ? "close_project" : "reopen_project", "project", project.id, { code: project.code, name: project.name });
-      mlsToast(closing ? "ปิดโปรเจคแล้ว" : "เปิดโปรเจคอีกครั้งแล้ว", "success");
-      onSaved();   // ปิดกล่อง + รีโหลดรายการให้เห็นสถานะใหม่
-    } catch (e) {
-      setErr("เปลี่ยนสถานะไม่สำเร็จ: " + (e?.message || e));
-      setBusy(false);
-    }
-  }
-
-  async function remove() {
-    const hasData = impact.partCount > 0;
-    const msg = impact.scannedCount > 0
-      ? `โปรเจคนี้มี ${impact.partCount} Part, ${impact.releaseCount} Release, ${impact.unitCount} ชิ้น (QR) และมี ${impact.scannedCount} ชิ้นที่สแกนไปแล้ว (มีประวัติการทำงาน)\n\nการลบโปรเจคจะลบข้อมูลทั้งหมดนี้ทิ้งไปด้วย และกู้คืนไม่ได้\n\nพิมพ์รหัสโปรเจค "${project.code}" เพื่อยืนยันการลบ`
-      : hasData
-      ? `โปรเจคนี้มี ${impact.partCount} Part และ ${impact.unitCount} ชิ้น (QR) แต่ยังไม่มีการสแกน\n\nต้องการลบโปรเจคนี้พร้อมข้อมูลทั้งหมดหรือไม่? การลบกู้คืนไม่ได้`
-      : `ต้องการลบโปรเจค "${project.code} — ${project.name}" หรือไม่?`;
-
-    if (impact.scannedCount > 0) {
-      const typed = prompt(msg);
-      if (typed !== project.code) { if (typed !== null) mlsToast("รหัสโปรเจคไม่ตรง ยกเลิกการลบ", "warn"); return; }
-    } else if (!(await askConfirm({ message: msg, tone: "danger", confirmText: "ลบโปรเจค", cancelText: "ยกเลิก" }))) {
-      return;
-    }
-
-    setBusy(true); setErr("");
-    try {
-      await deleteProjectCascade(project.id);
-      auditRecord("delete_project", "project", project.id, { code: project.code, name: project.name });
-      onDeleted();
-    } catch (e) {
-      setErr("ลบไม่สำเร็จ: " + e.message);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal title="แก้ไขโปรเจค" sub={`สร้างเมื่อ ${fmtDT(project.created_at)}`} onClose={onClose}>
-      <div className="grid-2">
-        <Field label="รหัสโปรเจค *"><Input value={code} onChange={(e) => setCode(e.target.value)} /></Field>
-        <Field label="ชื่อโปรเจค *"><Input value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      </div>
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
-        ใต้โปรเจคนี้มี {impact.partCount} Part · {impact.releaseCount} Release · {impact.unitCount} ชิ้น (QR)
-        {impact.scannedCount > 0 && <> · สแกนไปแล้ว {impact.scannedCount} ชิ้น</>}
-      </div>
-
-      {/* ปิด/เปิดโปรเจค (แอดมิน) — ย้ายมาจากปุ่มในแถว */}
-      {admin && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
-          padding: "10px 12px", marginBottom: 12, borderRadius: 8,
-          background: project.status === "closed" ? "#fff4e5" : "var(--surface-2, #f3f6f4)",
-          border: `1px solid ${project.status === "closed" ? "#f5c98a" : "var(--border)"}` }}>
-          <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>
-            {project.status === "closed"
-              ? <>สถานะ: <b style={{ color: "#b45309" }}>ปิดแล้ว (เสร็จ)</b><br /><span style={{ color: "var(--muted)" }}>หน้าเครื่องบันทึกงานเพิ่มไม่ได้</span></>
-              : <>สถานะ: <b style={{ color: "var(--success, #0a7)" }}>กำลังทำ</b><br /><span style={{ color: "var(--muted)" }}>ปิดเมื่อทำเสร็จ เพื่อกันบันทึกงานเพิ่ม</span></>}
-          </div>
-          <Btn type="button" variant="ghost" size="sm" disabled={busy} onClick={toggleStatus}>
-            {project.status === "closed"
-              ? <><Icon name="refresh" size={13} /> เปิดโปรเจคอีกครั้ง</>
-              : <><Icon name="check" size={13} /> ปิดโปรเจค (เสร็จ)</>}
-          </Btn>
-        </div>
-      )}
-
-      {/* รายการ Release ในโปรเจคนี้ — รวมเป็น 1 Release Order ต่อ 1 แถว */}
-      {(() => {
-        let orders = null;
-        if (rels) {
-          const map = new Map();
-          for (const r of rels) {
-            const key = r.release_order || `__${r.id}`;   // ไม่มีเลขที่ → แยกแถวของตัวเอง
-            const g = map.get(key) || { order: r.release_order || "-", date: r.release_date, parts: 0, qty: 0 };
-            g.parts += 1; g.qty += Number(r.qty) || 0;
-            if (new Date(r.release_date) > new Date(g.date)) g.date = r.release_date;
-            map.set(key, g);
-          }
-          orders = Array.from(map.values()).sort((a, b) => new Date(b.date) - new Date(a.date));
-        }
-        return (
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 6 }}>
-              Release ในโปรเจคนี้{orders ? ` (${orders.length})` : ""}
-            </div>
-            {orders === null ? (
-              <div style={{ fontSize: 12, color: "var(--muted)" }}>กำลังโหลด...</div>
-            ) : orders.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--muted)" }}>ยังไม่มี Release</div>
-            ) : (
-              <div style={{ maxHeight: 190, overflow: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
-                <table className="data-table" style={{ fontSize: 12.5 }}>
-                  <thead><tr><th>วันที่</th><th>Release Order</th><th>Part No.</th><th>จำนวนรวม</th></tr></thead>
-                  <tbody>
-                    {orders.map((g, i) => (
-                      <tr key={i}>
-                        <td>{fmtD(g.date)}</td>
-                        <td>{g.order}</td>
-                        <td>{g.parts} Part</td>
-                        <td>{fmtNum(g.qty)} ชิ้น</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        );
-      })()}
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-      <div className="modal-actions" style={{ justifyContent: "space-between" }}>
-        {admin ? (
-          <Btn type="button" variant="danger" size="sm" onClick={remove} disabled={busy}>
-            <Icon name="trash" size={13} /> ลบโปรเจคนี้
-          </Btn>
-        ) : <span />}
-        <div style={{ display: "flex", gap: 8 }}>
-          <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn type="button" variant="accent" onClick={save} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึก"}</Btn>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// (ProjectCrud ถูกลบ — เป็นโค้ดตาย: SetupPage ไม่มีแท็บ "projects" · การจัดการโปรเจคอยู่ที่หน้า "โปรเจค" (ProjectsPage) แล้ว)
-
-// ─── ล้างข้อมูลสแกน (admin): ทั้ง Release / ราย Part / รายชิ้น — ลบบันทึกงาน + รีเซ็ตสถานะ ───
-// ─── ผู้ใช้ที่กำลังล็อกอินอยู่ + บังคับออกจากระบบ (เฉพาะ Admin) ───────────────────
-function ActiveSessionsCard() {
-  const [rows, setRows] = useState(null);   // null = loading
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState("");     // sid ที่กำลังเตะ
-  const [msg, setMsg] = useState("");
-  const [now, setNow] = useState(Date.now());
-
-  const load = useCallback(async () => {
-    try {
-      const data = await listActiveSessions();
-      setRows(Array.isArray(data) ? data : []);
-      setErr("");
-    } catch (e) {
-      setErr("โหลดรายชื่อไม่สำเร็จ: " + (e?.message || e));
-      setRows([]);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-  // รีเฟรชอัตโนมัติทุก 30 วิ (สถานะออนไลน์เปลี่ยนตาม heartbeat) + เดินนาฬิกา "ใช้งานล่าสุด"
-  useEffect(() => {
-    const t1 = setInterval(load, 30000);
-    const t2 = setInterval(() => setNow(Date.now()), 15000);
-    return () => { clearInterval(t1); clearInterval(t2); };
-  }, [load]);
-
-  function ago(iso) {
-    if (!iso) return "-";
-    const s = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
-    if (s < 45) return "เมื่อสักครู่";
-    const m = Math.floor(s / 60);
-    if (m < 1) return "เมื่อสักครู่";
-    if (m < 60) return `${m} นาทีที่แล้ว`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h} ชม.ที่แล้ว`;
-    return `${Math.floor(h / 24)} วันที่แล้ว`;
-  }
-
-  async function kick(row) {
-    if (row.is_self) return;
-    const who = `${row.code || "-"}${row.name ? " — " + row.name : ""}`;
-    if (!(await askConfirm({ message: `บังคับ "${who}" ออกจากระบบ?\n\nเครื่องนั้นจะซิงค์งานที่ค้างให้เสร็จก่อน แล้วเด้งออกเอง (ข้อมูลไม่หาย) — ต้องล็อกอินใหม่ถึงจะใช้ต่อได้`, tone: "warn", confirmText: "บังคับออก", cancelText: "ยกเลิก" }))) return;
-    setBusy(row.sid); setMsg("");
-    try {
-      const res = await forceLogoutSession(row.sid);
-      if (res?.ok) {
-        auditRecord("force_logout", "session", row.sid, { code: row.code, name: row.name, machine: row.machine_code });
-        setMsg(`บังคับ ${who} ออกจากระบบแล้ว — เครื่องนั้นจะเด้งออกภายใน 1 นาที`);
-        mlsToast("บังคับออกจากระบบแล้ว", "success");
-        await load();
-      } else if (res?.reason === "self") {
-        mlsToast("เตะเครื่องที่กำลังใช้อยู่ไม่ได้", "warn");
-      } else {
-        mlsToast("เครื่องนั้นออกไปแล้ว หรือไม่พบเซสชัน", "warn");
-        await load();
-      }
-    } catch (e) {
-      setErr("บังคับออกไม่สำเร็จ: " + (e?.message || e));
-    } finally { setBusy(""); }
-  }
-
-  const online = (rows || []).filter((r) => r.online).length;
-
-  return (
-    <Card
-      title="ผู้ใช้ที่กำลังใช้งาน (เฉพาะ Admin)"
-      right={<Btn variant="ghost" size="sm" onClick={load} disabled={rows === null}>รีเฟรช</Btn>}
-    >
-      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-        รายชื่อบัญชีที่ยัง “ถือเซสชันอยู่” (ยังไม่หมดอายุ/ยังไม่ถูกตัด) · จุดเขียว = กำลังออนไลน์ (มีสัญญาณใน 3 นาที) ·
-        กด <b>บังคับออกจากระบบ</b> เพื่อเตะเครื่องนั้น — เครื่องนั้นจะซิงค์งานค้างให้เสร็จก่อนแล้วเด้งออกเอง <b>(ข้อมูลไม่หาย)</b>
-      </div>
-
-      {msg && <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: "var(--accent-dk, #0a7)" }}>✓ {msg}</div>}
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>{err}</div>}
-
-      {rows === null ? (
-        <div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div>
-      ) : rows.length === 0 ? (
-        <div className="empty-state">
-          <Icon name="user" size={30} />
-          <div className="empty-state-title">ยังไม่มีใครล็อกอินอยู่</div>
-          <div className="empty-state-sub">เมื่อมีเครื่อง/บัญชีเข้าใช้งาน จะแสดงที่นี่</div>
-        </div>
-      ) : (
-        <>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 8 }}>
-            ทั้งหมด <b>{rows.length}</b> เซสชัน · ออนไลน์ตอนนี้ <b style={{ color: "var(--accent-dk)" }}>{online}</b>
-          </div>
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead><tr>
-                <th style={{ width: 44 }}>สถานะ</th><th>บัญชี</th><th>บทบาท</th><th>เครื่อง</th><th>ใช้งานล่าสุด</th><th></th>
-              </tr></thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.sid}>
-                    <td>
-                      <span title={r.online ? "ออนไลน์" : "เงียบ (แท็บปิด/ออฟไลน์)"} style={{
-                        display: "inline-block", width: 10, height: 10, borderRadius: 999,
-                        background: r.online ? "var(--success, #22c55e)" : "var(--border, #cbd5d1)",
-                        boxShadow: r.online ? "0 0 0 3px rgba(34,197,94,.18)" : "none",
-                      }} />
-                    </td>
-                    <td style={{ whiteSpace: "nowrap" }}>
-                      <span style={{ fontWeight: 600 }}>{r.code || "-"}</span>{r.name ? <span style={{ color: "var(--muted)" }}> — {r.name}</span> : null}
-                      {r.is_self && <> <Badge tone="steel">เครื่องนี้</Badge></>}
-                    </td>
-                    <td style={{ whiteSpace: "nowrap", fontSize: 12.5, color: "var(--muted)" }}>{ROLE_LABELS[r.role] || r.role || "-"}</td>
-                    <td style={{ whiteSpace: "nowrap", fontSize: 12.5 }}>{r.is_machine ? `${r.machine_code || "-"}${r.machine_name ? " — " + r.machine_name : ""}` : <span style={{ color: "var(--muted)" }}>—</span>}</td>
-                    <td style={{ whiteSpace: "nowrap", fontSize: 12.5, color: r.online ? "var(--text)" : "var(--muted)" }}>{ago(r.last_seen)}</td>
-                    <td style={{ textAlign: "right" }}>
-                      <Btn variant="danger" size="sm" disabled={r.is_self || busy === r.sid} onClick={() => kick(r)}>
-                        {busy === r.sid ? "กำลังเตะ..." : "บังคับออกจากระบบ"}
-                      </Btn>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-    </Card>
-  );
-}
-
-// ─── งานค้างซิงค์ราย "เครื่อง" (dead-letter) — ทำแล้วแต่เข้าระบบไม่ได้ (เฉพาะ Admin) ───
-const DL_REASONS = {
-  not_found: "QR/ล็อตถูกลบหรือแก้",
-  project_closed: "โปรเจคถูกปิด",
-  retry_exhausted: "ลองซิงค์หลายครั้งไม่สำเร็จ",
-};
-function DeadLetterCard() {
-  const [rows, setRows] = useState(null);   // null = loading
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(0);
-
-  const load = useCallback(async () => {
-    try { setRows(await listDeadLetter(false)); setErr(""); }
-    catch (e) { setErr("โหลดไม่สำเร็จ: " + (e?.message || e)); setRows([]); }
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  async function resolve(id) {
-    setBusy(id);
-    try { await resolveDeadLetter(id); setRows((prev) => prev.filter((r) => r.id !== id)); }
-    catch (e) { setErr("ทำเครื่องหมายไม่สำเร็จ: " + (e?.message || e)); }
-    finally { setBusy(0); }
-  }
-
-  function itemText(r) {
-    if (r.kind === "qr" || r.qr) return `QR ${r.qr || "-"}`;
-    const d = r.detail || {};
-    return "งานหน้าเครื่อง" + (d.quantity != null ? ` · ${fmtNum(d.quantity)} ชิ้น` : "");
-  }
-
-  return (
-    <Card title="งานค้างซิงค์ (stranded) — เฉพาะ Admin" right={<Btn variant="ghost" size="sm" onClick={load} disabled={rows === null}>รีเฟรช</Btn>}>
-      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-        งานที่ทำหน้าเครื่อง (ตอนออฟไลน์) แล้ว <b>ซิงค์เข้าระบบไม่ได้ถาวร</b> — มักเพราะ QR/ล็อตถูกลบหรือแก้ฝั่งออฟฟิศ · แก้ต้นเหตุ (เช่นกู้ล็อตคืน) แล้วให้เครื่องนั้นกด “ลองซิงค์ใหม่” ในแถบงานค้าง · เคลียร์แล้วกด ✓ จัดการแล้ว
-      </div>
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      {rows === null ? (
-        <div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div>
-      ) : rows.length === 0 ? (
-        <div className="empty-state">
-          <Icon name="check" size={30} />
-          <div className="empty-state-title">ไม่มีงานค้างซิงค์</div>
-          <div className="empty-state-sub">ทุกเครื่องซิงค์งานเข้าระบบครบ</div>
-        </div>
-      ) : (
-        <div className="table-wrap tall-scroll">
-          <table className="data-table">
-            <thead><tr><th>เวลาทำงาน</th><th>เครื่อง</th><th>ผู้ทำ</th><th>งาน</th><th>เหตุผล</th><th></th></tr></thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.id}>
-                  <td style={{ whiteSpace: "nowrap", fontSize: 12.5, color: "var(--muted)" }}>{fmtDT(r.client_ts || r.reported_at)}</td>
-                  <td style={{ whiteSpace: "nowrap", fontSize: 12.5 }}>{r.machine_code || "-"}</td>
-                  <td style={{ whiteSpace: "nowrap", fontSize: 12.5 }}>{r.actor_code || "-"}</td>
-                  <td style={{ fontSize: 12.5 }}>{itemText(r)}</td>
-                  <td><Badge tone="danger">{DL_REASONS[r.reason] || r.reason || "-"}</Badge></td>
-                  <td style={{ textAlign: "right" }}>
-                    <Btn variant="ghost" size="sm" disabled={busy === r.id} onClick={() => resolve(r.id)}>{busy === r.id ? "..." : "✓ จัดการแล้ว"}</Btn>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-// ─── ประวัติการแก้ไข (audit log) — ใครทำอะไรที่สำคัญ/ลบข้อมูลได้ (เฉพาะ Admin) ───
-const AUDIT_ACTIONS = {
-  delete_project:      { label: "ลบโปรเจค", tone: "danger" },
-  delete_release:      { label: "ลบ Release", tone: "danger" },
-  delete_employee:     { label: "ลบพนักงาน", tone: "danger" },
-  delete_machine:      { label: "ลบเครื่องจักร", tone: "danger" },
-  clear_scans:         { label: "ล้างข้อมูลสแกน", tone: "danger" },
-  restore_backup:      { label: "กู้คืน Backup", tone: "warning" },
-  force_logout:        { label: "บังคับออกจากระบบ", tone: "warning" },
-  edit_release_header: { label: "แก้หัวเอกสาร Release", tone: "steel" },
-  close_project:       { label: "ปิดโปรเจค", tone: "muted" },
-  reopen_project:      { label: "เปิดโปรเจค", tone: "muted" },
-};
-
-function auditDetailText(row) {
-  const d = row.detail || {};
-  const parts = [];
-  if (d.code || d.name) parts.push([d.code, d.name].filter(Boolean).join(" — "));
-  if (d.part_no) parts.push(`Part ${d.part_no}`);
-  if (d.release_order) parts.push(d.release_order);
-  if (d.project && !d.code) parts.push(`โปรเจค ${d.project}`);
-  if (d.parts != null) parts.push(`${fmtNum(d.parts)} Part`);
-  if (d.qty != null) parts.push(`${fmtNum(d.qty)} ชิ้น`);
-  if (d.scope) parts.push(`ขอบเขต: ${d.scope}`);
-  if (d.machine_records != null) parts.push(`บันทึกหน้าเครื่อง ${fmtNum(d.machine_records)}`);
-  if (d.records != null) parts.push(`ประวัติ ${fmtNum(d.records)} รายการ`);
-  if (d.mode) parts.push(`โหมด ${d.mode}`);
-  if (d.mdf != null) parts.push(`Modify ${d.mdf}`);
-  if (d.date) parts.push(`วันที่ ${d.date}`);
-  if (d.machine) parts.push(`เครื่อง ${d.machine}`);
-  return parts.join(" · ") || (row.entity_id ? `id ${String(row.entity_id).slice(0, 8)}` : "—");
-}
-
-function AuditLogCard() {
-  const [rows, setRows] = useState(null);   // null = loading
-  const [err, setErr] = useState("");
-  const [canMore, setCanMore] = useState(false);
-  const [more, setMore] = useState(false);
-
-  const load = useCallback(async () => {
-    try { const r = await listAuditLog({ limit: 200 }); setRows(r); setCanMore(r.length >= 200); setErr(""); }
-    catch (e) { setErr("โหลดไม่สำเร็จ: " + (e?.message || e)); setRows([]); }
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  async function loadMore() {
-    if (!rows || rows.length === 0) return;
-    setMore(true);
-    try {
-      const before = rows[rows.length - 1].created_at;
-      const next = await listAuditLog({ limit: 200, before });
-      setRows((prev) => [...prev, ...next]);
-      setCanMore(next.length >= 200);
-    } catch (e) { setErr("โหลดเพิ่มไม่สำเร็จ: " + (e?.message || e)); }
-    finally { setMore(false); }
-  }
-
-  return (
-    <Card title="ประวัติการแก้ไข (เฉพาะ Admin)" right={<Btn variant="ghost" size="sm" onClick={load} disabled={rows === null}>รีเฟรช</Btn>}>
-      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-        บันทึกการกระทำสำคัญ/ที่ลบข้อมูลได้ — ใครทำ อะไร เมื่อไหร่ (ลบโปรเจค/Release, ล้างสแกน, บังคับออกจากระบบ, แก้หัวเอกสาร, ปิด/เปิดโปรเจค, กู้คืน)
-      </div>
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      {rows === null ? (
-        <div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div>
-      ) : rows.length === 0 ? (
-        <div className="empty-state">
-          <Icon name="clock" size={30} />
-          <div className="empty-state-title">ยังไม่มีประวัติ</div>
-          <div className="empty-state-sub">เมื่อมีการลบ/แก้/กู้คืนข้อมูลสำคัญ จะบันทึกที่นี่</div>
-        </div>
-      ) : (
-        <>
-          <div className="table-wrap tall-scroll">
-            <table className="data-table">
-              <thead><tr><th>เวลา</th><th>ผู้ทำ</th><th>การกระทำ</th><th>รายละเอียด</th></tr></thead>
-              <tbody>
-                {rows.map((r) => {
-                  const a = AUDIT_ACTIONS[r.action] || { label: r.action, tone: "muted" };
-                  return (
-                    <tr key={r.id}>
-                      <td style={{ whiteSpace: "nowrap", fontSize: 12.5, color: "var(--muted)" }}>{fmtDT(r.created_at)}</td>
-                      <td style={{ whiteSpace: "nowrap", fontSize: 12.5 }}>{r.actor_code || "-"}{r.actor_name ? <span style={{ color: "var(--muted)" }}> — {r.actor_name}</span> : null}</td>
-                      <td style={{ whiteSpace: "nowrap" }}><Badge tone={a.tone}>{a.label}</Badge></td>
-                      <td style={{ fontSize: 12.5 }}>{auditDetailText(r)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {canMore && (
-            <div style={{ marginTop: 10 }}>
-              <Btn variant="ghost" size="sm" onClick={loadMore} disabled={more}>{more ? "กำลังโหลด..." : "โหลดเพิ่ม"}</Btn>
-            </div>
-          )}
-        </>
-      )}
-    </Card>
-  );
-}
-
-function ClearScansCard() {
-  const [releases, setReleases] = useState([]);
-  const [projId, setProjId] = useState("");
-  const [scope, setScope] = useState("project");   // project (ทั้งโปรเจค) | group (ชุด Release) | part | unit (QR)
-  const [grpKey, setGrpKey] = useState("");         // index (string) ใน groups
-  const [relId, setRelId] = useState("");
-  const [qr, setQr] = useState("");
-  const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState("");
-  const [msg, setMsg] = useState(null);
-  useEffect(() => { getReleasesFull().then(setReleases); }, []);
-
-  // โปรเจค (dedupe จาก releases) — ที่ยังทำอยู่ขึ้นก่อน · ปิดแล้วไว้ท้าย (ลิสต์สั้น เลือกง่าย)
-  const projects = useMemo(() => {
-    const m = new Map();
-    for (const r of releases) {
-      const pid = r.part_master?.project_id; if (!pid) continue;
-      const p = m.get(pid) || {
-        id: pid, name: r.part_master?.projects?.name || "-",
-        code: r.part_master?.projects?.code || "", status: r.part_master?.projects?.status || "",
-        parts: 0, qty: 0,
-      };
-      p.parts += 1; p.qty += Number(r.qty) || 0; m.set(pid, p);
-    }
-    return Array.from(m.values()).sort((a, b) =>
-      ((a.status === "closed") - (b.status === "closed")) || String(a.name).localeCompare(String(b.name)));
-  }, [releases]);
-
-  const proj = projects.find((p) => p.id === projId) || null;
-  const projReleases = useMemo(() => releases.filter((r) => r.part_master?.project_id === projId), [releases, projId]);
-  // ชุด Release (release_order) ภายในโปรเจคที่เลือก
-  const groups = useMemo(() => {
-    const m = new Map();
-    for (const r of projReleases) {
-      const ro = r.release_order || "";
-      const g = m.get(ro) || { releaseOrder: r.release_order || null, parts: 0, qty: 0 };
-      g.parts += 1; g.qty += Number(r.qty) || 0; m.set(ro, g);
-    }
-    return Array.from(m.values());
-  }, [projReleases]);
-
-  function resetSel() { setPreview(null); setMsg(null); setProgress(""); }
-  function pickProject(id) { setProjId(id); setScope("project"); setGrpKey(""); setRelId(""); setQr(""); resetSel(); }
-
-  async function doPreview() {
-    setMsg(null); setPreview(null); setProgress(""); setBusy(true);
-    try {
-      if (scope === "project") {
-        if (!projId) { mlsToast("เลือกโปรเจคก่อน", "warn"); return; }
-        // รวมผลตรวจของทุกชุดในโปรเจค (แต่ละชุดแยกกันตาม release_order → บวกกันได้)
-        let mr = 0, sl = 0, un = 0, rp = 0, i = 0;
-        for (const g of groups) {
-          i += 1; setProgress(`กำลังตรวจ ${i}/${groups.length}`);
-          const p = await clearScansReleaseGroup(projId, g.releaseOrder, { preview: true });
-          mr += p.machine_records || 0; sl += p.scan_logs || 0; un += p.units || 0; rp += p.releases || 0;
-        }
-        setProgress("");
-        setPreview({ machine_records: mr, scan_logs: sl, units: un, releases: rp, whole: true });
-      } else if (scope === "group") {
-        const g = grpKey === "" ? null : groups[Number(grpKey)];   // ★ Number("")===0 → กันเผลอมองว่าเป็นชุดแรก
-        if (!g) { mlsToast("เลือกชุด Release ก่อน", "warn"); return; }
-        setPreview({ ...(await clearScansReleaseGroup(projId, g.releaseOrder, { preview: true })), grp: g });
-      } else if (scope === "part") {
-        if (!relId) { mlsToast("เลือก Part ก่อน", "warn"); return; }
-        setPreview(await clearScansRelease(relId, { preview: true }));
-      } else {
-        if (!qr.trim()) { mlsToast("พิมพ์/สแกน QR ก่อน", "warn"); return; }
-        const u = await findUnitByQr(qr.trim());
-        if (!u) { setMsg({ ok: false, text: "ไม่พบ QR นี้ในระบบ" }); return; }
-        setPreview({ ...(await clearScansUnit(u.id, { preview: true })), unit: u });
-      }
-    } catch (e) { setMsg({ ok: false, text: "ตรวจสอบไม่สำเร็จ: " + (e?.message || e) }); }
-    finally { setBusy(false); setProgress(""); }
-  }
-
-  async function doClear() {
-    const total = (preview?.machine_records || 0) + (preview?.scan_logs || 0);
-    const scopeLabel = scope === "project" ? `ทั้งโปรเจค “${proj?.name || ""}”`
-      : scope === "group" ? "ชุด Release นี้" : scope === "part" ? "Part นี้" : "ชิ้นนี้";
-    if (!(await askConfirm({ message: `ยืนยันลบข้อมูลสแกนของ${scopeLabel} (${total} รายการ)?\nลบแล้วกู้คืนไม่ได้ — แนะนำสำรองข้อมูลก่อน`, tone: "danger", confirmText: "ลบข้อมูลสแกน", cancelText: "ยกเลิก" }))) return;
-    setBusy(true); setProgress("");
-    let mr = 0, sl = 0, doneGroups = 0;
-    try {
-      if (scope === "project") {
-        for (const g of groups) {
-          setProgress(`กำลังลบ ${doneGroups + 1}/${groups.length}`);
-          const res = await clearScansReleaseGroup(projId, g.releaseOrder, {});
-          mr += res.machine_records || 0; sl += res.scan_logs || 0; doneGroups += 1;
-        }
-      } else if (scope === "group") {
-        const g = grpKey === "" ? null : groups[Number(grpKey)];
-        if (!g) { mlsToast("เลือกชุด Release ก่อน", "warn"); return; }
-        const res = await clearScansReleaseGroup(projId, g.releaseOrder, {}); mr = res.machine_records || 0; sl = res.scan_logs || 0;
-      } else if (scope === "part") {
-        const res = await clearScansRelease(relId, {}); mr = res.machine_records || 0; sl = res.scan_logs || 0;
-      } else {
-        const u = preview?.unit || await findUnitByQr(qr.trim());
-        const res = await clearScansUnit(u.id, {}); mr = res.machine_records || 0; sl = res.scan_logs || 0;
-      }
-      auditRecord("clear_scans", "scan_data", null, { scope, project: projId || null, machine_records: mr, scan_logs: sl });
-      setMsg({ ok: true, text: `ลบแล้ว — บันทึกงานหน้าเครื่อง ${fmtNum(mr)} · สแกนสำนักงาน ${fmtNum(sl)} รายการ · รีเซ็ตสถานะชิ้นงานแล้ว` });
-      setPreview(null); setGrpKey(""); setRelId(""); setQr(""); setProgress("");
-    } catch (e) {
-      // ★ whole-project วนลบทีละชุด (ไม่ atomic) — ถ้าพังกลางคัน บอกว่าลบไปแล้วกี่ชุด กด "ลบ" ซ้ำลบต่อได้
-      const partial = (scope === "project" && doneGroups > 0)
-        ? ` (ลบไปแล้ว ${doneGroups}/${groups.length} ชุด — กด “ลบข้อมูลสแกน” ซ้ำเพื่อลบส่วนที่เหลือ)` : "";
-      setMsg({ ok: false, text: "ลบไม่สำเร็จ: " + (e?.message || e) + partial });
-    }
-    finally { setBusy(false); setProgress(""); }
-  }
-
-  const chipCls = (v) => `chip ${scope === v ? "active" : ""}`;
-  const totalPrev = preview ? (preview.machine_records || 0) + (preview.scan_logs || 0) : 0;
-
-  return (
-    <Card title="ล้างข้อมูลสแกน (เฉพาะ Admin)">
-      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.6 }}>
-        ลบเฉพาะ “ข้อมูลการสแกน/บันทึกงาน” ของขอบเขตที่เลือก แล้วรีเซ็ตสถานะชิ้นงานกลับเป็น “ยังไม่ทำ” — โปรเจค / Release / Part / QR ยังอยู่ครบ · <b style={{ color: "var(--danger, #e11d1d)" }}>ลบแล้วกู้คืนไม่ได้</b> แนะนำสำรองข้อมูลก่อน
-      </div>
-
-      <Field label="1) เลือกโปรเจค">
-        <Select value={projId} onChange={(e) => pickProject(e.target.value)}
-          options={[{ value: "", label: "— เลือกโปรเจค —" }, ...projects.map((p) => ({
-            value: p.id,
-            label: `${p.name}${p.code ? " (" + p.code + ")" : ""} — ${p.parts} Part × ${fmtNum(p.qty)} ชิ้น${p.status === "closed" ? " · ปิดแล้ว" : ""}`,
-          }))]} />
-      </Field>
-
-      {projId && (
-        <>
-          <Field label="2) ขอบเขตที่จะลบ">
-            <div className="chip-row">
-              <span className={chipCls("project")} onClick={() => { setScope("project"); resetSel(); }}>ทั้งโปรเจค</span>
-              <span className={chipCls("group")} onClick={() => { setScope("group"); resetSel(); }}>รายชุด Release</span>
-              <span className={chipCls("part")} onClick={() => { setScope("part"); resetSel(); }}>ราย Part</span>
-              <span className={chipCls("unit")} onClick={() => { setScope("unit"); resetSel(); }}>รายชิ้น (QR)</span>
-            </div>
-          </Field>
-
-          {scope === "project" && (
-            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
-              จะลบข้อมูลสแกนของ <b>ทุก Part / ทุกชุด</b> ในโปรเจคนี้ — {groups.length} ชุด · {proj?.parts || 0} Part × {fmtNum(proj?.qty || 0)} ชิ้น
-            </div>
-          )}
-          {scope === "group" && (
-            <Field label="เลือกชุด Release">
-              <Select value={grpKey} onChange={(e) => { setGrpKey(e.target.value); setPreview(null); }}
-                options={[{ value: "", label: "— เลือกชุด —" }, ...groups.map((g, i) => ({
-                  value: String(i), label: `${g.releaseOrder || "(ไม่มีเลข)"} — ${g.parts} Part × ${fmtNum(g.qty)} ชิ้น`,
-                }))]} />
-            </Field>
-          )}
-          {scope === "part" && (
-            <Field label="เลือก Part">
-              <Select value={relId} onChange={(e) => { setRelId(e.target.value); setPreview(null); }}
-                options={[{ value: "", label: "— เลือก Part —" }, ...projReleases.map((r) => ({
-                  value: r.id, label: `${r.part_master?.part_no || "-"}${r.release_order ? " · " + r.release_order : ""} × ${r.qty} ชิ้น`,
-                }))]} />
-            </Field>
-          )}
-          {scope === "unit" && (
-            <Field label="รหัส QR ของชิ้นงาน">
-              <Input value={qr} onChange={(e) => { setQr(e.target.value); setPreview(null); }} placeholder="สแกน/พิมพ์รหัส QR" />
-            </Field>
-          )}
-
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
-            <Btn variant="ghost" onClick={doPreview} disabled={busy}>ตรวจจำนวนก่อนลบ</Btn>
-            {preview && (
-              <Btn variant="danger" onClick={doClear} disabled={busy}>ลบข้อมูลสแกน ({fmtNum(totalPrev)} รายการ)</Btn>
-            )}
-            {progress && <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{progress}</span>}
-          </div>
-
-          {preview && (
-            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 10 }}>
-              พบ: บันทึกงานหน้าเครื่อง <b>{fmtNum(preview.machine_records || 0)}</b> · สแกนสำนักงาน <b>{fmtNum(preview.scan_logs || 0)}</b>
-              {preview.units != null ? <> · รีเซ็ตชิ้นงาน <b>{fmtNum(preview.units)}</b></> : null}
-              {preview.releases != null ? <> · ครอบคลุม <b>{fmtNum(preview.releases)}</b> Part</> : null}
-              {preview.unit ? <> · ชิ้น {preview.unit.part_master?.part_no || ""} ({preview.unit.qr_code})</> : null}
-              {totalPrev === 0 ? <> — <b>ไม่มีข้อมูลสแกนให้ลบ</b></> : null}
-            </div>
-          )}
-        </>
-      )}
-
-      {msg && <div style={{ fontSize: 13, fontWeight: 600, marginTop: 12, color: msg.ok ? "var(--accent-dk, #0a7)" : "var(--danger, #e11d1d)" }}>{msg.ok ? "✓ " : "⚠ "}{msg.text}</div>}
-    </Card>
-  );
-}
-
-function SetupPage() {
-  const [tab, setTab] = useState("machines");
-  const TABS = [
-    { key: "machines", label: "เครื่อง/สถานี" },
-    { key: "operations", label: "ขั้นตอน" },
-    { key: "parts", label: "Part Master" },
-    { key: "employees", label: "พนักงาน" },
-    { key: "departments", label: "แผนก" },
-    { key: "sessions", label: "ผู้ใช้ออนไลน์" },
-    { key: "audit", label: "ประวัติการแก้ไข" },
-    { key: "backup", label: "สำรองข้อมูล" },
+// หน้า "สรุป (Dashboard)" — การ์ดตัวเลข + กราฟแท่งรายเดือน อยู่ในหน้าเดียวกัน
+function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], chartTitle, items = [], groups = null }) {
+  items = items.filter(Boolean);
+  groups = (groups || []).filter(Boolean);
+  const n = items.length;
+  const C = Math.max(1 + n, 8);              // อย่างน้อย 8 คอลัมน์
+  const H = 10;                              // ความสูงกราฟ (แถว)
+  const cardLabelRow = 3, cardValRow = 4, chartTitleRow = 6, valueRow = 7, chartTop = 8, labelRow = chartTop + H;
+  const hasG = groups.length > 0;
+  const gTitleRow = labelRow + 2, gHeadRow = gTitleRow + 1, gStart = gHeadRow + 1, gEnd = gStart + groups.length - 1, gTotalRow = gEnd + 1;
+  const nRows = (hasG ? gTotalRow : labelRow) + 2;
+  const aoa = Array.from({ length:nRows }, () => new Array(C).fill(""));
+  aoa[0][0] = title; aoa[1][0] = subtitle || ""; aoa[chartTitleRow][0] = chartTitle || "";
+  if (hasG) aoa[gTitleRow][0] = "สรุปตามกลุ่มวัสดุ (สัดส่วนงบรวม)";
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = [
+    { s:{r:0,c:0}, e:{r:0,c:C-1} },
+    { s:{r:1,c:0}, e:{r:1,c:C-1} },
+    { s:{r:chartTitleRow,c:0}, e:{r:chartTitleRow,c:C-1} },
   ];
-  return (
-    <div>
-      <div className="page-head"><div className="page-title">ตั้งค่า</div></div>
-      <div className="chip-row" style={{ marginBottom: 18 }}>
-        {TABS.map((t) => (
-          <span key={t.key} className={`chip ${tab === t.key ? "active" : ""}`} onClick={() => setTab(t.key)}>{t.label}</span>
-        ))}
-      </div>
-      {tab === "machines" && <MachineCrud />}
-      {tab === "operations" && <OperationsCrud />}
-      {tab === "departments" && <SimpleCrud table="departments" fields={[{ key: "name", label: "ชื่อแผนก" }]} />}
-      {tab === "employees" && <EmployeeCrud />}
-      {tab === "sessions" && <><ActiveSessionsCard /><DeadLetterCard /></>}
-      {tab === "audit" && <AuditLogCard />}
-      {tab === "parts" && <PartMasterCrud />}
-      {tab === "backup" && <><RestorePointsCard /><BackupCard /><ClearScansCard /></>}
-    </div>
-  );
-}
-
-// ─── จุดกู้คืนในแอป: ดูสแนปช็อตย้อนหลัง 7 วัน แยกโปรเจค + กดกู้คืนได้เลย ────────
-function RestoreModal({ backup, onClose, onDone }) {
-  const [mode, setMode] = useState(null);   // 'merge' | 'replace'
-  const [confirmText, setConfirmText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const code = backup.project_code || "";
-
-  async function run() {
-    setBusy(true); setErr("");
-    try {
-      const res = await restoreBackup(backup.id, mode);
-      auditRecord("restore_backup", "project", backup.project_id || backup.id, { code: backup.project_code, name: backup.project_name, mode });
-      onDone(res, mode);
-    } catch (e) {
-      setErr("กู้คืนไม่สำเร็จ: " + (e?.message || e));
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal title="กู้คืนข้อมูลโปรเจค" sub={`${code} — ${backup.project_name || ""} · จุดกู้คืนวันที่ ${fmtDT(backup.taken_at)}`} onClose={onClose} locked={busy}>
-      {!mode ? (
-        <>
-          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7, marginBottom: 14 }}>
-            เลือกวิธีกู้คืนสำหรับโปรเจคนี้ (สแนปช็อตนี้มี {fmtNum(backup.total_rows)} แถว):
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <button onClick={() => setMode("merge")}
-              style={{ textAlign: "left", cursor: "pointer", padding: "14px 16px", borderRadius: 10, border: "1px solid var(--border-soft, #e1e9e5)", background: "var(--surface-2, #f6faf8)", fontFamily: "inherit" }}>
-              <div style={{ fontWeight: 700, color: "var(--accent-dk)", marginBottom: 4 }}>กู้เฉพาะที่หายไป (แนะนำ)</div>
-              <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
-                คืนเฉพาะ Part / Release / QR ที่ถูกลบไป — <b>ข้อมูลเดิมและงานที่สแกนใหม่ทั้งหมดยังอยู่ครบ</b> ไม่ทับข้อมูลปัจจุบัน
-              </div>
-            </button>
-            <button onClick={() => setMode("replace")}
-              style={{ textAlign: "left", cursor: "pointer", padding: "14px 16px", borderRadius: 10, border: "1px solid var(--danger-hi, #d64545)", background: "var(--surface-2, #f6faf8)", fontFamily: "inherit" }}>
-              <div style={{ fontWeight: 700, color: "var(--danger-hi)", marginBottom: 4 }}>ย้อนทั้งโปรเจคกลับวันนั้น</div>
-              <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
-                โครงโปรเจคกลับเป็นสภาพวันนั้นเป๊ะ — <b style={{ color: "var(--danger-hi)" }}>การสแกนที่เกิดหลังวันนั้นบนโปรเจคนี้จะหายไป</b> (ต้องพิมพ์รหัสยืนยัน)
-              </div>
-            </button>
-          </div>
-          <div className="modal-actions" style={{ marginTop: 16 }}>
-            <Btn type="button" variant="ghost" onClick={onClose}>ยกเลิก</Btn>
-          </div>
-        </>
-      ) : mode === "merge" ? (
-        <>
-          <div style={{ fontSize: 13.5, lineHeight: 1.7, marginBottom: 16 }}>
-            ยืนยันกู้คืนแบบ <b style={{ color: "var(--accent-dk)" }}>เฉพาะที่หายไป</b> — ระบบจะเติมข้อมูลที่ถูกลบกลับมา
-            โดยไม่แตะข้อมูลปัจจุบันและการสแกนใหม่ทั้งหมด
-          </div>
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-          <div className="modal-actions">
-            <Btn type="button" variant="ghost" onClick={() => setMode(null)} disabled={busy}>ย้อนกลับ</Btn>
-            <Btn type="button" variant="accent" onClick={run} disabled={busy}>{busy ? "กำลังกู้คืน..." : "ยืนยันกู้คืน"}</Btn>
-          </div>
-        </>
-      ) : (
-        <>
-          <div style={{ fontSize: 13.5, lineHeight: 1.7, marginBottom: 8, color: "var(--danger-hi)", fontWeight: 600 }}>
-            ⚠ ย้อนทั้งโปรเจคกลับไปวันนั้น — การสแกนที่เกิดหลัง {fmtDT(backup.taken_at)} บนโปรเจคนี้จะหายไปถาวร
-          </div>
-          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>
-            พิมพ์รหัสโปรเจค <b style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{code}</b> เพื่อยืนยัน
-          </div>
-          <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={code} autoFocus />
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 8 }}>{err}</div>}
-          <div className="modal-actions" style={{ marginTop: 14 }}>
-            <Btn type="button" variant="ghost" onClick={() => { setMode(null); setConfirmText(""); }} disabled={busy}>ย้อนกลับ</Btn>
-            <Btn type="button" variant="accent" onClick={run} disabled={busy || confirmText.trim() !== code}
-              style={{ background: confirmText.trim() === code ? "var(--danger-hi)" : undefined, borderColor: "var(--danger-hi)" }}>
-              {busy ? "กำลังย้อนข้อมูล..." : "ยืนยันย้อนทั้งโปรเจค"}
-            </Btn>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
-}
-
-function RestorePointsCard() {
-  const [rows, setRows] = useState(null);   // null = loading
-  const [err, setErr] = useState("");
-  const [projFilter, setProjFilter] = useState("");
-  const [restoring, setRestoring] = useState(null);   // backup ที่กำลังจะกู้คืน
-  const [snapBusy, setSnapBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      await ensureDailyBackup();          // สำรองอัตโนมัติของวันนี้ (ถ้ายังไม่มี)
-      setRows(await listBackups());
-      setErr("");
-    } catch (e) {
-      setRows([]);
-      setErr("โหลดจุดกู้คืนไม่สำเร็จ — ตรวจว่ารัน migration-project-backups.sql ใน Supabase แล้วหรือยัง (" + (e?.message || e) + ")");
-    }
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  async function snapshotNow() {
-    setSnapBusy(true); setMsg("");
-    try {
-      const n = await snapshotAllProjects("manual");
-      setMsg(`สร้างจุดกู้คืนแล้ว ${fmtNum(n)} โปรเจค`);
-      await load();
-    } catch (e) {
-      setErr("สร้างจุดกู้คืนไม่สำเร็จ: " + (e?.message || e));
-    }
-    setSnapBusy(false);
-  }
-
-  const projects = rows ? [...new Map(rows.filter(r => r.project_code).map(r => [r.project_code, r.project_name])).entries()] : [];
-  const shown = rows ? rows.filter(r => !projFilter || r.project_code === projFilter) : [];
-
-  return (
-    <>
-      <Card title="จุดกู้คืนในแอป (ย้อนหลัง 7 วัน)">
-        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7, marginBottom: 14 }}>
-          ระบบเก็บ <b>สแนปช็อตอัตโนมัติทุกวัน (เที่ยงคืน)</b> แยกตามโปรเจค เก็บย้อนหลัง 7 วัน — admin กดกู้คืนได้เองในแอป
-          โดยเลือกได้ว่าจะ <b>กู้เฉพาะที่หายไป</b> (งานสแกนใหม่ยังอยู่) หรือ <b>ย้อนทั้งโปรเจค</b> กลับไปวันนั้น
-        </div>
-
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-          <Btn variant="accent" onClick={snapshotNow} disabled={snapBusy}>
-            <Icon name="plus" size={14} />{snapBusy ? "กำลังสร้าง..." : "สร้างจุดกู้คืนตอนนี้"}
-          </Btn>
-          <Btn variant="ghost" size="sm" onClick={load}><Icon name="refresh" size={13} /> รีเฟรช</Btn>
-          {projects.length > 0 && (
-            <div style={{ minWidth: 220 }}>
-              <Select value={projFilter} onChange={(e) => setProjFilter(e.target.value)}
-                options={projects.map(([code, name]) => ({ value: code, label: `${code} — ${name}` }))} />
-            </div>
-          )}
-        </div>
-
-        {msg && <div style={{ color: "var(--success)", fontSize: 13, marginBottom: 10 }}>✓ {msg}</div>}
-        {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>{err}</div>}
-
-        {rows === null ? (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>กำลังโหลด...</div>
-        ) : shown.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="clock" size={30} />
-            <div className="empty-state-title">{projFilter ? "โปรเจคนี้ยังไม่มีจุดกู้คืน" : "ยังไม่มีจุดกู้คืน"}</div>
-            <div className="empty-state-sub">กด “สร้างจุดกู้คืนตอนนี้” เพื่อสำรองครั้งแรก</div>
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead><tr><th>วันที่/เวลา</th><th>โปรเจค</th><th>ชนิด</th><th>จำนวนแถว</th><th></th></tr></thead>
-              <tbody>
-                {shown.map((b) => (
-                  <tr key={b.id}>
-                    <td style={{ whiteSpace: "nowrap" }}>{fmtDT(b.taken_at)}</td>
-                    <td style={{ whiteSpace: "nowrap" }}>{b.project_code} — {b.project_name}</td>
-                    <td>
-                      <span style={{ fontSize: 11.5, fontWeight: 600, padding: "2px 8px", borderRadius: 999,
-                        background: b.kind === "auto" ? "var(--surface-3)" : "var(--accent)", color: b.kind === "auto" ? "var(--muted)" : "#fff" }}>
-                        {b.kind === "auto" ? "อัตโนมัติ" : "สร้างเอง"}
-                      </span>
-                    </td>
-                    <td>{fmtNum(b.total_rows)}</td>
-                    <td style={{ textAlign: "right" }}>
-                      <Btn variant="ghost" size="sm" onClick={() => setRestoring(b)}>
-                        <Icon name="refresh" size={13} /> กู้คืน
-                      </Btn>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      {restoring && (
-        <RestoreModal
-          backup={restoring}
-          onClose={() => setRestoring(null)}
-          onDone={(res, mode) => {
-            setRestoring(null);
-            setMsg(mode === "replace"
-              ? "ย้อนทั้งโปรเจคกลับเรียบร้อยแล้ว"
-              : "กู้คืนข้อมูลที่หายไปเรียบร้อยแล้ว");
-            load();
-          }}
-        />
-      )}
-    </>
-  );
-}
-
-// ─── สำรองข้อมูล: ดาวน์โหลดข้อมูลทุกตารางเป็นไฟล์ JSON เก็บเอง ─────────────────
-function BackupCard() {
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState(null);   // { table, index, total }
-  const [last, setLast] = useState(null);           // { at, totalRows, name }
-  const [err, setErr] = useState("");
-  // นำเข้าไฟล์สำรอง
-  const fileRef = useRef(null);
-  const [impBusy, setImpBusy] = useState(false);
-  const [impErr, setImpErr] = useState("");
-  const [impResult, setImpResult] = useState(null); // { inserted, total, name }
-
-  async function onPickFile(e) {
-    const file = e.target.files?.[0];
-    e.target.value = "";              // ให้เลือกไฟล์เดิมซ้ำได้
-    if (!file) return;
-    setImpErr(""); setImpResult(null);
-    let dump;
-    try {
-      dump = JSON.parse(await file.text());
-    } catch {
-      setImpErr("อ่านไฟล์ไม่ได้ — ต้องเป็นไฟล์ .json ที่ดาวน์โหลดจากปุ่มสำรองข้อมูลเท่านั้น");
-      return;
-    }
-    const tables = dump?.tables;
-    if (!tables || typeof tables !== "object") {
-      setImpErr("รูปแบบไฟล์ไม่ถูกต้อง (ไม่พบส่วน tables) — ใช้ไฟล์ที่ดาวน์โหลดจากแอปนี้");
-      return;
-    }
-    const rows = Object.values(tables).reduce((s, arr) => s + (Array.isArray(arr) ? arr.length : 0), 0);
-    if (!(await askConfirm({ message: `นำเข้าไฟล์ "${file.name}" (${fmtNum(rows)} แถว)?\n\nระบบจะ "เติมเฉพาะข้อมูลที่หายไป" กลับเข้าระบบ — ของเดิมและงานที่ทำใหม่ทั้งหมดจะไม่ถูกทับ`, tone: "warn", confirmText: "นำเข้า", cancelText: "ยกเลิก" }))) return;
-
-    setImpBusy(true);
-    try {
-      const res = await importBackup(tables, "merge");
-      const inserted = Object.values(res?.inserted || {}).reduce((s, n) => s + (Number(n) || 0), 0);
-      setImpResult({ inserted, byTable: res?.inserted || {}, name: file.name });
-    } catch (e2) {
-      setImpErr("นำเข้าไม่สำเร็จ: " + (e2?.message || e2) + " — ตรวจว่ารัน migration-backup-import.sql ใน Supabase แล้วหรือยัง");
-    }
-    setImpBusy(false);
-  }
-
-  async function download() {
-    setBusy(true); setErr(""); setProgress(null);
-    try {
-      const dump = await exportAllData((p) => setProgress(p));
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, "0");
-      const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
-      const name = `mls-backup-${stamp}.json`;
-      const blob = new Blob([JSON.stringify(dump, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = name;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-      setLast({ at: now, totalRows: dump._meta.totalRows, name, counts: dump._meta.counts });
-    } catch (e) {
-      setErr("สำรองข้อมูลไม่สำเร็จ: " + (e?.message || e));
-    }
-    setBusy(false); setProgress(null);
-  }
-
-  return (
-    <div>
-      <Card title="สำรองข้อมูล (ดาวน์โหลดเก็บเอง)">
-        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7, marginBottom: 14 }}>
-          กดปุ่มด้านล่างเพื่อดึงข้อมูล<b>ทุกตารางหลัก</b> (โปรเจค · Part · Release · QR · ประวัติสแกน · งานหน้าเครื่อง · พนักงาน ฯลฯ)
-          ออกมาเป็นไฟล์ <b>JSON</b> ไฟล์เดียว เก็บไว้ในเครื่อง/ไดรฟ์ของคุณเองได้ เป็นการสำรองอีกชั้นนอกเหนือจากแบ็คอัพอัตโนมัติของฐานข้อมูล
-        </div>
-        <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.7, marginBottom: 16, padding: "10px 12px", background: "var(--surface-2, #f6faf8)", borderRadius: 8, border: "1px solid var(--border-soft, #e1e9e5)" }}>
-          💡 <b>แนะนำ:</b> เวลาทำงาน 8:00–17:00 น. — ควรดาวน์โหลดสำรอง<b>ช่วงหลังเลิกงาน (~18:00–21:00)</b> ของทุกวันทำงาน
-          เพราะข้อมูลของวันนั้นครบและนิ่งแล้ว · และควรกดสำรองเพิ่มก่อนนำเข้า Excel ชุดใหญ่ หรือก่อนลบโปรเจค/Release
-        </div>
-
-        {err && <div style={{ color: "var(--danger-hi)", fontSize: 13, marginBottom: 12 }}>{err}</div>}
-
-        <Btn variant="accent" onClick={download} disabled={busy}>
-          <Icon name="box" size={15} />
-          {busy
-            ? (progress ? `กำลังดึง ${progress.table} (${progress.index + 1}/${progress.total})...` : "กำลังเตรียมข้อมูล...")
-            : "ดาวน์โหลดไฟล์สำรองข้อมูล (JSON)"}
-        </Btn>
-
-        {last && (
-          <div style={{ marginTop: 16, fontSize: 13, color: "var(--text)" }}>
-            <div style={{ color: "var(--success)", fontWeight: 600, marginBottom: 4 }}>
-              ✓ สำรองข้อมูลล่าสุดสำเร็จ — {fmtNum(last.totalRows)} แถว
-            </div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>
-              ไฟล์: {last.name} · เวลา {fmtDT(last.at.toISOString())}
-            </div>
-          </div>
-        )}
-      </Card>
-
-      <Card title="นำเข้าไฟล์สำรอง (กู้คืนจากไฟล์ JSON)">
-        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7, marginBottom: 14 }}>
-          เลือกไฟล์ <b>.json</b> ที่เคยดาวน์โหลดไว้ เพื่อนำข้อมูลกลับเข้าระบบ — ระบบจะ <b>เติมเฉพาะข้อมูลที่หายไป</b> (id ที่ยังไม่มี)
-          <b> ไม่ทับของเดิมและงานที่ทำใหม่</b> เหมาะกับกรณีเผลอลบข้อมูลแล้วอยากได้กลับมา
-        </div>
-
-        <input ref={fileRef} type="file" accept=".json,application/json" onChange={onPickFile} style={{ display: "none" }} />
-        <Btn variant="accent" onClick={() => fileRef.current?.click()} disabled={impBusy}>
-          <Icon name="folder" size={15} />{impBusy ? "กำลังนำเข้า..." : "เลือกไฟล์สำรอง แล้วนำเข้า"}
-        </Btn>
-
-        {impErr && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 12, lineHeight: 1.6 }}>{impErr}</div>}
-        {impResult && (
-          <div style={{ marginTop: 14, fontSize: 13 }}>
-            <div style={{ color: "var(--success)", fontWeight: 600, marginBottom: 4 }}>
-              ✓ นำเข้าสำเร็จ — เพิ่มข้อมูลที่หายไปกลับมา {fmtNum(impResult.inserted)} แถว
-            </div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>
-              จากไฟล์: {impResult.name}
-              {impResult.inserted === 0 && " · (ข้อมูลในไฟล์มีอยู่ในระบบครบแล้ว ไม่มีอะไรต้องเติม)"}
-            </div>
-          </div>
-        )}
-      </Card>
-
-    </div>
-  );
-}
-
-// ── ซิงค์ "ขั้นตอนที่เครื่องทำได้" (machine_operations) ให้ตรงกับที่เลือก ──────────
-// ความสามารถผูกกับ "เครื่องจักร" (ไม่ใช่พนักงาน) — หน้าเครื่องอ่านตารางนี้ไปทำปุ่มเลือกขั้นตอน
-// ตั้งได้ทั้งจากแท็บเครื่องจักร (ความสามารถ) และจากฟอร์มพนักงาน (ขั้นตอนประจำ) — แหล่งข้อมูลเดียวกัน
-async function syncMachineOps(machineId, selectedIds, _caps) {
-  if (!machineId) return;
-  // ตั้งความสามารถทั้งชุดผ่าน RPC เฉพาะ (admin) — เลี่ยง insertRows generic ที่ไม่รองรับ machine_operations
-  // (chip ที่เลือก = ชุดเต็มที่ต้องการอยู่แล้ว จึง replace ได้ตรง) · _caps ไม่ใช้แล้ว คงไว้กันแก้ caller
-  await setMachineOps(machineId, [...new Set(selectedIds)]);
-}
-
-// ปุ่มแตะเลือกขั้นตอนได้หลายอัน (chip) — ใช้ทั้งฟอร์มเพิ่ม/แก้ไขพนักงาน
-// ─── op_type → "หน้าปลายทาง" (terminal/แผนก) ที่ขั้นตอนนี้ขับ ───────────────────
-// ★ ต้องตรงกับ Station.jsx: opDept() + DEPT_META (แผนก/URL) — ใช้ให้หน้า Setup อธิบายตัวเองว่า
-//   "ขั้นตอนนี้/สถานีนี้จะเข้าหน้าไหน" เพื่อกันตั้งค่าผิด (เช่น 2 สเตชันแพ็กใช้ 'แพ็ก' ตัวเดียวกัน = ไม่แยก)
-const OP_TYPE_DEST = {
-  machining:  { th: "หน้าเครื่อง (ตัด/เจาะ/บาก…)", path: "/station" },
-  assembly:   { th: "หน้าประกอบ · ซับ",            path: "/assembly" },
-  panel:      { th: "หน้าแผง",                     path: "/panel" },
-  pack_panel: { th: "หน้าแพ็กแผง",                 path: "/packing-panel" },
-  pack_site:  { th: "หน้าแพ็กไซต์ไอเทม",           path: "/packing-site" },
-  packing:    { th: "หน้าแพ็ก · รวมทุกบั้ง",       path: "/packing" },
-};
-const opTypeDest = (ty) => OP_TYPE_DEST[ty] || OP_TYPE_DEST.machining;
-// รวม "หน้าปลายทาง" ที่ไม่ซ้ำ จากชุด operation ที่เลือก (ไว้สรุปว่าสเตชันนี้จะเป็นหน้าอะไร)
-function destsOfSelected(operations, selectedSet) {
-  const seen = new Set(); const out = [];
-  (operations || []).forEach((o) => {
-    if (!selectedSet.has(o.id)) return;
-    const d = opTypeDest(o.op_type);
-    if (!seen.has(d.path)) { seen.add(d.path); out.push(d); }
+  ws["!cols"] = [{ wch: hasG?18:4 }, ...Array.from({ length:C-1 }, () => ({ wch:12 }))];
+  ws["!rows"] = [];
+  ws["!rows"][0]={hpx:30}; ws["!rows"][1]={hpx:16};
+  ws["!rows"][cardLabelRow]={hpx:18}; ws["!rows"][cardValRow]={hpx:32};
+  ws["!rows"][chartTitleRow]={hpx:22};
+  for (let r=chartTop; r<chartTop+H; r++) ws["!rows"][r]={hpx:14};
+  ws["!rows"][labelRow]={hpx:22};
+  const setS = (r, c, s, v, f) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    if (v != null) ws[ref] = { t: typeof v === "number" ? "n" : "s", v };
+    else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
+    if (f) { ws[ref].t = "n"; ws[ref].f = f; }
+    ws[ref].s = s;
+  };
+  setS(0,0,{ font:{bold:true,sz:14,color:{rgb:"FFFFFF"},name:"Tahoma"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  setS(1,0,{ font:{italic:true,sz:10,color:{rgb:"64748B"},name:"Tahoma"} });
+  setS(chartTitleRow,0,{ font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+  // การ์ดสรุป 4 ใบ (แต่ละใบกว้าง 2 คอลัมน์)
+  // สีการ์ดมาตรฐาน; แต่ละการ์ดกำหนดสีเองได้ผ่าน cd.acc (["bg","fg"]) เช่น ให้ตรงกับหน้าจอ
+  const ACC = [["DBEAFE","1D4ED8"],["D1FAE5","047857"],["FEF3C7","92400E"],["EDE9FE","6D28D9"]];
+  cards.slice(0,4).forEach((cd, i) => {
+    const c0 = i*2, c1 = c0+1, [bg,fg] = cd.acc || ACC[i%4];
+    ws["!merges"].push({ s:{r:cardLabelRow,c:c0}, e:{r:cardLabelRow,c:c1} });
+    ws["!merges"].push({ s:{r:cardValRow,c:c0}, e:{r:cardValRow,c:c1} });
+    setS(cardLabelRow, c0, { font:{bold:true,sz:9.5,color:{rgb:fg},name:"Tahoma"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"} }, cd.label);
+    setS(cardLabelRow, c1, { fill:{fgColor:{rgb:bg}} });
+    setS(cardValRow, c0, { font:{bold:true,sz:15,color:{rgb:fg},name:"Tahoma"}, fill:{fgColor:{rgb:bg}}, alignment:{horizontal:"center",vertical:"center"}, numFmt: cd.money?"#,##0":undefined }, cd.value, cd.f);
+    setS(cardValRow, c1, { fill:{fgColor:{rgb:bg}} });
   });
-  return out;
-}
-
-function OpMultiPick({ operations, selected, onToggle, machineChosen }) {
-  const dests = destsOfSelected(operations, selected);
-  return (
-    <div>
-      <div className="chip-row">
-        {operations.map((o) => (
-          <span key={o.id} tabIndex={0} onClick={() => onToggle(o.id)}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(o.id); } }}
-            style={o.__synthetic ? { borderStyle: "dashed" } : undefined}
-            className={`chip ${selected.has(o.id) ? "active" : ""}`}>{o.__synthetic ? "+ " : ""}{o.name}</span>
-        ))}
-        {operations.length === 0 && (
-          <span style={{ fontSize: 12, color: "var(--muted)" }}>ยังไม่มีขั้นตอนงาน — ไปเพิ่มที่แท็บ "ขั้นตอนงาน" ก่อน</span>
-        )}
-      </div>
-      {dests.length > 0 && (
-        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
-          สเตชันนี้จะเข้า: {dests.map((d) => `${d.th} (${d.path})`).join(" · ")}
-        </div>
-      )}
-      {dests.length > 1 && (
-        <div style={{ fontSize: 11.5, color: "var(--warning)", marginTop: 3 }}>
-          ⚠️ เลือกข้ามหลายแผนก — 1 สเตชันควรทำแผนกเดียว (ไม่งั้นพนักงานจะถูกเด้งไปหน้าแรกที่ตรงเท่านั้น)
-        </div>
-      )}
-      {!machineChosen && selected.size > 0 && (
-        <div style={{ fontSize: 11.5, color: "var(--warning)", marginTop: 4 }}>เลือกเครื่อง/สถานีก่อน จึงจะบันทึกหลายขั้นตอนได้</div>
-      )}
-    </div>
-  );
-}
-
-// เครื่องจักร + ความสามารถ (ทำขั้นตอนไหนได้บ้าง) — ใช้ตรวจตอนสแกนว่าเครื่องนี้
-// ทำขั้นตอนนั้นได้จริง และให้หน้ารายงานแยกน้ำหนักของเครื่องออกเป็นราย-ขั้นตอนได้
-function MachineCapModal({ machine, operations, caps, onClose, onSaved }) {
-  const initial = new Set(caps.filter((c) => c.machine_id === machine.id).map((c) => c.operation_id));
-  const [selected, setSelected] = useUndoable(initial);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  function toggle(opId) {
-    setSelected((s) => { const n = new Set(s); n.has(opId) ? n.delete(opId) : n.add(opId); return n; });
-  }
-
-  async function save() {
-    setBusy(true); setErr("");
-    try {
-      await setMachineOps(machine.id, [...selected]);   // แทนที่ทั้งชุดผ่าน RPC เฉพาะ (admin)
-      onSaved();
-    } catch (e) {
-      setErr("บันทึกไม่สำเร็จ: " + (e?.message || e));
-    }
-    setBusy(false);
-  }
-
-  return (
-    <Modal title={`ความสามารถของเครื่อง — ${machine.code}`} sub="เลือกขั้นตอนที่เครื่องนี้ทำได้ (เลือกได้หลายอย่าง) — หน้าสแกนจะเตือนถ้าเครื่องทำขั้นตอนที่ไม่ได้ตั้งไว้" onClose={onClose}>
-      <div className="label-el">ขั้นตอนที่เครื่องนี้ทำได้</div>
-      <div className="chip-row" style={{ marginBottom: 10 }}>
-        {operations.map((o) => (
-          <span key={o.id} tabIndex={0} onClick={() => toggle(o.id)}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(o.id); } }}
-            className={`chip ${selected.has(o.id) ? "active" : ""}`}>{o.name}</span>
-        ))}
-        {operations.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)" }}>ยังไม่มีขั้นตอนงาน — ไปเพิ่มที่แท็บ "ขั้นตอนงาน" ก่อน</span>}
-      </div>
-      {selected.size === 0 && (
-        <div style={{ fontSize: 12, color: "var(--warning)", marginBottom: 8 }}>
-          ไม่เลือกเลย = ไม่จำกัด (เครื่องนี้จะสแกนขั้นตอนใดก็ได้) — เลือกอย่างน้อย 1 อย่างเพื่อเปิดการตรวจสอบ
-        </div>
-      )}
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-      <div className="modal-actions">
-        <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-        <Btn type="button" variant="accent" onClick={save} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึก"}</Btn>
-      </div>
-    </Modal>
-  );
-}
-
-function MachineCrud() {
-  const [rows, setRows] = useState([]);
-  const [operations, setOperations] = useState([]);
-  const [caps, setCaps] = useState([]);
-  const [form, setForm] = useUndoable({});
-  const [editing, setEditing] = useState(null);     // เครื่องที่กำลังแก้ไข (ชื่อ/ประเภท/ความสามารถ/ลบ)
-  const [err, setErr] = useState("");
-  const sort = useTableSort("code");
-
-  const load = useCallback(async () => {
-    setRows(await listRows("machines", { order: "code" }));
-    setOperations(await listRows("operations", { order: "seq" }));
-    setCaps(await listRows("machine_operations"));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  async function add() {
-    if (!form.code || !form.name) { setErr("กรอกรหัสและชื่อเครื่องให้ครบ"); return; }
-    setErr("");
-    try {
-      await insertRow("machines", { code: form.code, name: form.name, type: form.type || null });
-      setForm({}); load();
-    } catch (e) {
-      setErr(isDuplicateError(e) ? `รหัสเครื่อง "${form.code}" มีอยู่แล้ว` : "เกิดข้อผิดพลาด: " + e.message);
-    }
-  }
-  function capNames(machineId) {
-    const ids = new Set(caps.filter((c) => c.machine_id === machineId).map((c) => c.operation_id));
-    const names = operations.filter((o) => ids.has(o.id)).map((o) => o.name);
-    return names;
-  }
-  // หน้าปลายทาง (แผนก/URL) ที่สเตชันนี้จะเข้า — คิดจาก "ประเภทงาน" ของขั้นตอนที่ตั้งไว้ (ไม่ใช่ชื่อสเตชัน)
-  function capDests(machineId) {
-    const ids = new Set(caps.filter((c) => c.machine_id === machineId).map((c) => c.operation_id));
-    const sel = operations.filter((o) => ids.has(o.id));
-    return destsOfSelected(sel, new Set(sel.map((o) => o.id)));
-  }
-
-  return (
-    <Card title="เพิ่มเครื่อง/สถานีใหม่ + ตั้งความสามารถ">
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
-        <div style={{ minWidth: 140 }}><Field label="รหัสเครื่อง"><Input value={form.code || ""} onChange={(e) => setForm({ ...form, code: e.target.value })} /></Field></div>
-        <div style={{ minWidth: 180 }}><Field label="ชื่อเครื่อง/สถานี"><Input value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field></div>
-        <div style={{ minWidth: 140 }}><Field label="ประเภทงาน"><Input value={form.type || ""} onChange={(e) => setForm({ ...form, type: e.target.value })} /></Field></div>
-        <Btn variant="accent" onClick={add} style={{ height: 42, alignSelf: "flex-start", marginTop: 20 }}>เพิ่ม</Btn>
-      </div>
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
-        เครื่อง/สถานีหนึ่งทำได้หลายขั้นตอน · งานประกอบ/แพ็กสร้างเป็น "สถานี" ที่นี่ (เช่น ประกอบ-01, แพ็ก-01) — กด "แก้ไข" เพื่อตั้งชื่อ/ประเภท เลือกขั้นตอนที่ทำได้ หรือลบเครื่อง · <b>แพ็กแยก 2 หน้า:</b> กด "แก้ไข" ที่สเตชันแล้วติ๊กปุ่ม <b>แพ็กแผง</b> หรือ <b>แพ็กไซต์ไอเทม</b> (ถ้ายังไม่มีขั้นตอน ระบบสร้างให้ตอนบันทึก)
-      </div>
-      <SortControl sort={sort} options={[
-        { k: "code", label: "รหัสเครื่อง" }, { k: "name", label: "ชื่อเครื่อง/สถานี" },
-        { k: "type", label: "ประเภท" }, { k: "caps", label: "ขั้นตอนที่ทำได้" },
-      ]} />
-      <div className="table-wrap tall-scroll">
-        <table className="data-table responsive-cards">
-          <thead><tr>
-            <SortTh k="code" sort={sort}>รหัสเครื่อง</SortTh>
-            <SortTh k="name" sort={sort}>ชื่อเครื่อง/สถานี</SortTh>
-            <SortTh k="type" sort={sort}>ประเภท</SortTh>
-            <SortTh k="caps" sort={sort}>ขั้นตอนที่ทำได้</SortTh>
-            <th></th>
-          </tr></thead>
-          <tbody>
-            {sort.sortRows(rows, {
-              code: (r) => r.code, name: (r) => r.name, type: (r) => r.type || "",
-              caps: (r) => capNames(r.id).join(", "),
-            }).map((r) => {
-              const names = capNames(r.id);
-              return (
-                <tr key={r.id}>
-                  <td data-label="รหัสเครื่อง">{r.code}</td>
-                  <td data-label="ชื่อเครื่อง/สถานี">{r.name}</td>
-                  <td data-label="ประเภท">{r.type || "-"}</td>
-                  <td data-label="ขั้นตอนที่ทำได้">
-                    {names.length > 0
-                      ? names.join(" · ")
-                      : <span style={{ color: "var(--muted)" }}>ไม่จำกัด (ยังไม่ตั้ง)</span>}
-                    {(() => { const ds = capDests(r.id); return ds.length > 0 ? (
-                      <div style={{ fontSize: 11.5, color: ds.length > 1 ? "var(--warning)" : "var(--muted)", marginTop: 3 }}>
-                        {ds.length > 1 ? "⚠️ " : "→ "}{ds.map((d) => `${d.th} (${d.path})`).join(" · ")}
-                      </div>
-                    ) : null; })()}
-                  </td>
-                  <td data-label="" style={{ whiteSpace: "nowrap" }}>
-                    <span onClick={() => setEditing(r)} style={{ color: "var(--accent-dk)", cursor: "pointer" }}>แก้ไข</span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {editing && (
-        <MachineEditModal
-          machine={editing} operations={operations} caps={caps}
-          onClose={() => setEditing(null)}
-          onSaved={async () => { setEditing(null); await load(); }}
-        />
-      )}
-    </Card>
-  );
-}
-
-// แก้ไขเครื่องจักร — ชื่อ / ประเภท / ขั้นตอนที่ทำได้ (ความสามารถ) + ลบ · ในที่เดียว
-// (ต้องกด "แก้ไข" ก่อนถึงจะลบหรือแก้ความสามารถได้ · รหัสเครื่องแก้ไม่ได้ — เป็นตัวระบุตัวตน)
-// ปุ่มแผนกที่ควรเลือกได้เสมอ แม้ยังไม่มีขั้นตอนในระบบ — ติ๊กแล้วจะสร้างขั้นตอนให้อัตโนมัติตอนบันทึก
-const SPLIT_CHIP_TYPES = [
-  { op_type: "pack_panel", name: "แพ็กแผง" },
-  { op_type: "pack_site",  name: "แพ็กไซต์ไอเทม" },
-];
-function MachineEditModal({ machine, operations, caps = [], onClose, onSaved }) {
-  const [form, setForm] = useUndoable({ name: machine.name || "", type: machine.type || "" });
-  const [opSel, setOpSel] = useUndoable(() => new Set(caps.filter((c) => c.machine_id === machine.id).map((c) => c.operation_id)));
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  // โชว์ปุ่มแพ็กแผง/แพ็กไซต์ไอเทม เป็นชิปแยกกันเสมอ — ถ้ายังไม่มีขั้นตอนจริง เติมชิป "ชั่วคราว" (id ขึ้นต้น new:)
-  const haveTypes = new Set((operations || []).map((o) => o.op_type));
-  const synthChips = SPLIT_CHIP_TYPES.filter((s) => !haveTypes.has(s.op_type))
-    .map((s) => ({ id: `new:${s.op_type}`, name: s.name, op_type: s.op_type, __synthetic: true }));
-  const augOps = [...(operations || []), ...synthChips];
-  const hasSynthSelected = [...opSel].some((id) => typeof id === "string" && id.startsWith("new:"));
-
-  function toggleOp(id) { setOpSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
-
-  async function save() {
-    if (!form.name.trim()) { setErr("กรอกชื่อเครื่องให้ครบ"); return; }
-    setBusy(true); setErr("");
-    try {
-      await updateRow("machines", machine.id, { name: form.name.trim(), type: form.type.trim() || null });
-      // แปลงชิปชั่วคราว (new:<op_type>) → สร้างขั้นตอนจริงถ้ายังไม่มี แล้วใช้ id จริง (idempotent)
-      const finalIds = [];
-      for (const id of opSel) {
-        if (typeof id === "string" && id.startsWith("new:")) {
-          const opType = id.slice(4);
-          const nm = SPLIT_CHIP_TYPES.find((s) => s.op_type === opType)?.name || opType;
-          let ops = await listRows("operations", { order: "seq" });
-          let hit = ops.find((o) => o.op_type === opType);
-          if (!hit) {
-            const res = await createOperation({ name: nm, opType });
-            if (res && res.ok === false) throw new Error(res.reason || "สร้างขั้นตอนไม่สำเร็จ");
-            ops = await listRows("operations", { order: "seq" });
-            hit = ops.find((o) => o.op_type === opType);
-          }
-          if (hit) finalIds.push(hit.id);
-        } else {
-          finalIds.push(id);
-        }
-      }
-      await setMachineOps(machine.id, [...new Set(finalIds)]);   // แทนที่ทั้งชุดผ่าน RPC เฉพาะ (admin)
-      onSaved();
-    } catch (e) {
-      setErr("บันทึกไม่สำเร็จ: " + (e?.message || e));
-    }
-    setBusy(false);
-  }
-
-  async function del() {
-    if (!(await askConfirm({ message: `ลบเครื่อง "${machine.code} — ${machine.name}" ?`, tone: "danger", confirmText: "ลบเครื่อง", cancelText: "ยกเลิก" }))) return;
-    setBusy(true); setErr("");
-    try {
-      let res = await deleteMachine(machine.id, false);
-      if (res && res.ok === false && res.reason === "has_records") {
-        setBusy(false);
-        const ok = await askConfirm({
-          message:
-            `เครื่องนี้มีประวัติงานผลิต ${Number(res.count || 0).toLocaleString()} รายการ\n\n` +
-            `⚠️ ถ้าลบ ตัวเลขการผลิตของเครื่องนี้จะหายจากรายงานถาวร (กู้คืนไม่ได้)\n` +
-            `ถ้าเครื่องแค่เลิกใช้ แนะนำให้เก็บไว้เฉยๆ จะดีกว่า\n\nยืนยันลบเครื่องพร้อมประวัติทั้งหมด?`,
-          tone: "danger", confirmText: "ลบพร้อมประวัติ", cancelText: "ยกเลิก",
-        });
-        if (!ok) return;
-        setBusy(true);
-        res = await deleteMachine(machine.id, true);
-      }
-      if (res && res.ok === false) { setErr(res.reason === "bad_request" ? "ลบไม่สำเร็จ" : "ลบไม่สำเร็จ: " + res.reason); setBusy(false); return; }
-      if (res && res.ok && res.unbound > 0) {
-        mlsToast(`ลบเครื่องแล้ว · ปลดพนักงาน ${res.unbound} คนออกจากเครื่องนี้ — อย่าลืมไปตั้งเครื่องใหม่ให้เขาที่ Setup › พนักงาน`, "info");
-      }
-      if (res && res.ok) auditRecord("delete_machine", "machine", machine.id, { code: machine.code, name: machine.name, records: res.deleted_records || 0 });
-      onSaved();
-    } catch (e) {
-      setErr("ลบไม่สำเร็จ: " + (e?.message || e));
-    }
-    setBusy(false);
-  }
-
-  return (
-    <Modal title={`แก้ไขเครื่อง/สถานี — ${machine.code}`} sub="แก้ชื่อ/ประเภท · เลือกขั้นตอนที่ทำได้ · หรือลบเครื่อง — รหัสเครื่องแก้ไม่ได้" onClose={onClose}>
-      <div className="grid-2">
-        <Field label="รหัสเครื่อง"><Input value={machine.code} disabled /></Field>
-        <Field label="ชื่อเครื่อง/สถานี"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-      </div>
-      <Field label="ประเภทงาน (คำอธิบาย · ไม่บังคับ)">
-        <Input value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} placeholder="เช่น CUTTING / NOTCHING" />
-      </Field>
-      <Field label="ขั้นตอนที่เครื่องนี้ทำได้ (เลือกได้หลายอย่าง)">
-        <OpMultiPick operations={augOps} selected={opSel} onToggle={toggleOp} machineChosen={true} />
-      </Field>
-      {hasSynthSelected && (
-        <div style={{ fontSize: 11.5, color: "var(--accent-dk)", marginBottom: 8 }}>
-          ปุ่มที่มีเส้นประ (+) = ยังไม่มีขั้นตอนนี้ในระบบ · กด "บันทึก" แล้วจะสร้างขั้นตอนให้อัตโนมัติ
-        </div>
-      )}
-      {opSel.size === 0 && (
-        <div style={{ fontSize: 12, color: "var(--warning)", marginBottom: 8 }}>
-          ไม่เลือกเลย = ไม่จำกัด (เครื่องนี้สแกนขั้นตอนใดก็ได้) — เลือกอย่างน้อย 1 อย่างเพื่อเปิดการตรวจสอบ
-        </div>
-      )}
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-      <div className="modal-actions" style={{ justifyContent: "space-between" }}>
-        <Btn type="button" variant="ghost" onClick={del} disabled={busy} style={{ color: "var(--danger-hi)" }}>ลบเครื่องนี้</Btn>
-        <div style={{ display: "flex", gap: 8 }}>
-          <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn type="button" variant="accent" onClick={save} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึก"}</Btn>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// ─── ขั้นตอนการทำงาน + ประเภทงาน (machining / assembly / packing) ───────────────
-const OP_TYPES = [
-  { value: "machining", label: "งานเครื่อง (machining)" },
-  { value: "assembly", label: "ประกอบ · ซับ (subassembly)" },
-  { value: "panel", label: "แผง (panel)" },
-  { value: "pack_panel", label: "แพ็กแผง (pack panel)" },
-  { value: "pack_site", label: "แพ็กไซต์ไอเทม (pack site item)" },
-  { value: "packing", label: "แพ็ก · รวมทุกบั้ง (packing)" },
-];
-function OperationsCrud() {
-  const [rows, setRows] = useState([]);
-  const [form, setForm] = useUndoable({ op_type: "machining" });
-  const load = useCallback(async () => setRows(await listRows("operations", { order: "seq" })), []);
-  useEffect(() => { load(); }, [load]);
-
-  async function add() {
-    if (!form.name) { mlsToast("กรอกชื่อขั้นตอน", "warn"); return; }
-    try {
-      const res = await createOperation({
-        name: form.name,
-        seq: form.seq === "" || form.seq == null ? null : Number(form.seq),
-        opType: form.op_type || "machining",
-      });
-      if (!res?.ok) { mlsToast("เพิ่มขั้นตอนไม่สำเร็จ: " + (res?.reason || "unknown"), "error"); return; }
-      setForm({ op_type: "machining" }); load();
-    } catch (e) { mlsToast("เพิ่มขั้นตอนไม่สำเร็จ: " + (e?.message || e), "error"); }
-  }
-  async function changeType(id, op_type) {
-    try {
-      const res = await setOperationType(id, op_type);
-      if (!res?.ok) { mlsToast("เปลี่ยนประเภทไม่สำเร็จ: " + (res?.reason || "unknown"), "error"); return; }
-      setRows((prev) => prev.map((r) => (r.id === id ? { ...r, op_type } : r)));
-    } catch (e) { mlsToast("เปลี่ยนประเภทไม่สำเร็จ: " + (e?.message || e), "error"); }
-  }
-  async function remove(id) {
-    if (!(await askConfirm({ message: "ลบขั้นตอนนี้?", tone: "danger", confirmText: "ลบ", cancelText: "ยกเลิก" }))) return;
-    try { await deleteRow("operations", id); load(); }
-    catch (e) { mlsToast("ลบไม่ได้ — ขั้นตอนนี้ถูกใช้งานอยู่ (มีเครื่อง/งาน/การสแกนอ้างอิงถึง)", "error"); }
-  }
-
-  return (
-    <Card title="ขั้นตอนการทำงาน (machining / ประกอบ / แพ็ก)">
-      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.6 }}>
-        <b>งานเครื่อง</b> = ตัด/เจาะ/บาก (สแกนต่อชิ้นปกติ) · <b>ประกอบ/แพ็ก</b> = หน้าเครื่องสลับเป็นโหมดประกอบ (สแกนลูกเข้าเบอร์แม่ตาม BOM) — ตั้งประเภทที่นี่แทนการรัน SQL
-      </div>
-      <div style={{ fontSize: 12, color: "var(--muted)", background: "var(--surface-2, #f6f7f9)", border: "1px solid var(--border, #e6e8ec)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, lineHeight: 1.7 }}>
-        <b>สำคัญ: "แผนก/หน้าปลายทาง" มาจาก "ประเภทงาน" ของขั้นตอน ไม่ใช่ชื่อสเตชัน</b> — ดูคอลัมน์ <b>หน้าปลายทาง</b> ด้านล่าง<br />
-        • อยากแยกแพ็กเป็น 2 หน้า ต้องมี <b>2 ขั้นตอนคนละประเภท</b>: <b>แพ็กแผง</b> (→ /packing-panel) และ <b>แพ็กไซต์ไอเทม</b> (→ /packing-site) แล้วตั้งให้สเตชันละอัน · ประเภท <b>แพ็ก · รวมทุกบั้ง</b> (→ /packing) เห็นทุกบั้ง ไม่แยก<br />
-        • ถ้าหลายสเตชันใช้ขั้นตอนประเภทเดียวกัน จะเข้า<b>หน้าเดียวกัน</b> (ไม่แยกกัน)<br />
-        • <b>Glazing/ติดกระจก</b>: เลือก <b>แผง</b> ถ้าเบอร์แม่ที่กระจกไปติดเป็นชนิด "แผง" · เลือก <b>ประกอบ · ซับ</b> ถ้าเป็นชนิด "ซับ" — ทั้งสองแบบ<b>ใส่ part ที่ไม่ใช่กระจกได้อยู่แล้ว</b> (ไม่บล็อก)
-      </div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14, alignItems: "flex-start" }}>
-        <Field label="ชื่อขั้นตอน"><Input value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="เช่น ตัด / ประกอบ / แพ็ก" /></Field>
-        <Field label="ลำดับ"><Input type="number" value={form.seq ?? ""} onChange={(e) => setForm({ ...form, seq: e.target.value })} style={{ maxWidth: 90 }} /></Field>
-        <div style={{ minWidth: 200 }}>
-          <Field label="ประเภทงาน"><Select value={form.op_type || "machining"} onChange={(e) => setForm({ ...form, op_type: e.target.value })}
-            options={OP_TYPES.map((o) => ({ value: o.value, label: o.label }))} /></Field>
-        </div>
-        <Field label={" "}><Btn variant="accent" onClick={add} style={{ height: 42 }}>เพิ่ม</Btn></Field>
-      </div>
-      <div className="table-wrap">
-        <table className="data-table">
-          <thead><tr><th>ชื่อขั้นตอน</th><th>ลำดับ</th><th>ประเภทงาน</th><th>หน้าปลายทาง (แผนก/URL)</th><th></th></tr></thead>
-          <tbody>
-            {rows.map((r) => {
-              const dest = opTypeDest(r.op_type || "machining");
-              return (
-              <tr key={r.id}>
-                <td style={{ whiteSpace: "nowrap", fontWeight: 600 }}>{r.name}</td>
-                <td>{r.seq}</td>
-                <td>
-                  <select className="select" value={r.op_type || "machining"} onChange={(e) => changeType(r.id, e.target.value)} style={{ minWidth: 190 }}>
-                    {OP_TYPES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </td>
-                <td style={{ whiteSpace: "nowrap", fontSize: 12.5 }}>
-                  <span style={{ fontWeight: 600 }}>{dest.th}</span>
-                  <span style={{ color: "var(--muted)", marginLeft: 6 }}>{dest.path}</span>
-                </td>
-                <td><span onClick={() => remove(r.id)} style={{ color: "var(--danger-hi)", cursor: "pointer" }}>ลบ</span></td>
-              </tr>
-              );
-            })}
-            {rows.length === 0 && (
-              <tr><td colSpan={5}><div className="empty-state" style={{ padding: "20px 0" }}><Icon name="settings" size={28} /><div className="empty-state-title">ยังไม่มีขั้นตอน</div><div className="empty-state-sub">เพิ่มขั้นตอนแรกด้านบน</div></div></td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  );
-}
-
-function SimpleCrud({ table, fields }) {
-  const [rows, setRows] = useState([]);
-  const [form, setForm] = useUndoable({});
-  const load = useCallback(async () => setRows(await listRows(table, { order: fields[0].key })), [table, fields]);
-  useEffect(() => { load(); }, [load]);
-
-  async function add() {
-    if (!form[fields[0].key]) return;
-    await insertRow(table, form);
-    setForm({}); load();
-  }
-  async function remove(id) {
-    if (!(await askConfirm({ message: "ลบรายการนี้?", tone: "danger", confirmText: "ลบ", cancelText: "ยกเลิก" }))) return;
-    try {
-      await deleteRow(table, id);
-      load();
-    } catch (e) {
-      // FK: ถ้ามีเครื่อง/งานอ้างอิงอยู่ (เช่น ขั้นตอนที่เครื่องใช้/มีการสแกน) จะลบไม่ได้ — แจ้งชัด ไม่เงียบ
-      mlsToast("ลบไม่ได้ — รายการนี้ถูกใช้งานอยู่ (มีเครื่องจักร/งาน/การสแกนอ้างอิงถึง) · ต้องเอาการอ้างอิงออกก่อน หรือปล่อยไว้เพื่อรักษาประวัติ", "error");
-    }
-  }
-
-  return (
-    <Card title="เพิ่มรายการใหม่">
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-        {fields.map((f) => (
-          <div key={f.key} style={{ minWidth: 170 }}>
-            <Field label={f.label}>
-              <Input type={f.type || "text"} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} />
-            </Field>
-          </div>
-        ))}
-        <Btn variant="accent" onClick={add} style={{ height: 42, alignSelf: "flex-start", marginTop: 20 }}>เพิ่ม</Btn>
-      </div>
-      <div className="table-wrap">
-        <table className="data-table">
-          <thead><tr>{fields.map((f) => <th key={f.key}>{f.label}</th>)}<th></th></tr></thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id}>
-                {fields.map((f) => <td key={f.key}>{r[f.key]}</td>)}
-                <td><span onClick={() => remove(r.id)} style={{ color: "var(--danger-hi)", cursor: "pointer" }}>ลบ</span></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  );
-}
-
-function EmployeeEditModal({ employee, departments, machines, operations, caps = [], onClose, onSaved }) {
-  const [form, setForm] = useUndoable({
-    name: employee.name,
-    department_id: employee.department_id || "",
-    role: employee.role,
-    machine_id: employee.machine_id || "",
-    password: "", // เว้นว่าง = ไม่เปลี่ยนรหัสผ่าน
+  // กราฟแท่งรายเดือน
+  const max = Math.max(...items.map(i=>i.value||0), 1);
+  const barOn = theme.main, barOff = "F3F4F6";
+  items.forEach((it, i) => {
+    const c = 1+i;
+    const filled = Math.max(0, Math.round(((it.value||0)/max)*H));
+    setS(valueRow, c, { font:{bold:true,sz:8.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0, it.f);
+    for (let k=0; k<H; k++) { const r = chartTop+(H-1-k); setS(r, c, { fill:{fgColor:{rgb: k<filled?barOn:barOff }} }); }
+    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Tahoma"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
   });
-  // ขั้นตอนประจำ = เลือกได้หลายอัน · ค่าเริ่มต้นดึงจาก "ความสามารถของเครื่อง" ที่ผูกอยู่
-  // (ถ้าเครื่องยังไม่มีความสามารถ แต่มี operation_id เดิม → ใช้ค่านั้นเป็นตัวเริ่ม)
-  // ★ ใช้ "ความสามารถจริงของเครื่อง" อย่างเดียว — ไม่ seed จาก employee.operation_id เดิม
-  //   (เดิม seed ค่านั้นเมื่อเครื่องไม่มี caps แล้วพอ save จะเขียนทับ = เผลอล็อกเครื่องที่ตั้ง "ไม่จำกัด" ให้เหลือขั้นตอนเดียว)
-  const capsForMachine = (mid) => new Set(caps.filter((c) => c.machine_id === mid).map((c) => c.operation_id));
-  const [opSel, setOpSel] = useUndoable(() => capsForMachine(employee.machine_id || ""));
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  function chooseMachine(mid) {
-    setForm((f) => ({ ...f, machine_id: mid }));
-    setOpSel(capsForMachine(mid));   // ย้ายเครื่อง → โหลดความสามารถของเครื่องใหม่มาแสดง
+  // ตารางสรุปตามกลุ่ม + แถบสัดส่วน
+  if (hasG) {
+    ws["!merges"].push({ s:{r:gTitleRow,c:0}, e:{r:gTitleRow,c:C-1} });
+    ws["!rows"][gTitleRow] = {hpx:22};
+    setS(gTitleRow, 0, { font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
+    const headFill = lighten(theme.main, 0.82);
+    const gh = ["กลุ่ม","ราคาเดิม","เพิ่มรายเดือน","งบรวม","สัดส่วน","กราฟสัดส่วน"];
+    gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_THIN(lighten(theme.main,0.45))} }, h));
+    for (let c=6;c<C;c++) setS(gHeadRow, c, { fill:{fgColor:{rgb:headFill}}, border:{bottom:BORDER_THIN(lighten(theme.main,0.45))} });
+    if (C-1 > 5) ws["!merges"].push({ s:{r:gHeadRow,c:5}, e:{r:gHeadRow,c:C-1} });
+    ws["!rows"][gHeadRow] = {hpx:22};
+    const zeb = lighten(theme.main, 0.95), gmax = Math.max(...groups.map(g=>g.total||0), 1);
+    groups.forEach((g, i) => {
+      const r = gStart + i, fillZ = i%2===1 ? { fill:{fgColor:{rgb:zeb}} } : {};
+      const bd = { border:{bottom:BORDER_THIN("EEF0F2")} };
+      setS(r, 0, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"left",indent:1} }, g.label);
+      setS(r, 1, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.base||0);
+      setS(r, 2, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:"1F2937"},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.add||0);
+      setS(r, 3, { ...fillZ, ...bd, font:{bold:true,sz:9.5,color:{rgb:"1F2937"},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"right"}, numFmt:"#,##0" }, g.total||0);
+      setS(r, 4, { ...fillZ, ...bd, font:{sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"center"}, numFmt:"0.0%" }, g.pct||0);
+      setS(r, 5, { ...fillZ, ...bd, font:{sz:10,color:{rgb:theme.main},name:"Tahoma"}, alignment:{vertical:"center",horizontal:"left"} }, "█".repeat(Math.max(0, Math.round(((g.total||0)/gmax)*22))));
+      for (let c=6;c<C;c++) setS(r, c, { ...fillZ, ...bd });
+      if (C-1 > 5) ws["!merges"].push({ s:{r,c:5}, e:{r,c:C-1} });
+      ws["!rows"][r] = {hpx:18};
+    });
+    const rT = gTotalRow, tb = { fill:{fgColor:{rgb:lighten(theme.main,0.88)}}, border:{top:BORDER_THIN(lighten(theme.main,0.40))} };
+    const tf = (h) => ({ ...tb, font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{vertical:"center",horizontal:h,indent:h==="left"?1:0} });
+    setS(rT,0,tf("left"),"รวมทั้งหมด");
+    setS(rT,1,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.base||0),0));
+    setS(rT,2,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.add||0),0));
+    setS(rT,3,{...tf("right"),numFmt:"#,##0"}, groups.reduce((s,g)=>s+(g.total||0),0));
+    setS(rT,4,{...tf("center"),numFmt:"0.0%"}, 1);
+    for (let c=5;c<C;c++) setS(rT,c,{...tb});
+    ws["!rows"][rT] = {hpx:20};
   }
-  function toggleOp(id) {
-    setOpSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  }
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  return { ws, nextRow: nRows };   // คืน worksheet + แถวว่างถัดไป เผื่ออยากต่อตารางใต้ dashboard
+}
 
-  async function save() {
-    if (!form.name.trim()) { setErr("กรอกชื่อให้ครบ"); return; }
-    setBusy(true); setErr("");
-    try {
-      const opIds = [...opSel];
-      // บันทึกผ่าน RPC — DB จัดการ bcrypt เอง client ไม่แตะ hash (แก้ C2/H1)
-      await upsertEmployee({
-        id: employee.id,
-        code: employee.code,
-        name: form.name.trim(),
-        password: form.password, // "" = ไม่เปลี่ยน
-        role: form.role,
-        department_id: form.department_id || null,
-        machine_id: form.machine_id || null,
-        operation_id: opIds[0] || null,   // ตัวแรก = ขั้นตอนตั้งต้น (fallback ตอนสแกน)
-        active: employee.active,
-      });
-      // ซิงค์ความสามารถของเครื่องให้ตรงกับที่เลือก (หน้าเครื่องจะโชว์ปุ่มเลือกตามนี้)
-      await syncMachineOps(form.machine_id, opIds, caps);
-      onSaved();
-    } catch (e) {
-      setErr("บันทึกไม่สำเร็จ: " + e.message);
+// ── กราฟจริง (pie + bar) ในไฟล์ Excel: โหลด ExcelJS จาก CDN ตอนใช้งาน แล้ววาด
+//    กราฟเป็นรูป PNG ฝังลงไฟล์ — ไม่ต้องเพิ่ม dependency / ไม่กระทบ build ──────────
+function loadExcelJS() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js";
+    s.onload = () => res(window.ExcelJS);
+    s.onerror = () => rej(new Error("โหลด ExcelJS ไม่ได้"));
+    document.head.appendChild(s);
+  });
+}
+
+function chartPiePNG(items) {
+  const W=520,H=300,dpr=2,cv=document.createElement("canvas"); cv.width=W*dpr; cv.height=H*dpr;
+  const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
+  const cx=150,cy=155,r=115,tot=items.reduce((s,i)=>s+i.value,0)||1; let a=-Math.PI/2;
+  items.forEach(it=>{ const f=it.value/tot,a2=a+f*Math.PI*2; x.beginPath(); x.moveTo(cx,cy); x.arc(cx,cy,r,a,a2); x.closePath(); x.fillStyle="#"+it.color; x.fill();
+    if(f>0.04){ const m=(a+a2)/2; x.fillStyle="#fff"; x.font="bold 12px Tahoma"; x.textAlign="center"; x.fillText((f*100).toFixed(1)+"%",cx+Math.cos(m)*r*0.62,cy+Math.sin(m)*r*0.62+4);} a=a2; });
+  x.beginPath(); x.arc(cx,cy,r*0.52,0,Math.PI*2); x.fillStyle="#fff"; x.fill();
+  let ly=30; x.textAlign="left"; items.forEach(it=>{ x.fillStyle="#"+it.color; x.fillRect(300,ly,12,12); x.fillStyle="#334155"; x.font="12px Tahoma"; x.fillText(`${it.label} (${(it.value/tot*100).toFixed(1)}%)`,318,ly+11); ly+=23; });
+  return cv.toDataURL("image/png").split(",")[1];
+}
+function chartBarPNG(items, color) {
+  const W=520,H=300,dpr=2,pad=44,cv=document.createElement("canvas"); cv.width=W*dpr; cv.height=H*dpr;
+  const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
+  const max=Math.max(...items.map(i=>i.value),1),n=items.length||1,pw=W-pad*2,ph=H-pad*2;
+  x.strokeStyle="#e5e7eb"; x.beginPath(); x.moveTo(pad,H-pad); x.lineTo(W-pad,H-pad); x.stroke();
+  items.forEach((it,i)=>{ const bw=pw/n*0.6,bh=(it.value/max)*ph,bx=pad+(pw/n)*i+(pw/n-bw)/2,by=H-pad-bh;
+    x.fillStyle="#"+color; x.fillRect(bx,by,bw,bh);
+    x.fillStyle="#6b7280"; x.font="9px Tahoma"; x.textAlign="center"; x.save(); x.translate(bx+bw/2,H-pad+4); x.rotate(-Math.PI/4); x.fillText(it.label,0,4); x.restore();
+    if(it.value>0){ x.fillStyle="#334155"; x.font="bold 9px Tahoma"; x.textAlign="center"; x.fillText(fmtK(it.value),bx+bw/2,by-4);} });
+  return cv.toDataURL("image/png").split(",")[1];
+}
+async function exportQSRich(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
+  const ExcelJS = await loadExcelJS();
+  const F = "Tahoma";
+  const combined = buildCombinedBudget(tenderCosts, additions);
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const list = accounts.filter(a => { const bs=parseFloat(tenderCosts[a.code])||0, tt=parseFloat(combined[a.code])||0; return !(tt<=0 && bs<=0); });
+  const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const M = months.length;
+  const base = list.reduce((s,a)=> s+(parseFloat(tenderCosts[a.code])||0),0);
+  const added = list.reduce((s,a)=> s + months.reduce((ss,m)=> ss+monthAddValue(additions, m, a.code),0), 0);
+  const HD = ["Acc. Code","Account Name","Group","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"];
+  const NC = HD.length;
+  const soft = "FF"+lighten("2563EB",0.55), colL = c => XLSX.utils.encode_col(c);
+  const wb = new ExcelJS.Workbook();
+  const fillS = (a) => ({ type:"pattern", pattern:"solid", fgColor:{argb:a} });
+  const ws = wb.addWorksheet("รายงานงบประมาณ", { views:[{ showGridLines:false, state:"frozen", ySplit:7 }] });
+  ws.mergeCells(1,1,1,NC); const t=ws.getCell(1,1); t.value=`สรุปงบประมาณ — ${project.name}`; t.font={bold:true,size:15,color:{argb:"FF1D4ED8"},name:F}; t.fill=fillS(soft); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=30;
+  ws.mergeCells(2,1,2,NC); const stc=ws.getCell(2,1); stc.value=`พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`; stc.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; stc.alignment={indent:1};
+  const cards=[["ราคาเดิม (Baseline)","FFDBEAFE","FF1D4ED8",base],["เพิ่มรายเดือนรวม","FFD1FAE5","FF047857",added],["งบรวมทั้งหมด","FFFEF3C7","FF92400E",base+added],["จำนวนเดือน","FFEDE9FE","FF6D28D9",M]];
+  const span = Math.max(2, Math.floor(NC/4));
+  cards.forEach((cd,i)=>{ const c0=1+i*span, c1=Math.min(NC, c0+span-1);
+    ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
+    const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:10,color:{argb:cd[2]},name:F}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
+    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i<3) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
+  }); ws.getRow(4).height=18; ws.getRow(5).height=30;
+  const HR = 7;
+  HD.forEach((h,i)=>{ const c=ws.getCell(HR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"},name:F}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); ws.getRow(HR).height=24;
+  const drows = [];
+  list.forEach((a,ri)=>{ const R=HR+1+ri;
+    const mv = months.map(m=>monthAddValue(additions, m, a.code)), bs=parseFloat(tenderCosts[a.code])||0;
+    drows.push([a.code, a.name, a.group, bs, ...mv, bs+mv.reduce((s,v)=>s+v,0)]);
+    ws.getCell(R,1).value=a.code; ws.getCell(R,2).value=a.name; ws.getCell(R,3).value=a.group;
+    const bc=ws.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
+    mv.forEach((v,mi)=>{ const c=ws.getCell(R,5+mi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
+    const lastM=colL(3+M); const tc=ws.getCell(R,NC); tc.value = M ? { formula:`D${R}+SUM(E${R}:${lastM}${R})`, result: bs+mv.reduce((s,v)=>s+v,0) } : { formula:`D${R}`, result: bs }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
+    [1,2,3].forEach(c=>{ ws.getCell(R,c).font={name:F,size:9.5}; ws.getCell(R,c).alignment={vertical:"middle"}; });
+    if(ri%2) for(let c=1;c<=NC;c++){ const cell=ws.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
+  });
+  const tR = HR + 1 + list.length;
+  for(let c=1;c<=NC;c++){ const cell=ws.getCell(tR,c); cell.fill=fillS("FFC9D8FA"); cell.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; }
+  const tl=ws.getCell(tR,2); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF1D4ED8"},name:F};
+  [4, ...months.map((_,i)=>5+i), NC].forEach(col=>{ const c=ws.getCell(tR,col), L=colL(col-1); c.value = list.length ? { formula:`SUM(${L}${HR+1}:${L}${HR+list.length})` } : 0; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
+  ws.getCell(5,1).value = { formula:`D${tR}`, result: base };
+  ws.getCell(5,1+span).value = { formula:`${colL(NC-1)}${tR}-D${tR}`, result: added };
+  ws.getCell(5,1+span*2).value = { formula:`${colL(NC-1)}${tR}`, result: base+added };
+  ws.autoFilter = `A${HR}:${colL(NC-1)}${HR}`;
+  fitExcelCols(ws, HD, drows);
+
+  // ชีตแยกแต่ละเดือน — breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น
+  const cleanNm = (s) => String(s).replace(/[\\/?*[\]:]/g,"-").slice(0,28);
+  const usedNm = {};
+  months.forEach(m => {
+    const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
+    const hasCols = cols.length > 0;
+    const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+    const V = valLabels.length, nc = 5 + V, lastValL = colL(3 + V);
+    const HM = ["Acc. Code","Account Name","Group","ราคาเดิม", ...valLabels, "รวมเดือนนี้"];
+    let nm = cleanNm(monthShortLabel(m)); if (usedNm[nm]) { usedNm[nm]++; nm = cleanNm(`${nm} ${usedNm[nm]}`); } else usedNm[nm] = 1;
+    const wsm = wb.addWorksheet(nm, { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
+    wsm.mergeCells(1,1,1,nc); const mt=wsm.getCell(1,1); mt.value=`เพิ่มรายเดือน ${monthShortLabel(m)} — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF1D4ED8"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
+    wsm.mergeCells(2,1,2,nc); const ms=wsm.getCell(2,1); ms.value = hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์ · Export: ${new Date().toLocaleDateString("th-TH")}` : `Export: ${new Date().toLocaleDateString("th-TH")}`; ms.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; ms.alignment={indent:1};
+    HM.forEach((h,i)=>{ const c=wsm.getCell(4,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"},name:F}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); wsm.getRow(4).height=26;
+    const mrows = [];
+    list.forEach((a,ri)=>{ const R=5+ri;
+      const bs = parseFloat(tenderCosts[a.code])||0;
+      const cv = hasCols ? cols.map(c=>parseFloat((additions[m]||{})[`${a.code}:${c.id}`])||0) : [parseFloat((additions[m]||{})[a.code])||0];
+      mrows.push([a.code, a.name, a.group, bs, ...cv, cv.reduce((s,v)=>s+v,0)]);
+      wsm.getCell(R,1).value=a.code; wsm.getCell(R,2).value=a.name; wsm.getCell(R,3).value=a.group;
+      const bc=wsm.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
+      cv.forEach((v,vi)=>{ const c=wsm.getCell(R,5+vi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
+      const tc=wsm.getCell(R,nc); tc.value = { formula:`SUM(E${R}:${lastValL}${R})`, result: cv.reduce((s,v)=>s+v,0) }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
+      [1,2,3].forEach(c=>{ wsm.getCell(R,c).font={name:F,size:9.5}; wsm.getCell(R,c).alignment={vertical:"middle"}; });
+      if(ri%2) for(let c=1;c<=nc;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
+    });
+    const mtR = 5 + list.length;
+    for(let c=1;c<=nc;c++){ const cell=wsm.getCell(mtR,c); cell.fill=fillS("FFC9D8FA"); cell.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; }
+    wsm.getCell(mtR,2).value="TOTAL"; wsm.getCell(mtR,2).font={bold:true,color:{argb:"FF1D4ED8"},name:F};
+    [4, ...valLabels.map((_,i)=>5+i), nc].forEach(col=>{ const c=wsm.getCell(mtR,col), L=colL(col-1); c.value = list.length ? { formula:`SUM(${L}5:${L}${4+list.length})` } : 0; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
+    wsm.autoFilter = `A4:${colL(nc-1)}4`;
+    fitExcelCols(wsm, HM, mrows);
+  });
+  const buf=await wb.xlsx.writeBuffer(); const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}); const url=URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url; a2.download=`QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`; document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
+}
+
+
+// ─── QS: budget / tender-cost export ───────────────────────────────────────
+function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"2563EB", dark:"1D4ED8" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  // รายการบัญชีที่มีค่า (ใช้ร่วมกันทั้ง 2 ชีต เพื่อให้ตำแหน่งแถวตรงกัน → ลิงก์สูตรได้)
+  const dashList = accounts.filter(a => {
+    const bs = parseFloat(tenderCosts[a.code]) || 0;
+    const tt = parseFloat(combinedBudget[a.code]) || 0;
+    return !(tt <= 0 && bs <= 0);
+  });
+
+  // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดเพิ่มรายเดือน (ในหน้าเดียว)
+  const dashMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + monthAddValue(additions, m, a.code), 0) }));
+  const dashBase   = accounts.reduce((s,a)=> s + (parseFloat(tenderCosts[a.code])||0), 0);
+  const dashAdded  = dashItems.reduce((s,i)=> s + i.value, 0);
+  // แถว TOTAL (A1) ของชีต "งบประมาณ"/"รายเดือน (สรุป)" = 5 + จำนวนแถวข้อมูล
+  // (หัวข้อ 3 แถว + หัวตารางแถว 4 → ข้อมูลเริ่มแถว 5 → TOTAL อยู่แถว 5+N)
+  const TR = 5 + dashList.length;
+  const dashItemsF = dashItems.map((it, i) => ({ ...it, f: `'รายเดือน (สรุป)'!${XLSX.utils.encode_col(3 + i)}${TR}` }));
+  // สรุปตามกลุ่มวัสดุ (ไว้โชว์ตาราง+แถบสัดส่วนในหน้าสรุป)
+  const byG = {};
+  dashList.forEach(a => {
+    const bs = parseFloat(tenderCosts[a.code]) || 0, tt = parseFloat(combinedBudget[a.code]) || 0, g = a.group || "อื่น ๆ";
+    (byG[g] = byG[g] || { base:0, total:0 }); byG[g].base += bs; byG[g].total += tt;
+  });
+  const grandTot = Object.values(byG).reduce((s,x)=>s+x.total,0) || 1;
+  const groupData = Object.entries(byG)
+    .map(([label,x]) => ({ label, base:x.base, add:x.total-x.base, total:x.total, pct:x.total/grandTot }))
+    .sort((a,b)=> b.total - a.total);
+  const dashQS = addDashboardSheet(wb, "สรุป", {
+    title: `สรุปงบประมาณ — ${project.name}`,
+    subtitle: `พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`,
+    theme,
+    // 4 การ์ดให้ตรงกับหน้า Baseline แบบใหม่: ราคาเดิม · เผื่อเศษ 3% · งานเพิ่ม · รวมทั้งหมด
+    cards: [
+      { label:"ราคาเดิม (Tender Cost)",       value: dashBase, money:true, f:`'งบประมาณ'!D${TR}`, acc:["DBEAFE","1D4ED8"] },
+      { label:"เผื่อเศษ/สูญเสีย 3% (อ้างอิง)", value: dashBase*0.03, money:true,                    acc:["FEF3C7","92400E"] },
+      { label:"งานเพิ่ม (รวมทุกเดือน)",         value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}`, acc:["EDE9FE","6D28D9"] },
+      { label:"รวมทั้งหมด",                    value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}`, acc:["D1FAE5","047857"] },
+    ],
+    chartTitle: "กราฟ: ยอดเพิ่มรายเดือน (THB)",
+    items: dashItemsF,
+    groups: groupData,
+  });
+  const monthLinksQS = [];   // เก็บชื่อชีตรายเดือนไว้ทำลิงก์บนหน้าสรุป
+
+  // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
+  const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม","เพิ่มรายเดือน (รวม)","รวมทั้งหมด",...(U?["รวมทั้งหมด (USD)"]:[])]);
+  const dataStart1 = rows1.length;
+  const rowGroups1 = [];
+  dashList.forEach(a => {
+    const baseline = parseFloat(tenderCosts[a.code]) || 0;
+    const total    = parseFloat(combinedBudget[a.code]) || 0;
+    const added = total - baseline;
+    rows1.push([a.code, a.name, a.group, baseline, added, total, ...(U?[toUsd(total,rate)]:[])]);
+    rowGroups1.push(a.group);
+  });
+  const dataEnd1 = rows1.length-1;
+  rows1.push(["","TOTAL","",0,0,0, ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
+  const totalRow1 = rows1.length-1;
+  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
+  // ลิงก์ด้วยสูตร: งบรวม = ราคาเดิม + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
+  for (let r = dataStart1; r <= dataEnd1; r++) {
+    const R = r + 1, ref = XLSX.utils.encode_cell({ r, c:5 });
+    if (ws1[ref]) ws1[ref].f = `D${R}+E${R}`;
+  }
+  ["D","E","F"].forEach((L, i) => {
+    const ref = XLSX.utils.encode_cell({ r:totalRow1, c:3+i });
+    if (ws1[ref]) ws1[ref].f = `SUM(${L}${dataStart1+1}:${L}${dataEnd1+1})`;
+  });
+  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18},...(U?[{wch:18}]:[])];
+  styleSheet(ws1, { numCols:6+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:U?[3,4,5,6]:[3,4,5], usdCols:U?[6]:[], theme, rowGroups:rowGroups1, groupDisplayCol:2, codeCol:0 });
+  xBackLink(ws1, 2, (6+(U?1:0))-1, "สรุป");
+  XLSX.utils.book_append_sheet(wb, ws1, "งบประมาณ");
+
+  // Sheet 2 — one column per month, so QS can see exactly how the budget grew
+  const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const rows2 = [[`รายการเพิ่มรายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows2.push(["Acc. Code","Account Name","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด", ...(U?["รวม (USD)"]:[])]);
+  const dataStart2 = rows2.length;
+  const rowGroups2 = [];
+  dashList.forEach(a => {
+    const baseline  = parseFloat(tenderCosts[a.code]) || 0;
+    const monthVals = months.map(m => monthAddValue(additions, m, a.code));
+    const total = baseline + monthVals.reduce((s,v)=>s+v,0);
+    rows2.push([a.code, a.name, baseline, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
+    rowGroups2.push(a.group);
+  });
+  const dataEnd2 = rows2.length-1;
+  const M = months.length, totColC = 3 + M;
+  rows2.push(["","TOTAL",0, ...months.map(()=>0), 0, ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
+  const totalRow2 = rows2.length-1;
+  const numCols2 = 4 + months.length + (U?1:0);
+  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
+  // ลิงก์ด้วยสูตร: รวมทั้งหมด(ต่อแถว) = ราคาเดิม + ผลรวมทุกเดือน · TOTAL = ผลรวมคอลัมน์
+  const lastMonthL = XLSX.utils.encode_col(2 + M);
+  for (let r = dataStart2; r <= dataEnd2; r++) {
+    const R = r + 1, ref = XLSX.utils.encode_cell({ r, c: totColC });
+    if (ws2[ref]) ws2[ref].f = M > 0 ? `C${R}+SUM(D${R}:${lastMonthL}${R})` : `C${R}`;
+  }
+  [2, ...months.map((_,i)=>3+i), totColC].forEach(c => {
+    const L = XLSX.utils.encode_col(c), ref = XLSX.utils.encode_cell({ r:totalRow2, c });
+    if (ws2[ref]) ws2[ref].f = `SUM(${L}${dataStart2+1}:${L}${dataEnd2+1})`;
+  });
+  ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
+  styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
+    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], usdCols:U?[4+months.length]:[], theme, rowGroups:rowGroups2, codeCol:0 });
+  xBackLink(ws2, 2, numCols2-1, "สรุป");
+  XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
+
+  // Sheet 3+ — แยกรายเดือน โดย breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น ๆ
+  // คอลัมน์เก็บเป็นรายเดือน แต่ละเดือนอาจมีชุดคอลัมน์ต่างกัน → ทำหนึ่งชีตต่อเดือน
+  const sheetName = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
+  const usedNames = {};
+  const monthSheetMap = {};   // เดือน → ชื่อชีต ไว้ทำลิงก์
+  months.forEach((m) => {
+    const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
+    const hasCols = cols.length > 0;
+    const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+    const rows = [
+      [`เพิ่มรายเดือน ${monthShortLabel(m)} — ${project.name}`],
+      [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
+               : `Export: ${new Date().toLocaleDateString("th-TH")}`],
+      [],
+      ["Acc. Code", "Account Name", "Group", ...valLabels, "รวมเดือนนี้", ...(U?["รวม (USD)"]:[])],
+    ];
+    const dataStart = rows.length;
+    const colTotals = valLabels.map(() => 0);
+    let grand = 0;
+    const rowGroups = [];
+    accounts.forEach(a => {
+      const vals = hasCols
+        ? cols.map(c => parseFloat((additions[m] || {})[`${a.code}:${c.id}`]) || 0)
+        : [parseFloat((additions[m] || {})[a.code]) || 0];
+      const rowTotal = vals.reduce((s, v) => s + v, 0);
+      if (rowTotal <= 0) return; // เอาเฉพาะรายการที่มียอดในเดือนนี้
+      rows.push([a.code, a.name, a.group, ...vals, rowTotal, ...(U?[toUsd(rowTotal,rate)]:[])]);
+      rowGroups.push(a.group);
+      vals.forEach((v, i) => { colTotals[i] += v; });
+      grand += rowTotal;
+    });
+    if (rows.length === dataStart) return; // เดือนนี้ไม่มีข้อมูล ข้ามชีต
+    const dataEnd = rows.length - 1;
+    rows.push(["", "TOTAL", "", ...colTotals, grand, ...(U?[toUsd(grand,rate)]:[])]);
+    const totalRow = rows.length - 1;
+    const numCols = 4 + valLabels.length + (U?1:0);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{ wch: 12 }, { wch: 34 }, { wch: 14 }, ...valLabels.map(() => ({ wch: 15 })), { wch: 16 }, ...(U?[{ wch: 16 }]:[])];
+    styleSheet(ws, {
+      numCols, subRows: [1], headerRow: 3, dataStart, dataEnd, totalRow,
+      moneyCols: [...valLabels.map((_, i) => 3 + i), 3 + valLabels.length, ...(U?[4 + valLabels.length]:[])], usdCols:U?[4 + valLabels.length]:[],
+      theme, rowGroups, groupDisplayCol: 2, codeCol: 0,
+    });
+    let nm = sheetName(monthShortLabel(m));
+    if (usedNames[nm]) { usedNames[nm] += 1; nm = sheetName(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
+    xBackLink(ws, 2, numCols-1, "สรุป");
+    XLSX.utils.book_append_sheet(wb, ws, nm);
+    monthSheetMap[m] = nm;
+    monthLinksQS.push({ text: monthShortLabel(m), sheet: nm });
+  });
+  // ลิงก์หัวคอลัมน์เดือนในชีต "รายเดือน (สรุป)" → กระโดดไปชีตของเดือนนั้น (ไล่ที่มา)
+  months.forEach((m,i)=>{ if (monthSheetMap[m]) xLinkCell(ws2, XLSX.utils.encode_cell({ r:3, c:3+i }), monthSheetMap[m], `ดูรายละเอียดเดือน ${monthShortLabel(m)}`); });
+  // แถบลิงก์นำทางใต้ dashboard หน้าสรุป
+  {
+    const navR = dashQS.nextRow + 1;
+    XLSX.utils.sheet_add_aoa(dashQS.ws, [["🔗 ไปที่ชีต:"]], { origin:{ r:navR, c:0 } });
+    dashQS.ws[XLSX.utils.encode_cell({ r:navR, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+    xLinkRow(dashQS.ws, navR+1, [{text:"📄 งบประมาณ (รายรหัส)", sheet:"งบประมาณ"}, {text:"📅 รายเดือน (สรุป)", sheet:"รายเดือน (สรุป)"}]);
+    if (monthLinksQS.length) {
+      XLSX.utils.sheet_add_aoa(dashQS.ws, [["🔗 รายละเอียดรายเดือน:"]], { origin:{ r:navR+2, c:0 } });
+      dashQS.ws[XLSX.utils.encode_cell({ r:navR+2, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+      xLinkRow(dashQS.ws, navR+3, monthLinksQS);
     }
-    setBusy(false);
   }
 
-  async function del() {
-    if (!(await askConfirm({ message: `ลบพนักงาน "${employee.code} — ${employee.name}" ?`, tone: "danger", confirmText: "ลบพนักงาน", cancelText: "ยกเลิก" }))) return;
-    setBusy(true); setErr("");
-    try {
-      let res = await deleteEmployee(employee.id, false);
-      if (res && res.ok === false && res.reason === "has_records") {
-        setBusy(false);
-        const ok = await askConfirm({
-          message:
-            `พนักงานคนนี้มีประวัติงานหน้าเครื่อง ${Number(res.count || 0).toLocaleString()} รายการ\n\n` +
-            `แนะนำให้ "ปิดใช้งาน" แทนการลบ เพื่อเก็บชื่อผู้ทำไว้ในประวัติ\n\n` +
-            `ถ้ายืนยันลบ: ตัวเลขการผลิตจะยังอยู่ครบ แต่ประวัติจะไม่ระบุว่าใครเป็นคนทำ\n\nยืนยันลบ?`,
-          tone: "danger", confirmText: "ลบพนักงาน", cancelText: "ยกเลิก",
+  const fname = `QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  return { wb, fname };
+}
+
+// ─── QS: export เฉพาะเดือนที่เลือก (แยกคอลัมน์ของเดือนนั้น + ยอดสะสมถึงเดือนนี้) ──
+function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[], hiddenAccounts=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"2563EB", dark:"1D4ED8" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
+  const allMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
+  const upto = allMonths.filter(m => m <= month);
+  const cols = (additions[month] && additions[month].$columns) || additions.$columns || [];
+  const hasCols = cols.length > 0;
+  const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+
+  const rows = [
+    [`เพิ่มรายเดือน ${monthShortLabel(month)} — ${project.name}`],
+    [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
+             : `Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [],
+    ["Acc. Code", "Account Name", "Group", "ราคาเดิม", ...valLabels, "รวมเดือนนี้", "รวมสะสมถึงเดือนนี้", ...(U?["รวมสะสม (USD)"]:[])],
+  ];
+  const dataStart = rows.length;
+  const colTotals = valLabels.map(() => 0);
+  let gBase = 0, gMonth = 0, gCum = 0;
+  const rowGroups = [];
+  accounts.forEach(a => {
+    const baseline = parseFloat(tenderCosts[a.code]) || 0;
+    const vals = hasCols
+      ? cols.map(c => parseFloat((additions[month] || {})[`${a.code}:${c.id}`]) || 0)
+      : [parseFloat((additions[month] || {})[a.code]) || 0];
+    const monthTot = vals.reduce((s, v) => s + v, 0);
+    const cum = baseline + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
+    if (monthTot <= 0 && baseline <= 0 && cum <= 0) return;
+    rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
+    rowGroups.push(a.group);
+    vals.forEach((v, i) => { colTotals[i] += v; });
+    gBase += baseline; gMonth += monthTot; gCum += cum;
+  });
+  const dataEnd = rows.length - 1;
+  rows.push(["", "TOTAL", "", gBase, ...colTotals, gMonth, gCum, ...(U?[toUsd(gCum,rate)]:[])]);
+  const totalRow = rows.length - 1;
+  const numCols = 6 + valLabels.length + (U?1:0);
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }, ...(U?[{ wch:18 }]:[])];
+  styleSheet(ws, {
+    numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
+    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length, ...(U?[6 + valLabels.length]:[])], usdCols:U?[6 + valLabels.length]:[],
+    theme, rowGroups, groupDisplayCol: 2, codeCol: 0,
+  });
+  XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
+  XLSX.writeFile(wb, `QS_${clean(monthShortLabel(month)).replace(/[^\dA-Za-zก-๙]/g,"")}_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// ─── ชีตรวม: "ของเข้ารายเดือน (แผน + PO จริง)" ───────────────────────────────
+//  ใช้ร่วมทั้ง Export จัดซื้อ + บัญชี — ต่อ Acc. Code: ต้นทุน (Tender Cost / Balance
+//  Pending PO / Stock / Balance Cost) + แต่ละเดือนแยก 3 ช่อง: จ่าย(เขียว)=จ่ายแล้ว ·
+//  ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO + TOTAL แถว/คอลัมน์
+function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], theme, backSheet="สรุป" }) {
+  const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
+  const acctList = exportAccountList(extraItems, hiddenAccounts);
+  const nameOf   = (code) => acctList.find(a=>a.code===code)?.name || ACCOUNTS.find(a=>a.code===code)?.name || "";
+  const combinedB = buildCombinedBudget(tenderCosts, additions);
+  const today = todayStr();
+  const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
+  const mCell = {};
+  const bucket = (code, mk) => { const c=(mCell[code]=mCell[code]||{}); return (c[mk]=c[mk]||{paid:0,recv:0,po:0,poLate:false,plan:0,planLate:false}); };
+  plansArr.forEach(pl => poItems(pl).forEach(it => (it.rounds||[]).forEach(r => {
+    const a=parseFloat(r.planAmount)||0; if(!a) return;
+    const cc=bucket(it.code,(r.planDate||pl.date||"").slice(0,7)); cc.plan+=a; if(lateOf(r)) cc.planLate=true;
+  })));
+  poEntries.forEach(p => poItems(p).forEach(it => (it.rounds||[]).forEach(r => {
+    if (roundReceived(r)) {
+      const a=parseFloat(r.actualAmount)||0; if(!a) return;
+      const cc=bucket(it.code, r.actualDate.slice(0,7));
+      if (roundPaid(p,r)) cc.paid+=a; else cc.recv+=a;
+    } else {
+      const a=parseFloat(r.actualAmount)||parseFloat(r.planAmount)||0; if(!a) return; // ยอดจริงที่กรอกไว้มาก่อน (ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้แผน
+      const cc=bucket(it.code,(r.actualDate||r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
+    }
+  })));
+  const mCodes = Object.keys(mCell).sort();
+  const mMonths = [...new Set(mCodes.flatMap(c=>Object.keys(mCell[c])))].filter(Boolean).sort();
+  if (!mCodes.length || !mMonths.length) return;
+  const cellOf = (code,mk) => mCell[code]?.[mk] || null;
+  const cellTot = (c) => c ? (c.paid+c.recv+c.po+c.plan) : 0;
+  const budgetOf    = (code) => parseFloat(combinedB[code])||0;
+  const committedOf = (code) => poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
+  const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
+  const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
+  const takeoffOf = (code) => [...poEntries, ...plansArr].reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.takeoff)||0),0),0);
+  // เดือนละ 1 คอลัมน์ (ไม่แยก 3 ช่อง) — ในช่องใส่รายการแบบมีป้ายกำกับ จ่าย/รับ/รอเข้า/แผน
+  // ช่วยให้ตารางไม่กว้างเกินเมื่อมีหลายเดือน (เช่น 2 ปี = 24 คอลัมน์ แทน 72)
+  const cellLines = (c) => {
+    if (!c) return [];
+    const out = [];
+    if (c.paid>0) out.push(`จ่าย ${fmt(c.paid)}`);
+    if (c.recv>0) out.push(`รับ ${fmt(c.recv)}`);
+    if (c.po>0)   out.push(`รอเข้า ${fmt(c.po)}${c.poLate?" ⚠":""}`);
+    if (c.plan>0) out.push(`แผน ${fmt(c.plan)} *${c.planLate?" ⚠":""}`);
+    return out;
+  };
+  const cellStr = (c) => { const l=cellLines(c); return l.length ? l.join("\n") : "-"; };
+  // ถ้าช่องมีชนิดเดียวลงสีตามชนิด (จ่าย=เขียว/รับ,รอเข้า=ดำ/แผน=แดง/ล่าช้า=ส้ม); ถ้าปนกันใช้ดำ
+  const cellColor = (c) => {
+    if (!c) return null;
+    const n = [c.paid>0, c.recv>0, c.po>0, c.plan>0].filter(Boolean).length;
+    if (n !== 1) return (c.poLate || c.planLate) ? "D97706" : null;
+    if (c.paid>0) return "10B981";
+    if (c.plan>0) return c.planLate ? "D97706" : "EF4444";
+    if (c.po>0)   return c.poLate ? "D97706" : "1F2937";
+    return "1F2937";
+  };
+  // คอลัมน์ต้นทุน: Tender Cost · Take off · Stock · Issue PO · Pending PO + เดือน (1 ช่อง/เดือน) + TOTAL + Balance Cost
+  const header = ["Acc. Code","Acc. Name","Tender Cost","Take off","Stock","Issue PO","Pending PO"];
+  mMonths.forEach(mk => header.push(monthShortLabel(mk)));
+  header.push("TOTAL","Balance Cost");
+  const rows = [
+    [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
+    [`เดือนละ 1 ช่อง (มีป้ายกำกับ) — จ่าย=จ่ายแล้ว(เขียว) · รับ=รับของแล้ว · รอเข้า=PO ยังไม่รับ(⚠=ล่าช้า) · แผน=ยังไม่เป็น PO(แดง, มี *) · Issue PO = PO ที่ยื่นจริง · Pending PO = งบ−Stock−PO−แผน · Balance Cost = Tender Cost−Stock−Issue PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [],
+    header,
+  ];
+  const dataStart = rows.length, monthColStart = 7, totalCol = 7 + mMonths.length, balPOcol = totalCol + 1, numCols = balPOcol + 1;
+  const lineCount = {}; // จำนวนบรรทัดสูงสุดต่อแถว → ใช้ตั้งความสูงแถว
+  mCodes.forEach((code, ri) => {
+    const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code), takeoff=takeoffOf(code);
+    const row = [code, nameOf(code), budget, takeoff, stock, committed, budget-stock-committed-planned];
+    let maxLines = 1;
+    mMonths.forEach(mk => { const l=cellLines(cellOf(code,mk)); maxLines=Math.max(maxLines, l.length||1); row.push(l.length?l.join("\n"):"-"); });
+    row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0), budget-stock-committed); // Balance Cost = Tender Cost − Stock − Issue PO
+    rows.push(row);
+    lineCount[dataStart+ri] = maxLines;
+  });
+  const dataEnd = rows.length - 1;
+  const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
+  const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(takeoffOf), sumOf(stockOf), sumOf(committedOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
+  // แถว TOTAL: รวมยอดทั้งเดือนเป็นตัวเลขเดียว (ไม่แยกจ่าย/รอเข้า/แผน)
+  mMonths.forEach(mk => { const colT = sumOf(c=>cellTot(cellOf(c,mk))); totalArr.push(colT>0 ? fmt(colT) : "-"); });
+  totalArr.push(mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c))); // Balance Cost = Tender − Stock − Issue PO
+  rows.push(totalArr);
+  const totalRow = rows.length - 1;
+  lineCount[totalRow] = 1;
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{wch:12},{wch:34},{wch:16},{wch:15},{wch:14},{wch:15},{wch:16}, ...mMonths.map(()=>({wch:17})), {wch:18},{wch:16}];
+  const moneyCols = [2,3,4,5,6, totalCol, balPOcol]; // ช่องเดือนเป็นข้อความ ไม่ใช่ตัวเลข
+  styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols, theme });
+  // ลงสี + wrapText ช่องเดือน (ข้อความหลายบรรทัด) + ตั้งความสูงแถวตามจำนวนบรรทัด
+  if (!ws["!rows"]) ws["!rows"] = [];
+  const paintMonth = (r) => {
+    mMonths.forEach((mk,mi)=>{
+      const c = cellOf(mCodes[r-dataStart], mk);
+      const ref = XLSX.utils.encode_cell({r, c:monthColStart+mi});
+      if (!ws[ref]) return;
+      const rgb = cellColor(c);
+      ws[ref].s = { ...(ws[ref].s||{}),
+        font: { ...((ws[ref].s||{}).font||{}), ...(rgb?{color:{rgb}}:{}) },
+        alignment: { ...((ws[ref].s||{}).alignment||{}), horizontal:"right", vertical:"top", wrapText:true } };
+    });
+    const n = lineCount[r] || 1;
+    if (n > 1) ws["!rows"][r] = { hpx: Math.max(19, n*14) };
+  };
+  for (let r=dataStart; r<=dataEnd; r++) {
+    paintMonth(r);
+    [6, balPOcol].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
+  }
+  // แถว TOTAL: ช่องเดือนเป็นยอดรวมเดียว — ตัวหนา ชิดขวา
+  mMonths.forEach((mk,mi)=>{ const ref=XLSX.utils.encode_cell({r:totalRow,c:monthColStart+mi}); if(ws[ref]) ws[ref].s={ ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), bold:true }, alignment:{ ...((ws[ref].s||{}).alignment||{}), horizontal:"right", vertical:"center" } }; });
+  xBackLink(ws, 2, numCols-1, backSheet);
+  XLSX.utils.book_append_sheet(wb, ws, "ของเข้ารายเดือน");
+}
+
+// ─── ชีต "ตารางรวมเดือน" (แบบหน้าบัญชี) — mirror AccountingMatrixTab ──────────
+//  ต้นทุน (Tender/Balance Pending PO/Stock/Balance Cost) + กลุ่มเดือน Incoming/Received
+//  (รับจริง=ดำ · แผน/PO รอเข้า=แดง) + Payment Plan รายเดือน + สรุป PO (Total PO/PO Balance)
+function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], theme, backSheet="Summary" }) {
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const combined = buildCombinedBudget(tenderCosts, additions);
+  const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
+  const committedByCode = {}, stockByCode = {}, plannedByCode = {}, actual = {}, incoming = {}, payplan = {};
+  const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code]=obj[code]||{}); obj[code][mk]=(obj[code][mk]||0)+amt; };
+  plansArr.forEach(pl => poItems(pl).forEach(it => {
+    plannedByCode[it.code] = (plannedByCode[it.code]||0) + (parseFloat(it.amount)||0);
+    (it.rounds||[]).forEach(r => { const a=parseFloat(r.planAmount)||0; if(a>0) bump(incoming, it.code, (r.planDate||pl.date||"").slice(0,7), a); });
+  }));
+  poEntries.forEach(p => { poItems(p).forEach(it => {
+    committedByCode[it.code] = (committedByCode[it.code]||0)+(parseFloat(it.amount)||0);
+    stockByCode[it.code] = (stockByCode[it.code]||0)+(parseFloat(it.store)||0);
+    (it.rounds||[]).forEach(r => {
+      if (roundReceived(r)) bump(actual, it.code, r.actualDate.slice(0,7), parseFloat(r.actualAmount)||0);
+      else { const a=parseFloat(r.actualAmount)||parseFloat(r.planAmount)||0; if(a>0) bump(incoming, it.code, (r.actualDate||r.planDate||p.date||"").slice(0,7), a); }
+    });
+  }); poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount||0)); });
+  const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m=>Object.keys(m)))].sort();
+  const mgM = [...new Set([...monthsOf(incoming), ...monthsOf(actual)])].sort();
+  const payM = monthsOf(payplan);
+  const rowsData = accounts.map(a => {
+    const budget = parseFloat(combined[a.code])||0, committed = committedByCode[a.code]||0, stock = stockByCode[a.code]||0, planned = plannedByCode[a.code]||0;
+    const mgRow = mgM.map(mk => { const av=actual[a.code]?.[mk]||0, pv=incoming[a.code]?.[mk]||0; return { eff: av+pv, real: pv===0, hasRecv: av>0 }; }); // รวมรับจริง+ยังไม่เข้า (ไม่ให้ตกหล่นเมื่อเดือนเดียวมีทั้งคู่) · เขียว=รับครบ, เหลือง=รับบางส่วน, แดง=ยังไม่เข้า
+    const pyRow = payM.map(mk => payplan[a.code]?.[mk]||0);
+    return { a, budget, committed, stock, planned, balPO:budget-committed, balCost:budget-stock-committed-planned, balPOout:budget-stock-committed,
+      mgRow, pyRow, mgTot:mgRow.reduce((s,c)=>s+c.eff,0), pyTot:pyRow.reduce((s,x)=>s+x,0) };
+  }).filter(r => r.budget||r.committed||r.stock||r.mgTot||r.pyTot);
+  if (!rowsData.length) return;
+  const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Pending PO",
+    ...mgM.map(mk=>`${monthShortLabel(mk)} (เข้า)`), "รวมเข้า",
+    ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "Balance Cost"];
+  const rows = [
+    [`ตารางรวมเดือน — ${project.name}`],
+    [`Incoming: รับแล้ว=เขียว · แผน/PO รอเข้า=แดง · Pending PO = งบ − Stock − PO − แผน · Balance Cost = งบ − Stock − PO (ตรงกับหน้าจัดซื้อ) · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [],
+    header,
+  ];
+  const dataStart = rows.length;
+  const mgStart = 6, mgTotCol = 6+mgM.length, payStart = mgTotCol+1, payTotCol = payStart+payM.length, poCol = payTotCol+1, poBalCol = poCol+1, numCols = poBalCol+1;
+  const blank = (v) => v ? v : "-";
+  rowsData.forEach(r => {
+    rows.push([r.a.code, r.a.name, blank(r.budget), blank(r.balPO), blank(r.stock), blank(r.balCost),
+      ...r.mgRow.map(c=>blank(c.eff)), blank(r.mgTot),
+      ...r.pyRow.map(v=>blank(v)), blank(r.pyTot), blank(r.committed), blank(r.balPOout)]);
+  });
+  const dataEnd = rows.length - 1;
+  const sumOf = (fn) => rowsData.reduce((s,r)=>s+fn(r),0);
+  const totalArr = ["","TOTAL", sumOf(r=>r.budget), sumOf(r=>r.balPO), sumOf(r=>r.stock), sumOf(r=>r.balCost)];
+  mgM.forEach((_,i)=>totalArr.push(sumOf(r=>r.mgRow[i]?.eff||0))); totalArr.push(sumOf(r=>r.mgTot));
+  payM.forEach((_,i)=>totalArr.push(sumOf(r=>r.pyRow[i]||0)));    totalArr.push(sumOf(r=>r.pyTot));
+  totalArr.push(sumOf(r=>r.committed), sumOf(r=>r.balPOout));
+  rows.push(totalArr.map((v,i)=> i<2 ? v : blank(v)));
+  const totalRow = rows.length - 1;
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{wch:12},{wch:32},{wch:16},{wch:18},{wch:14},{wch:16},
+    ...mgM.map(()=>({wch:14})), {wch:14}, ...payM.map(()=>({wch:14})), {wch:14}, {wch:16}, {wch:16}];
+  const allMoney = [2,3,4,5, ...Array.from({length:numCols-6},(_,i)=>6+i)];
+  styleSheet(ws, { numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow, moneyCols:allMoney, theme });
+  const setColor = (r, col, rgb, bold) => { const ref=XLSX.utils.encode_cell({r,c:col}); if (ws[ref]) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...((ws[ref].s||{}).font||{}), color:{rgb}, ...(bold?{bold:true}:{}) } }; };
+  for (let r=dataStart; r<=dataEnd; r++) {
+    const rd = rowsData[r-dataStart];
+    rd.mgRow.forEach((c,i)=>{ if (c.eff) setColor(r, mgStart+i, c.real ? "059669" : (c.hasRecv ? "D97706" : "EF4444"), c.real || c.hasRecv); }); // เขียว=รับครบ · เหลือง=รับบางส่วน · แดง=ยังไม่เข้า (ให้ตรงกับสีในแอป)
+    [5, poBalCol].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) setColor(r, cc, "DC2626", true); });
+  }
+  xBackLink(ws, 2, numCols-1, backSheet);
+  XLSX.utils.book_append_sheet(wb, ws, "ตารางรวมเดือน");
+}
+
+// ─── Procurement: PO tracking export ───────────────────────────────────────
+function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"F59E0B", dark:"B45309" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
+
+  // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดสั่งซื้อรายเดือน
+  const dPaid = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
+  const dTotal = poEntries.reduce((s,p)=> s + poTotal(p), 0);
+  const dMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
+  const dash = addDashboardSheet(wb, "สรุป", {
+    title: `สรุปจัดซื้อ (PO) — ${project.name}`,
+    subtitle: `Export: ${new Date().toLocaleDateString("th-TH")}`,
+    theme,
+    cards: [
+      { label:"จำนวน PO",     value: poEntries.length },
+      { label:"มูลค่ารวม",     value: dTotal, money:true },
+      { label:"จ่ายแล้ว",      value: dPaid, money:true },
+      { label:"คงค้างจ่าย",    value: Math.max(dTotal - dPaid, 0), money:true },
+    ],
+    chartTitle: "กราฟ: ยอดสั่งซื้อรายเดือน (ตามวันเปิด PO)",
+    items: dMonths.map(m => ({ label: monthShortLabel(m), value: poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poTotal(p),0) })),
+  });
+
+  // Sheet 1 — every PO line → วางต่อท้ายหน้า "สรุป" (ชีตเดียวกัน)
+  const rows1 = [[`รายการ PO — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}  ·  ทั้งหมด ${poEntries.length} PO${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}`], []];
+  rows1.push(["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)",...(U?["มูลค่า (USD)"]:[]),"สถานะ PO","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"]);
+  const dataStart1 = rows1.length;
+  let grand1 = 0;
+  const rowGroups1 = [];
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
+    poItems(p).forEach(it => {
+      // แต่ละบรรทัดแยกตาม Acc. Code → ของเข้า/วันครบกำหนด/สถานะจ่าย คิดเฉพาะงวดของ item นี้
+      const pItem = { ...p, items:[it] };
+      const pay = paymentStatus(pItem);
+      const _rd = poRounds(pItem);
+      const deliveryStr = _rd.map((r,i) => `${_rd.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      const amount = parseFloat(it.amount) || 0;
+      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay], p.notes||""]);
+      rowGroups1.push(acc?.group || "-");
+      grand1 += amount;
+    });
+  });
+  const dataEnd1 = rows1.length-1;
+  rows1.push(["","","","","TOTAL", grand1, ...(U?[toUsd(grand1,rate)]:[]),"","","","",""]);
+  const totalRow1 = rows1.length-1;
+  // เขียนตาราง PO ต่อท้าย dashboard ในชีต "สรุป" (เว้น 1 บรรทัด) แล้วจัดสไตล์ตามออฟเซ็ตแถว
+  const poStart = dash.nextRow + 1;
+  XLSX.utils.sheet_add_aoa(dash.ws, rows1, { origin: { r: poStart, c: 0 } });
+  styleSheet(dash.ws, { numCols:11+(U?1:0),
+    titleRow: poStart, subRows:[poStart+1], headerRow: poStart+3,
+    dataStart: poStart+dataStart1, dataEnd: poStart+dataEnd1, totalRow: poStart+totalRow1,
+    moneyCols:U?[5,6]:[5], usdCols:U?[6]:[], centerCols:U?[7,10]:[6,9], statusCols:U?[7,10]:[6,9], theme, rowGroups:rowGroups1 });
+  delete dash.ws["!freeze"];   // มี dashboard อยู่ด้านบน จึงไม่ freeze
+  dash.ws["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:30},{wch:16},{wch:16},{wch:28}];
+  // ขยายความสูงแถวตามจำนวนงวดในคอลัมน์ "ของเข้า" (multiline) + จัดชิดบน
+  { const dc = U?8:7; for (let r=dataStart1; r<=dataEnd1; r++){ const R=poStart+r; const ref=XLSX.utils.encode_cell({r:R,c:dc}); const v=dash.ws[ref]?.v; if(typeof v==="string"){ const n=v.split("\n").length; if(dash.ws[ref].s) dash.ws[ref].s.alignment={...(dash.ws[ref].s.alignment||{}),vertical:"top",wrapText:true}; if(n>1) dash.ws["!rows"][R]={hpx:Math.max(19,n*14)}; } } }
+
+  // ชีต "ของเข้ารายเดือน (แผน + PO จริง)" — ต้นทุน + เดือนแยก 3 ช่อง จ่าย/ปกติ/แผน (สี)
+  addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "สรุป" });
+
+  // แยกรายเดือนแบบละเอียด (หนึ่งชีตต่อเดือน) — เอา "สรุปสถานะ" และ "รายเดือน (สรุปกลุ่ม)" ออกแล้ว
+  const poMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
+  const monthLinks = [];   // เก็บชื่อชีตรายเดือนไว้ทำลิงก์บนหน้าสรุป
+  if (poMonths.length) {
+    // รายเดือนแบบละเอียด (Acc.Code / Supplier / PO No.) หนึ่งชีตต่อเดือน
+    const clean = (s) => String(s).replace(/[\\/?*[\]:]/g, "-").slice(0, 28);
+    const usedNames = {};
+    poMonths.forEach(m => {
+      const rows = [
+        [`PO รายเดือน ${monthShortLabel(m)} — ${project.name}`],
+        [`ตามวันเปิด PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+        [],
+        ["Acc. Code", "Account Name", "Group", "Supplier", "PO No.", "วันเปิด PO", "มูลค่า (THB)", ...(U?["มูลค่า (USD)"]:[]), "สถานะ PO", "สถานะจ่ายเงิน"],
+      ];
+      const dataStart = rows.length;
+      const rowGroups = [];
+      let grand = 0;
+      poEntries.filter(p => (p.date||"").slice(0,7) === m)
+        .sort((a,b)=>(a.date||"").localeCompare(b.date||""))
+        .forEach(p => {
+          const pay = paymentStatus(p);
+          poItems(p).forEach(it => {
+            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            const amount = parseFloat(it.amount) || 0;
+            rows.push([it.code, acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, ...(U?[toUsd(amount,rate)]:[]), p.status, PAYMENT_LABEL[pay]]);
+            rowGroups.push(acc?.group||"-");
+            grand += amount;
+          });
         });
-        if (!ok) return;
-        setBusy(true);
-        res = await deleteEmployee(employee.id, true);
-      }
-      if (res && res.ok === false) {
-        if (res.reason === "self") setErr("ลบบัญชีตัวเองไม่ได้ — ให้บัญชี Admin อื่นลบให้");
-        else setErr("ลบไม่สำเร็จ");
-        setBusy(false);
+      if (rows.length === dataStart) return; // เดือนนี้ไม่มี PO
+      const dataEnd = rows.length-1;
+      rows.push(["", "", "", "", "", "TOTAL", grand, ...(U?[toUsd(grand,rate)]:[]), "", ""]);
+      const totalRow = rows.length-1;
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{wch:10},{wch:32},{wch:14},{wch:22},{wch:16},{wch:12},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:16}];
+      styleSheet(ws, { numCols:9+(U?1:0), subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
+        moneyCols:U?[6,7]:[6], usdCols:U?[7]:[], centerCols:U?[8,9]:[7,8], statusCols:U?[8,9]:[7,8], theme, rowGroups, groupDisplayCol:2 });
+      let nm = clean(monthShortLabel(m));
+      if (usedNames[nm]) { usedNames[nm] += 1; nm = clean(`${nm} ${usedNames[nm]}`); } else usedNames[nm] = 1;
+      xBackLink(ws, 2, (9+(U?1:0))-1, "สรุป");   // ลิงก์กลับหน้าสรุป
+      XLSX.utils.book_append_sheet(wb, ws, nm);
+      monthLinks.push({ text: monthShortLabel(m), sheet: nm });
+    });
+  }
+  // ลิงก์ไปยังชีตรายเดือน วางไว้ใต้ตาราง PO ในหน้าสรุป — คลิกเพื่อไล่ที่มาของตัวเลข
+  if (monthLinks.length) {
+    const navR = poStart + rows1.length + 1;
+    XLSX.utils.sheet_add_aoa(dash.ws, [["🔗 ไปดูรายละเอียดรายเดือน (คลิกเพื่อดูที่มา):"]], { origin:{ r:navR, c:0 } });
+    dash.ws[XLSX.utils.encode_cell({ r:navR, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+    xLinkRow(dash.ws, navR+1, monthLinks);
+  }
+
+  XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// จัดซื้อ (PO) แบบ rich: หน้า "สรุป" หน้าเดียว มีการ์ด + pie (สถานะ) + bar (รายเดือน)
+// + ตารางสรุปสถานะ และชีต "PO ทั้งหมด"
+async function exportPORich(project, poEntries) {
+  const ExcelJS = await loadExcelJS();
+  const F = "Tahoma";
+  const total = poEntries.reduce((s,p)=> s + poTotal(p), 0);
+  const paid  = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
+  const outstanding = Math.max(0, total - paid);
+  const HD = ["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันที่รับของ","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"];
+  const NC = HD.length;
+  const rows = [];
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
+    const pay = PAYMENT_LABEL[paymentStatus(p)];
+    const delivery = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
+    const received = poRounds(p).map(r => r.actual).filter(Boolean).join(", ") || "-";
+    const due = poNextDueDate(p) || "-";
+    poItems(p).forEach(it => {
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      rows.push([ p.date||"", it.code, acc?.name||"", poSupplierName(p), poNumbersLabel(p), parseFloat(it.amount)||0, p.status||"-", delivery, received, due, pay, p.notes||"" ]);
+    });
+  });
+  const soft = "FF"+lighten("F59E0B",0.55), colL = c => XLSX.utils.encode_col(c);
+  const wb = new ExcelJS.Workbook();
+  const fillS = (a) => ({ type:"pattern", pattern:"solid", fgColor:{argb:a} });
+  const ws = wb.addWorksheet("รายงานจัดซื้อ", { views:[{ showGridLines:false, state:"frozen", ySplit:7 }] });
+  ws.mergeCells(1,1,1,NC); const t=ws.getCell(1,1); t.value=`สรุปจัดซื้อ (PO) — ${project.name}`; t.font={bold:true,size:15,color:{argb:"FF92400E"},name:F}; t.fill=fillS(soft); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=30;
+  ws.mergeCells(2,1,2,NC); const stc=ws.getCell(2,1); stc.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ทั้งหมด ${poEntries.length} PO`; stc.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; stc.alignment={indent:1};
+  const cards=[["มูลค่า PO รวม","FFFEF3C7","FF92400E",total],["จ่ายแล้ว","FFD1FAE5","FF047857",paid],["ค้างจ่าย","FFFEE2E2","FF991B1B",outstanding],["จำนวน PO","FFDBEAFE","FF1D4ED8",poEntries.length]];
+  const span = Math.max(2, Math.floor(NC/4));
+  cards.forEach((cd,i)=>{ const c0=1+i*span, c1=Math.min(NC, c0+span-1);
+    ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
+    const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:10,color:{argb:cd[2]},name:F}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
+    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i<3) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
+  }); ws.getRow(4).height=18; ws.getRow(5).height=30;
+  const HR = 7;
+  HD.forEach((h,i)=>{ const c=ws.getCell(HR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===5?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); ws.getRow(HR).height=26;
+  const pillOf = (s) => { const p=statusPill(s); return p ? { fill:fillS("FF"+p.bg), font:{bold:true,size:9.5,color:{argb:"FF"+p.fg},name:F} } : null; };
+  rows.forEach((row,ri)=>{ const R=HR+1+ri;
+    row.forEach((val,ci)=>{ const c=ws.getCell(R,1+ci); c.value=val;
+      if(ci===5){ c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; }
+      else if(ci===6 || ci===10){ const pl=pillOf(val); c.alignment={horizontal:"center",vertical:"middle"}; if(pl){c.fill=pl.fill;c.font=pl.font;} else c.font={name:F,size:9.5}; }
+      else { c.alignment={vertical:"middle"}; c.font={name:F,size:9.5}; }
+    });
+    if(ri%2) for(let c=1;c<=NC;c++){ const cell=ws.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
+  });
+  const tR = HR + 1 + rows.length;
+  for(let c=1;c<=NC;c++){ const cell=ws.getCell(tR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
+  const tl=ws.getCell(tR,5); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF92400E"},name:F}; tl.alignment={horizontal:"right",vertical:"middle"};
+  const tvc=ws.getCell(tR,6); tvc.value = rows.length ? { formula:`SUM(F${HR+1}:F${HR+rows.length})`, result: total } : 0; tvc.numFmt="#,##0"; tvc.font={bold:true,color:{argb:"FF92400E"},name:F}; tvc.alignment={horizontal:"right",vertical:"middle"};
+  ws.getCell(5,1).value = { formula:`F${tR}`, result: total };
+  ws.autoFilter = `A${HR}:${colL(NC-1)}${HR}`;
+  fitExcelCols(ws, HD, rows);
+
+  // ─── ชีต "รายเดือน" — แจกแจงราย PO ตามเดือนที่เปิด PO (วันเปิด PO) ─────────
+  const moKeys = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
+  if (moKeys.length) {
+    const MH  = ["เดือน","วันเปิด PO","PO No.","Supplier","มูลค่า PO (THB)","จ่ายแล้ว (THB)","ค้างจ่าย (THB)","% จ่ายแล้ว"];
+    const MNC = MH.length;
+    const poPaid = (p) => poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0);
+    const wsm = wb.addWorksheet("รายเดือน", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
+    wsm.mergeCells(1,1,1,MNC); const mt=wsm.getCell(1,1); mt.value=`จัดซื้อรายเดือน (ตามวันเปิด PO) — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF92400E"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
+    wsm.mergeCells(2,1,2,MNC); const mst=wsm.getCell(2,1); mst.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ${moKeys.length} เดือน · ${poEntries.length} PO`; mst.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; mst.alignment={indent:1};
+    const MHR = 4;
+    MH.forEach((h,i)=>{ const c=wsm.getCell(MHR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i>=4?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wsm.getRow(MHR).height=24;
+    // สร้างแถว: หนึ่งแถวต่อ PO จัดกลุ่มตามเดือน + แถว "รวมเดือน" ท้ายแต่ละกลุ่ม
+    const bodyRows = [];
+    moKeys.forEach(m => {
+      const list = poEntries.filter(p => (p.date||"").slice(0,7) === m).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+      let sT=0, sP=0;
+      list.forEach((p,idx) => {
+        const t=poTotal(p), pd=poPaid(p);
+        sT+=t; sP+=pd;
+        bodyRows.push({ type:"po", month: idx===0?monthShortLabel(m):"", date:p.date||"-", no:poNumbersLabel(p), sup:poSupplierName(p), total:t, paid:pd, out:Math.max(0,t-pd) });
+      });
+      bodyRows.push({ type:"sub", label:`รวม ${monthShortLabel(m)}`, total:sT, paid:sP, out:Math.max(0,sT-sP) });
+    });
+    let po_i = 0;
+    bodyRows.forEach((r,ri) => { const R = MHR+1+ri;
+      if (r.type === "sub") {
+        for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); cell.fill=fillS("FFFDEED3"); }
+        const lc=wsm.getCell(R,1); lc.value=r.label; lc.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; lc.alignment={vertical:"middle",indent:1};
+        [r.total, r.paid, r.out, r.total>0?r.paid/r.total:0].forEach((v,i)=>{ const c=wsm.getCell(R,5+i); c.value=v; c.numFmt = i===3 ? "0%" : "#,##0"; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
         return;
       }
-      auditRecord("delete_employee", "employee", employee.id, { code: employee.code, name: employee.name });
-      onSaved();
-    } catch (e) {
-      setErr("ลบไม่สำเร็จ: " + e.message);
-    }
-    setBusy(false);
-  }
-
-  return (
-    <Modal title={`แก้ไขพนักงาน — ${employee.code}`} sub="ตั้งเครื่อง/สถานี/ขั้นตอนประจำที่นี่ — หน้าสแกนจะใช้ค่านี้แทนการเลือกเอง" onClose={onClose}>
-      <div className="grid-2">
-        <Field label="ชื่อ"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-        <Field label="แผนก"><Select value={form.department_id} onChange={(e) => setForm({ ...form, department_id: e.target.value })}
-          options={departments.map((d) => ({ value: d.id, label: d.name }))} /></Field>
-        <Field label="สิทธิ์การใช้งาน"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}
-          options={[{ value: "admin", label: "Admin" }, { value: "office", label: "พนักงานออฟฟิศ" }, { value: "operator", label: "พนักงานหน้าเครื่อง" }]} /></Field>
-        <div />
-        <Field label="เครื่อง/สถานีประจำ *"><Select value={form.machine_id} onChange={(e) => chooseMachine(e.target.value)}
-          options={machines.map((m) => ({ value: m.id, label: `${m.code} — ${m.name}` }))} /></Field>
-        <Field label="ขั้นตอนประจำ (เลือกได้หลายขั้นตอน) *">
-          <OpMultiPick operations={operations} selected={opSel} onToggle={toggleOp} machineChosen={!!form.machine_id} />
-        </Field>
-      </div>
-      <Field label="ตั้งรหัสผ่านใหม่ (เว้นว่าง = ไม่เปลี่ยน)">
-        <Input type="password" value={form.password} autoComplete="new-password"
-          onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="••••••••" />
-      </Field>
-      {(!form.machine_id || opSel.size === 0) && (
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
-          * ถ้าไม่ตั้งเครื่อง/สถานี/ขั้นตอนประจำ พนักงานคนนี้จะสแกนงานไม่ได้
-        </div>
-      )}
-      {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-      <div className="modal-actions" style={{ justifyContent: "space-between" }}>
-        <Btn type="button" variant="ghost" onClick={del} disabled={busy} style={{ color: "var(--danger-hi)" }}>
-          ลบพนักงานนี้
-        </Btn>
-        <div style={{ display: "flex", gap: 8 }}>
-          <Btn type="button" variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn type="button" variant="accent" onClick={save} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึก"}</Btn>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function EmployeeCrud() {
-  const [rows, setRows] = useState([]);
-  const [departments, setDepartments] = useState([]);
-  const [machines, setMachines] = useState([]);
-  const [operations, setOperations] = useState([]);
-  const [caps, setCaps] = useState([]);
-  const [form, setForm] = useUndoable({ role: "operator" });
-  const [opSel, setOpSel] = useUndoable(new Set());   // ขั้นตอนประจำ (เลือกได้หลายอัน)
-  const [editing, setEditing] = useState(null);
-  const [busy, setBusy] = useState(false);            // กำลังบันทึก — กันกดซ้ำ + โชว์สถานะ
-  const [msg, setMsg] = useState(null);               // { ok, text } แสดงผลในฟอร์ม (เห็นชัดกว่า toast มุมจอ)
-  const load = useCallback(async () => {
-    setRows(await getEmployees());
-    setDepartments(await listRows("departments", { order: "name" }));
-    setMachines(await listRows("machines", { order: "code" }));
-    setOperations(await listRows("operations", { order: "seq" }));
-    setCaps(await listRows("machine_operations"));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  // เลือกเครื่อง → ดึงความสามารถเดิมของเครื่องนั้นมาแสดง (กันเผลอลบทิ้งตอนบันทึก)
-  function chooseMachine(mid) {
-    setForm((f) => ({ ...f, machine_id: mid }));
-    setOpSel(new Set(caps.filter((c) => c.machine_id === mid).map((c) => c.operation_id)));
-  }
-  function toggleOp(id) {
-    setOpSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  }
-
-  async function add() {
-    if (busy) return;                                   // กันกดซ้ำระหว่างบันทึก
-    if (!form.code || !form.name || !form.password) {
-      const w = "กรอกรหัส/ชื่อ/รหัสผ่านให้ครบ"; setMsg({ ok: false, text: w }); mlsToast(w, "warn"); return;
-    }
-    const opIds = [...opSel];
-    setBusy(true); setMsg({ ok: null, text: "กำลังบันทึก…" });
-    // ── ขั้นที่ 1: สร้างพนักงาน (ผ่าน RPC — DB hash bcrypt เอง client ไม่แตะ hash) ──
-    try {
-      await upsertEmployee({
-        code: form.code, name: form.name, password: form.password, role: form.role,
-        department_id: form.department_id || null,
-        machine_id: form.machine_id || null, operation_id: opIds[0] || null,
+      [r.month, r.date, r.no, r.sup, r.total, r.paid, r.out, r.total>0?r.paid/r.total:0].forEach((val,ci)=>{
+        const c=wsm.getCell(R,1+ci); c.value=val; c.font={name:F,size:9.5};
+        if(ci<=3){ c.alignment={vertical:"middle",indent:ci===0?1:0}; if(ci===0) c.font={name:F,size:9.5,bold:true,color:{argb:"FF92400E"}}; }
+        else if(ci===7){ c.numFmt="0%"; c.alignment={horizontal:"right",vertical:"middle"}; }
+        else { c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; }
       });
-    } catch (e) {
-      // แสดง error จริงให้ครบ (เช่น RPC signature ไม่ตรง / unauthorized / รหัสซ้ำ)
-      const text = isDuplicateError(e)
-        ? `รหัสพนักงาน "${form.code}" มีอยู่แล้ว`
-        : "เพิ่มพนักงานไม่สำเร็จ: " + (e?.message || e?.code || JSON.stringify(e));
-      console.error("add employee failed", e);
-      setMsg({ ok: false, text }); mlsToast(text, "error"); setBusy(false); return;
-    }
-    // ── ขั้นที่ 2: ตั้งความสามารถเครื่อง (งานรอง) — ถ้าพลาด พนักงานถูกสร้างแล้ว อย่าให้ดูเหมือนล้มเหลว ──
-    let warn = "";
-    try {
-      await syncMachineOps(form.machine_id, opIds, caps);
-    } catch (e) {
-      warn = ` (แต่ตั้งความสามารถเครื่องไม่สำเร็จ: ${e?.message || "error"} — แก้ได้ที่ปุ่ม "แก้ไข")`;
-      mlsToast(`เพิ่มพนักงานแล้ว${warn}`, "warn");
-    }
-    setMsg({ ok: true, text: `เพิ่มพนักงาน "${form.name}" สำเร็จ${warn}` });
-    if (!warn) mlsToast(`เพิ่มพนักงาน "${form.name}" สำเร็จ`, "info");
-    setForm({ role: "operator" }); setOpSel(new Set()); setBusy(false); load();
-  }
-  async function toggle(r) {
-    try { await setEmployeeActive(r.id, !r.active); load(); }
-    catch (e) { mlsToast("เปลี่ยนสถานะไม่สำเร็จ: " + e.message, "error"); }
-  }
-
-  return (
-    <Card title="เพิ่มพนักงานใหม่">
-      <div className="grid-3" style={{ marginBottom: 6 }}>
-        <Field label="รหัสพนักงาน"><Input value={form.code || ""} onChange={(e) => setForm({ ...form, code: e.target.value })} /></Field>
-        <Field label="ชื่อ"><Input value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-        <Field label="รหัสผ่านเริ่มต้น"><Input value={form.password || ""} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
-        <Field label="แผนก"><Select value={form.department_id} onChange={(e) => setForm({ ...form, department_id: e.target.value })}
-          options={departments.map((d) => ({ value: d.id, label: d.name }))} /></Field>
-        <Field label="สิทธิ์การใช้งาน"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}
-          options={[{ value: "admin", label: "Admin" }, { value: "office", label: "พนักงานออฟฟิศ" }, { value: "operator", label: "พนักงานหน้าเครื่อง" }]} /></Field>
-        <div />
-        <Field label="เครื่อง/สถานีประจำ"><Select value={form.machine_id || ""} onChange={(e) => chooseMachine(e.target.value)}
-          options={machines.map((m) => ({ value: m.id, label: `${m.code} — ${m.name}` }))} /></Field>
-        <Field label="ขั้นตอนประจำ (เลือกได้หลายขั้นตอน)">
-          <OpMultiPick operations={operations} selected={opSel} onToggle={toggleOp} machineChosen={!!form.machine_id} />
-        </Field>
-      </div>
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
-        พนักงานที่ยังไม่ได้ตั้งเครื่อง/สถานี/ขั้นตอนประจำ จะสแกนงานไม่ได้ (ตั้งภายหลังได้ที่ปุ่ม "แก้ไข") · เลือกได้หลายขั้นตอนถ้าเครื่องนี้ทำได้หลายอย่าง
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <Btn variant="accent" onClick={add} disabled={busy}>{busy ? "กำลังบันทึก…" : "เพิ่มพนักงาน"}</Btn>
-        {msg && (
-          <span style={{ fontSize: 13, fontWeight: 600,
-            color: msg.ok === true ? "var(--accent-dk, #0a7)" : msg.ok === false ? "var(--danger, #e11d1d)" : "var(--muted)" }}>
-            {msg.ok === true ? "✓ " : msg.ok === false ? "⚠ " : ""}{msg.text}
-          </span>
-        )}
-      </div>
-      <div className="table-wrap" style={{ marginTop: 16 }}>
-        <table className="data-table">
-          <thead><tr><th>รหัส</th><th>ชื่อ</th><th>แผนก</th><th>สิทธิ์</th><th>เครื่อง/สถานีประจำ</th><th>ขั้นตอนประจำ</th><th>สถานะ</th><th></th></tr></thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id}>
-                <td>{r.code}</td><td>{r.name}</td>
-                <td>{departments.find((d) => d.id === r.department_id)?.name || "-"}</td>
-                <td>{ROLE_LABELS[r.role] || r.role}</td>
-                <td>{machines.find((m) => m.id === r.machine_id)?.code || <span style={{ color: "var(--danger-hi)" }}>ยังไม่ตั้ง</span>}</td>
-                <td>{(() => {
-                  const ids = new Set(caps.filter((c) => c.machine_id === r.machine_id).map((c) => c.operation_id));
-                  let names = operations.filter((o) => ids.has(o.id)).map((o) => o.name);
-                  if (names.length === 0 && r.operation_id) { const o = operations.find((o) => o.id === r.operation_id); if (o) names = [o.name]; }
-                  return names.length ? names.join(", ") : <span style={{ color: "var(--danger-hi)" }}>ยังไม่ตั้ง</span>;
-                })()}</td>
-                <td>
-                  <span onClick={() => toggle(r)} style={{ cursor: "pointer" }}>
-                    <Badge tone={r.active ? "success" : "muted"}>{r.active ? "ใช้งาน" : "ปิดใช้งาน"}</Badge>
-                  </span>
-                </td>
-                <td><span onClick={() => setEditing(r)} style={{ color: "var(--accent-dk)", cursor: "pointer" }}>แก้ไข</span></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {editing && (
-        <EmployeeEditModal
-          employee={editing} departments={departments} machines={machines} operations={operations} caps={caps}
-          onClose={() => setEditing(null)}
-          onSaved={async () => { setEditing(null); await load(); }}
-        />
-      )}
-    </Card>
-  );
-}
-
-// ─── ชนิดของเบอร์ (พาร์ท / ซับ / แผง / แพ็ก) + BOM editor สำหรับเบอร์ประกอบ ────────
-const PM_KINDS = [
-  { value: "part", label: "พาร์ท" },
-  { value: "subassembly", label: "ซับแอสเซมบลี" },
-  { value: "panel", label: "แผง" },
-  { value: "package", label: "แพ็ก" },
-];
-const kindLabel = (k) => (PM_KINDS.find((x) => x.value === (k || "part"))?.label || "พาร์ท");
-
-// กำหนด BOM ของเบอร์แม่ (ซับ/แผง/แพ็ก) — เลือกลูกในโปรเจคเดียวกัน + จำนวน
-function BomEditorModal({ parent, allParts, onClose, onSaved }) {
-  const [rows, setRows] = useState(null);   // null = loading · [{child_pm_id, qty, part_no, part_name, kind}]
-  const [pick, setPick] = useState("");
-  const [pickQty, setPickQty] = useState(1);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  const candidates = useMemo(
-    () => allParts.filter((p) => p.project_id === parent.project_id && p.id !== parent.id),
-    [allParts, parent]
-  );
-
-  useEffect(() => {
-    getBom(parent.id).then((b) => setRows((b || []).map((x) => ({
-      child_pm_id: x.child_pm_id, qty: x.qty, part_no: x.part_no, part_name: x.part_name, kind: x.kind,
-    }))));
-  }, [parent.id]);
-
-  function addChild() {
-    if (!pick || !rows) return;
-    if (rows.some((r) => r.child_pm_id === pick)) { setErr("มีลูกตัวนี้อยู่แล้ว — แก้จำนวนในตารางแทน"); return; }
-    const c = candidates.find((p) => p.id === pick);
-    setRows([...rows, { child_pm_id: pick, qty: Math.max(1, Number(pickQty) || 1), part_no: c?.part_no, part_name: c?.part_name, kind: c?.kind }]);
-    setPick(""); setPickQty(1); setErr("");
-  }
-  const removeChild = (id) => setRows(rows.filter((r) => r.child_pm_id !== id));
-  const setQty = (id, q) => setRows(rows.map((r) => (r.child_pm_id === id ? { ...r, qty: Math.max(1, Number(q) || 1) } : r)));
-
-  async function save() {
-    setBusy(true); setErr("");
-    try {
-      const res = await setBom(parent.id, rows.map((r) => ({ child_pm_id: r.child_pm_id, qty: r.qty })));
-      if (res?.ok) { mlsToast("บันทึก BOM แล้ว", "success"); onSaved && onSaved(); onClose(); }
-      else setErr("บันทึกไม่สำเร็จ" + (res?.reason ? ` (${res.reason})` : ""));
-    } catch (e) { setErr("บันทึกไม่สำเร็จ: " + (e?.message || e)); }
-    finally { setBusy(false); }
-  }
-
-  const avail = rows ? candidates.filter((c) => !rows.some((r) => r.child_pm_id === c.id)) : [];
-
-  return (
-    <Modal title={`กำหนด BOM — ${parent.part_no}`} sub={`${kindLabel(parent.kind)} · ประกอบจากลูก (ต้องอยู่โปรเจคเดียวกัน)`} onClose={onClose} locked={busy} wide>
-      {rows === null ? (
-        <div style={{ fontSize: 13, color: "var(--muted)" }}>กำลังโหลด...</div>
-      ) : (
-        <>
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 14 }}>
-            <div style={{ flex: 1, minWidth: 220 }}>
-              <Field label="เพิ่มลูก (Part / ซับ ในโปรเจคนี้)">
-                <Select value={pick} onChange={(e) => setPick(e.target.value)}
-                  options={avail.map((c) => ({ value: c.id, label: `${c.part_no} — ${c.part_name || ""}${c.kind && c.kind !== "part" ? " [" + kindLabel(c.kind) + "]" : ""}` }))} />
-              </Field>
-            </div>
-            <Field label="จำนวน/ชุด"><Input type="number" min="1" value={pickQty} onChange={(e) => setPickQty(e.target.value)} style={{ maxWidth: 100 }} /></Field>
-            <Btn variant="ghost" onClick={addChild} disabled={!pick}><Icon name="plus" size={14} /> เพิ่มลูก</Btn>
-          </div>
-
-          {rows.length === 0 ? (
-            <div className="empty-state"><Icon name="grid" size={28} /><div className="empty-state-title">ยังไม่มีลูกใน BOM</div><div className="empty-state-sub">เลือกลูกด้านบนแล้วกด “เพิ่มลูก”</div></div>
-          ) : (
-            <div className="table-wrap">
-              <table className="data-table">
-                <thead><tr><th>ลูก (Part No.)</th><th>ชื่อ</th><th>ชนิด</th><th>จำนวน/ชุด</th><th></th></tr></thead>
-                <tbody>
-                  {rows.map((r) => (
-                    <tr key={r.child_pm_id}>
-                      <td style={{ fontFamily: "var(--font-mono)", fontWeight: 600, whiteSpace: "nowrap" }}>{r.part_no}</td>
-                      <td style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{r.part_name}</td>
-                      <td style={{ fontSize: 12.5 }}>{kindLabel(r.kind)}</td>
-                      <td><Input type="number" min="1" value={r.qty} onChange={(e) => setQty(r.child_pm_id, e.target.value)} style={{ maxWidth: 80 }} /></td>
-                      <td><span onClick={() => removeChild(r.child_pm_id)} style={{ color: "var(--danger-hi)", cursor: "pointer" }}>ลบ</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {err && <div style={{ color: "var(--danger-hi)", fontSize: 12.5, marginTop: 8 }}>{err}</div>}
-          <div className="modal-actions" style={{ marginTop: 16 }}>
-            <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-            <Btn variant="accent" onClick={save} disabled={busy}>{busy ? "กำลังบันทึก..." : "บันทึก BOM"}</Btn>
-          </div>
-        </>
-      )}
-    </Modal>
-  );
-}
-
-function PartMasterCrud() {
-  const [rows, setRows] = useState([]);
-  const [projects, setProjects] = useState([]);
-  const [bomParent, setBomParent] = useState(null);   // เบอร์ที่กำลังกำหนด BOM
-  const [form, setForm] = useUndoable({ routing: [] });
-  const load = useCallback(async () => {
-    setRows(await listRows("part_master", { order: "part_no" }));
-    setProjects(await listRows("projects", { order: "code" }));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  async function add() {
-    if (!form.part_no || !form.project_id) { mlsToast("กรอกโปรเจคและรหัส Part ให้ครบ", "warn"); return; }
-    await insertRow("part_master", {
-      project_id: form.project_id, part_no: form.part_no, part_name: form.part_name || form.part_no,
-      material: form.material, unit_weight: Number(form.unit_weight || 0),
-      default_length_mm: form.default_length_mm === "" || form.default_length_mm == null ? null : Number(form.default_length_mm),
-      routing: form.routing || [], kind: form.kind || "part",
+      if(po_i%2) for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
+      po_i++;
     });
-    setForm({ routing: [] }); load();
+    const mtR = MHR + 1 + bodyRows.length;
+    for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(mtR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
+    const mtl=wsm.getCell(mtR,1); mtl.value="TOTAL"; mtl.font={bold:true,color:{argb:"FF92400E"},name:F}; mtl.alignment={vertical:"middle",indent:1};
+    const gT=poEntries.reduce((s,p)=>s+poTotal(p),0), gP=poEntries.reduce((s,p)=>s+poPaid(p),0);
+    [gT, gP, Math.max(0,gT-gP), gT>0?gP/gT:0].forEach((v,i)=>{ const c=wsm.getCell(mtR,5+i); c.value=v; c.numFmt = i===3 ? "0%" : "#,##0"; c.font={bold:true,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
+    wsm.getColumn(1).width=14; wsm.getColumn(2).width=14; wsm.getColumn(3).width=16; wsm.getColumn(4).width=26;
+    for(let c=5;c<=MNC;c++) wsm.getColumn(c).width = c===MNC ? 12 : 16;
+    wsm.autoFilter = `A${MHR}:${colL(MNC-1)}${MHR}`;
   }
-  // เปลี่ยนชนิดของเบอร์ที่มีอยู่ (พาร์ท ↔ ซับ/แผง/แพ็ก) — เบอร์ประกอบถึงจะกำหนด BOM ได้
-  async function changeKind(id, kind) {
-    try { await updateRow("part_master", id, { kind }); setRows((prev) => prev.map((r) => (r.id === id ? { ...r, kind } : r))); }
-    catch (e) { mlsToast("เปลี่ยนชนิดไม่สำเร็จ: " + (e?.message || e), "error"); }
-  }
-  // ลบ Part แบบรู้ผลกระทบ — ถ้ายังมี Release/ชิ้นงานผูกอยู่ ห้ามลบตรงๆ (กันข้อมูลหาย + กัน FK error)
-  async function remove(id) {
-    const r = rows.find((x) => x.id === id);
-    let rels = [], units = [];
-    try {
-      [rels, units] = await Promise.all([
-        listRows("releases", { filters: { part_master_id: id } }),
-        listRows("part_units", { filters: { part_master_id: id } }),
-      ]);
-    } catch { /* ถ้าเช็คไม่ได้ ให้ทำ flow ปลอดภัยด้านล่างต่อ */ }
-    if (rels.length > 0 || units.length > 0) {
-      mlsToast(`ลบ Part "${r?.part_no || ""}" ไม่ได้ — ยังมี ${fmtNum(rels.length)} Release และ ${fmtNum(units.length)} ชิ้น (QR) ผูกอยู่ · ให้ลบ Release ของ Part นี้ก่อน (ที่หน้า "ปล่อยงาน (Release)") แล้วจึงลบ Part ได้`, "error");
-      return;
+
+  const buf=await wb.xlsx.writeBuffer(); const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}); const url=URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url; a2.download=`Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`; document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
+}
+
+
+// ─── Accounting: full financial export ─────────────────────────────────────
+function exportAccountingExcel(project, tenderCosts, additions, poEntries, extraItems=[], hiddenAccounts=[], incomingPlan=[]) {
+  const wb = XLSX.utils.book_new();
+  const theme = { main:"10B981", dark:"047857" };
+  const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+
+  // Sheet 1 — Budget vs Committed vs Variance per Acc. Code
+  const rows1 = [[`สรุปงบประมาณ — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows1.push(U
+    ? ["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Budget (USD)","Committed (PO)","Committed (USD)","ส่วนต่าง","% ใช้ไป","สถานะ"]
+    : ["Acc. Code","Account Name","Group","งบประมาณ (Budget)","Committed (PO)","ส่วนต่าง","% ใช้ไป","สถานะ"]);
+  const dataStart1 = rows1.length;
+  let gB=0, gC=0;
+  const rowGroups1 = [];
+  accounts.forEach(a => {
+    const budget    = parseFloat(combinedBudget[a.code]) || 0;
+    const committed = poEntries.reduce((s,p)=>s+poAmountForCode(p,a.code),0);
+    if (budget<=0 && committed<=0) return;
+    const variance = budget - committed;
+    const pctUsed  = budget>0 ? committed/budget : (committed>0 ? 9.99 : 0);
+    const status   = committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
+    rows1.push(U
+      ? [a.code, a.name, a.group, budget, toUsd(budget,rate), committed, toUsd(committed,rate), variance, pctUsed, status]
+      : [a.code, a.name, a.group, budget, committed, variance, pctUsed, status]);
+    rowGroups1.push(a.group);
+    gB += budget; gC += committed;
+  });
+  const dataEnd1 = rows1.length-1;
+  rows1.push(U
+    ? ["","TOTAL","",gB,toUsd(gB,rate),gC,toUsd(gC,rate),gB-gC,gB>0?gC/gB:0,""]
+    : ["","TOTAL","",gB,gC,gB-gC,gB>0?gC/gB:0,""]);
+  const totalRow1 = rows1.length-1;
+  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
+  ws1["!cols"] = U
+    ? [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12}]
+    : [{wch:12},{wch:38},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10},{wch:12}];
+  styleSheet(ws1, { numCols:8+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:U?[3,4,5,6,7]:[3,4,5], usdCols:U?[4,6]:[], pctCols:U?[8]:[6], centerCols:U?[9]:[7], theme, rowGroups:rowGroups1, groupDisplayCol:2 });
+  // Flag over-budget rows in red so they jump out without opening the app
+  const varC1 = U?7:5, stC1 = U?9:7;
+  for (let r=dataStart1; r<=dataEnd1; r++) {
+    const varRef = XLSX.utils.encode_cell({r,c:varC1});
+    const stRef  = XLSX.utils.encode_cell({r,c:stC1});
+    if (ws1[varRef] && typeof ws1[varRef].v === "number" && ws1[varRef].v < 0) {
+      ws1[varRef].s = { ...ws1[varRef].s, font:{...ws1[varRef].s.font, color:{rgb:"DC2626"}, bold:true} };
     }
-    if (await askConfirm({ message: `ลบ Part "${r?.part_no || ""}"?\n(ยังไม่มี Release/ชิ้นงานผูกอยู่ — ลบได้ปลอดภัย)`, tone: "danger", confirmText: "ลบ Part", cancelText: "ยกเลิก" })) {
-      await deleteRow("part_master", id); load();
+    if (ws1[stRef] && ws1[stRef].v === "เกินงบ") {
+      ws1[stRef].s = { ...ws1[stRef].s, font:{...ws1[stRef].s.font, color:{rgb:"DC2626"}, bold:true} };
     }
   }
+  XLSX.utils.book_append_sheet(wb, ws1, "Summary");
 
-  return (
-    <>
-    <Card title="เพิ่ม Part ใหม่">
-      <div className="grid-3" style={{ marginBottom: 16 }}>
-        <Field label="โปรเจค"><Select value={form.project_id || ""} onChange={(e) => setForm({ ...form, project_id: e.target.value })}
-          options={projects.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))} /></Field>
-        <Field label="รหัส Part"><Input value={form.part_no || ""} onChange={(e) => setForm({ ...form, part_no: e.target.value })} /></Field>
-        <Field label="ชื่อ Part"><Input value={form.part_name || ""} onChange={(e) => setForm({ ...form, part_name: e.target.value })} /></Field>
-        <Field label="วัสดุ"><Input value={form.material || ""} onChange={(e) => setForm({ ...form, material: e.target.value })} /></Field>
-        <Field label="น้ำหนักโดยประมาณ/ชิ้น (กก.)"><Input type="number" step="0.01" value={form.unit_weight || ""} onChange={(e) => setForm({ ...form, unit_weight: e.target.value })} /></Field>
-        <Field label="ความยาวโดยประมาณ/ชิ้น (มม.)"><Input type="number" step="0.1" value={form.default_length_mm || ""} onChange={(e) => setForm({ ...form, default_length_mm: e.target.value })} /></Field>
-        <Field label="ชนิด">
-          <Select value={form.kind || "part"} onChange={(e) => setForm({ ...form, kind: e.target.value })}
-            options={PM_KINDS.map((k) => ({ value: k.value, label: k.label }))} />
-        </Field>
-      </div>
-      <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-6px 2px 12px", lineHeight: 1.6 }}>
-        <b>ชนิด</b>: พาร์ท = ชิ้นส่วนปกติ · ซับ/แผง/แพ็ก = เบอร์ประกอบ (ประกอบจากลูก) — เลือกเป็นเบอร์ประกอบแล้วจะกำหนด BOM ได้ในตารางด้านล่าง
-      </div>
-      <Btn variant="accent" onClick={add}>เพิ่ม Part</Btn>
-      <div className="table-wrap" style={{ marginTop: 16 }}>
-        <table className="data-table">
-          <thead><tr><th>Part No.</th><th>ชื่อ</th><th>ชนิด</th><th>น้ำหนัก/ชิ้น</th><th>ความยาว/ชิ้น</th><th>BOM</th><th></th></tr></thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id}>
-                <td style={{ whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontWeight: 600 }}>{r.part_no}</td>
-                <td style={{ whiteSpace: "nowrap" }}>{r.part_name}</td>
-                <td>
-                  <select className="select" value={r.kind || "part"} onChange={(e) => changeKind(r.id, e.target.value)} style={{ minWidth: 120 }}>
-                    {PM_KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
-                  </select>
-                </td>
-                <td>{r.unit_weight ? `${fmtNum(r.unit_weight)} กก.` : "-"}</td>
-                <td>{r.default_length_mm ? `${fmtNum(r.default_length_mm)} มม.` : "-"}</td>
-                <td>
-                  {(r.kind && r.kind !== "part")
-                    ? <Btn variant="ghost" size="sm" onClick={() => setBomParent(r)}><Icon name="grid" size={13} /> กำหนด BOM</Btn>
-                    : <span style={{ color: "var(--muted)", fontSize: 12 }}>—</span>}
-                </td>
-                <td><span onClick={() => remove(r.id)} style={{ color: "var(--danger-hi)", cursor: "pointer" }}>ลบ</span></td>
-              </tr>
-            ))}
-            {rows.length === 0 && (
-              <tr><td colSpan={7}>
-                <div className="empty-state" style={{ padding: "24px 0" }}>
-                  <Icon name="grid" size={30} />
-                  <div className="empty-state-title">ยังไม่มี Part</div>
-                  <div className="empty-state-sub">กรอกฟอร์มด้านบนแล้วกด “เพิ่ม Part” เพื่อเพิ่มรายการแรก</div>
-                </div>
-              </td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-    {bomParent && (
-      <BomEditorModal parent={bomParent} allParts={rows} onClose={() => setBomParent(null)} onSaved={load} />
-    )}
-    </>
-  );
+  // Sheet 2 — every PO line, full date + status detail
+  const rows2 = [[`รายการ PO ทั้งหมด — ${project.name}`], [`ทั้งหมด ${poEntries.length} PO  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+  rows2.push(["วันเปิด PO","Acc. Code","Account Name","Group","Supplier","PO No.","มูลค่า (THB)",...(U?["มูลค่า (USD)"]:[]),"สถานะ","ของเข้า (แผน→จริง)","วันครบกำหนดจ่าย","สถานะจ่าย"]);
+  const dataStart2 = rows2.length;
+  let grand2 = 0;
+  const rowGroups2 = [];
+  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
+    poItems(p).forEach(it => {
+      // แต่ละบรรทัดแยกตาม Acc. Code → ของเข้า/วันครบกำหนด/สถานะจ่าย คิดเฉพาะงวดของ item นี้
+      const pItem = { ...p, items:[it] };
+      const pay = paymentStatus(pItem);
+      const _rd2 = poRounds(pItem);
+      const deliveryStr = _rd2.map((r,i) => `${_rd2.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
+      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      const amount = parseFloat(it.amount) || 0;
+      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay]]);
+      rowGroups2.push(acc?.group || "-");
+      grand2 += amount;
+    });
+  });
+  const dataEnd2 = rows2.length-1;
+  rows2.push(["","","","","","TOTAL", grand2, ...(U?[toUsd(grand2,rate)]:[]),"","","",""]);
+  const totalRow2 = rows2.length-1;
+  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
+  ws2["!cols"] = [{wch:12},{wch:10},{wch:34},{wch:14},{wch:22},{wch:16},{wch:16},...(U?[{wch:16}]:[]),{wch:12},{wch:30},{wch:16},{wch:16}];
+  styleSheet(ws2, { numCols:11+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
+    moneyCols:U?[6,7]:[6], usdCols:U?[7]:[], centerCols:U?[8,11]:[7,10], theme, rowGroups:rowGroups2, groupDisplayCol:3 });
+  // "ของเข้า (แผน→จริง)": หนึ่งงวดต่อบรรทัด — ตั้ง wrapText + ความสูงแถวตามจำนวนบรรทัด
+  { const dc = U?9:8; if(!ws2["!rows"]) ws2["!rows"]=[]; for (let R=dataStart2; R<=dataEnd2; R++){ const ref=XLSX.utils.encode_cell({r:R,c:dc}); const v=ws2[ref]?.v; if(typeof v==="string"){ const n=v.split("\n").length; if(ws2[ref].s) ws2[ref].s.alignment={...(ws2[ref].s.alignment||{}),vertical:"top",wrapText:true}; if(n>1) ws2["!rows"][R]={hpx:Math.max(19,n*14)}; } } }
+  XLSX.utils.book_append_sheet(wb, ws2, "PO Entries");
+
+  // Sheet 3 — roll-up by Group
+  const rows3 = [[`สรุปตามกลุ่ม — ${project.name}`], [], (U
+    ? ["Group","Budget","Budget (USD)","Committed","Committed (USD)","ส่วนต่าง","% ใช้ไป"]
+    : ["Group","Budget","Committed","ส่วนต่าง","% ใช้ไป"])];
+  const dataStart3 = 3;
+  let g3B=0, g3C=0;
+  GROUPS.forEach(g => {
+    const codes = accounts.filter(a=>a.group===g).map(a=>a.code);
+    const b  = codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0);
+    const c2 = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
+    if (b<=0 && c2<=0) return;
+    rows3.push(U ? [g,b,toUsd(b,rate),c2,toUsd(c2,rate),b-c2,b>0?c2/b:0] : [g,b,c2,b-c2,b>0?c2/b:0]);
+    g3B += b; g3C += c2;
+  });
+  const dataEnd3 = rows3.length-1;
+  rows3.push(U ? ["TOTAL",g3B,toUsd(g3B,rate),g3C,toUsd(g3C,rate),g3B-g3C,g3B>0?g3C/g3B:0] : ["TOTAL",g3B,g3C,g3B-g3C,g3B>0?g3C/g3B:0]);
+  const totalRow3 = rows3.length-1;
+  const ws3 = XLSX.utils.aoa_to_sheet(rows3);
+  ws3["!cols"] = U ? [{wch:18},{wch:16},{wch:16},{wch:16},{wch:16},{wch:14},{wch:10}] : [{wch:18},{wch:16},{wch:16},{wch:14},{wch:10}];
+  styleSheet(ws3, { numCols:5+(U?2:0), headerRow:2, dataStart:dataStart3, dataEnd:dataEnd3, totalRow:totalRow3, moneyCols:U?[1,2,3,4,5]:[1,2,3], usdCols:U?[2,4]:[], pctCols:U?[6]:[4], theme });
+  XLSX.utils.book_append_sheet(wb, ws3, "By Group");
+
+  // Sheet 4 — monthly cash-flow: how much budget was added and how much got
+  // committed (PO'd) each month, plus the running cumulative totals, so
+  // Accounting can see the trend over time rather than just a snapshot
+  const additionMonths = Object.keys(additions||{}).filter(k=>!k.startsWith("$"));
+  const poEntryMonths  = poEntries.map(p=>(p.date||"").slice(0,7)).filter(Boolean);
+  const allMonths = [...new Set([...additionMonths, ...poEntryMonths])].sort();
+  if (allMonths.length) {
+    const rows4 = [[`รายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
+    rows4.push(U
+      ? ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","งบสะสม (USD)","Committed เดือนนี้","Committed สะสม","Committed สะสม (USD)","% ใช้ไปสะสม"]
+      : ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม"]);
+    const dataStart4 = rows4.length;
+    const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
+    // "Committed" ต้องนิยามให้ตรงกับชีตอื่น: ผลรวมยอด item เฉพาะ code ที่อยู่ในผังบัญชี
+    // (ไม่ใช้ poTotal ทั้งใบ เพราะ PO อาจมี item ที่ code ไม่อยู่ในผัง ทำให้ยอดสะสมไม่ตรงกับ Sheet อื่น)
+    const acctCodeSet = new Set(accounts.map(a=>a.code));
+    const poCommitted = (p) => poItems(p).filter(it=>acctCodeSet.has(it.code)).reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+    let cumB = baselineTotal, cumC = 0;
+    allMonths.forEach(m => {
+      const addedThisMonth     = accounts.reduce((s,a)=>s+monthAddValue(additions, m, a.code),0);
+      const committedThisMonth = poEntries.filter(p=>(p.date||"").slice(0,7)===m).reduce((s,p)=>s+poCommitted(p),0);
+      cumB += addedThisMonth;
+      cumC += committedThisMonth;
+      rows4.push(U
+        ? [monthShortLabel(m), addedThisMonth, cumB, toUsd(cumB,rate), committedThisMonth, cumC, toUsd(cumC,rate), cumB>0?cumC/cumB:0]
+        : [monthShortLabel(m), addedThisMonth, cumB, committedThisMonth, cumC, cumB>0?cumC/cumB:0]);
+    });
+    const dataEnd4 = rows4.length-1;
+    const ws4 = XLSX.utils.aoa_to_sheet(rows4);
+    ws4["!cols"] = U ? [{wch:14},{wch:18},{wch:16},{wch:16},{wch:18},{wch:16},{wch:18},{wch:12}] : [{wch:14},{wch:18},{wch:16},{wch:18},{wch:16},{wch:12}];
+    styleSheet(ws4, { numCols:6+(U?2:0), subRows:[1], headerRow:3, dataStart:dataStart4, dataEnd:dataEnd4, moneyCols:U?[1,2,3,4,5,6]:[1,2,3,4], usdCols:U?[3,6]:[], pctCols:U?[7]:[5], theme });
+    XLSX.utils.book_append_sheet(wb, ws4, "รายเดือน");
+  }
+
+  // ─── Sheet 5 + 6 — แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────
+  // สำหรับบัญชี: มองไปข้างหน้าว่าเดือนไหนต้องเตรียมเงินจ่ายเท่าไหร่ จ่ายอะไร และ
+  // จ่ายแบบไหน (เงินสด/เครดิต). ใช้ตัวช่วย poPayLines() ตัวเดียวกับหน้าแอพ เพื่อ
+  // ให้ตัวเลขตรงกันและกันการนับซ้ำเมื่อ PO มีงวดส่งของซ้ำ.
+  const payLines = poEntries.flatMap(poPayLines);
+  if (payLines.length) {
+    const monthKey = (l) => l.month || "9999-99";
+    const payMonths = [...new Set(payLines.map(monthKey))].sort();
+
+    // ── แผนจ่าย — รายละเอียดแต่ละงวด (เอาตารางสรุปรายเดือนด้านบนออกแล้ว) ──
+    const rowsC = [
+      [`แผนจ่ายเงิน — ${project.name}`],
+      [`รายละเอียดแต่ละงวด · เรียงตามเดือนที่ต้องจ่าย · ${payLines.length} งวด${U?`  ·  อัตราแลกเปลี่ยน ${rate} บาท/USD`:""}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`],
+      [],
+    ];
+    rowsC.push(U
+      ? ["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","ยอดต้องจ่าย (USD)","สถานะจ่าย"]
+      : ["เดือนที่ต้องจ่าย","วันครบกำหนดจ่าย","Supplier","PO No.","Acc. Code","Account Name","วิธีจ่าย","วันรับของ (แผน/จริง)","ยอดต้องจ่าย (THB)","สถานะจ่าย"]);
+    const detStart = rowsC.length;
+    const sortedD = payLines.slice().sort((a,b)=>
+      (monthKey(a).localeCompare(monthKey(b))) ||
+      ((a.payDate||"9999").localeCompare(b.payDate||"9999")) ||
+      a.supplier.localeCompare(b.supplier));
+    const rowGroupsD = [];
+    let grandD = 0;
+    sortedD.forEach(l => {
+      const mk = monthKey(l);
+      const label = mk==="9999-99" ? "ยังไม่ระบุ" : monthShortLabel(mk);
+      const incomingTxt = l.incoming ? `${l.incoming}${l.incomingType?` (${l.incomingType})`:""}` : "-";
+      rowsC.push(U
+        ? [label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, toUsd(l.amount,rate), PAYMENT_LABEL[l.status]]
+        : [label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status]]);
+      rowGroupsD.push(mk);
+      grandD += l.amount;
+    });
+    const detEnd = rowsC.length-1;
+    rowsC.push(U
+      ? ["","","","","","","","TOTAL", grandD, toUsd(grandD,rate), ""]
+      : ["","","","","","","","TOTAL", grandD, ""]);
+    const detTotal = rowsC.length-1;
+    const wsC = XLSX.utils.aoa_to_sheet(rowsC);
+    wsC["!cols"] = U
+      ? [{wch:18},{wch:16},{wch:22},{wch:16},{wch:14},{wch:30},{wch:16},{wch:20},{wch:18},{wch:18},{wch:16}]
+      : [{wch:18},{wch:16},{wch:22},{wch:16},{wch:14},{wch:30},{wch:16},{wch:20},{wch:18},{wch:16}];
+    styleSheet(wsC, { numCols:10+(U?1:0), subRows:[1], headerRow:3, dataStart:detStart, dataEnd:detEnd, totalRow:detTotal,
+      moneyCols:U?[8,9]:[8], usdCols:U?[9]:[], statusCols:U?[10]:[9], theme, rowGroups:rowGroupsD, groupDisplayCol:0 });
+    XLSX.utils.book_append_sheet(wb, wsC, "แผนจ่าย");
+  }
+
+  // ชีตใหม่: ของเข้ารายเดือน (3 ช่อง จ่าย/ปกติ/แผน มีสี) + ตารางรวมเดือน (แบบหน้าบัญชี)
+  addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "Summary" });
+  addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts, theme, backSheet: "Summary" });
+  const hasInSheet = wb.SheetNames.includes("ของเข้ารายเดือน");
+  const hasMxSheet = wb.SheetNames.includes("ตารางรวมเดือน");
+
+  // ลิงก์นำทางใต้ตารางหน้า Summary — คลิกเพื่อไปดูที่มาของตัวเลขในแต่ละชีต
+  {
+    const acctLinks = [
+      { text:"📦 PO Entries (รายการ PO)", sheet:"PO Entries" },
+      { text:"🏷 By Group (ตามกลุ่ม)", sheet:"By Group" },
+      ...(allMonths.length ? [{ text:"📅 รายเดือน", sheet:"รายเดือน" }] : []),
+      ...(payLines.length ? [{ text:"💰 แผนจ่าย", sheet:"แผนจ่าย" }] : []),
+      ...(hasInSheet ? [{ text:"📥 ของเข้ารายเดือน", sheet:"ของเข้ารายเดือน" }] : []),
+      ...(hasMxSheet ? [{ text:"📄 ตารางรวมเดือน", sheet:"ตารางรวมเดือน" }] : []),
+    ];
+    const navR = totalRow1 + 2;
+    XLSX.utils.sheet_add_aoa(ws1, [["🔗 ไปที่ชีต (ไล่ที่มาของตัวเลข):"]], { origin:{ r:navR, c:0 } });
+    ws1[XLSX.utils.encode_cell({ r:navR, c:0 })].s = { font:{ bold:true, sz:10.5, color:{rgb:theme.dark}, name:"Tahoma" } };
+    xLinkRow(ws1, navR+1, acctLinks);
+  }
+
+  XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// ROOT
-// ══════════════════════════════════════════════════════════════════════════
-// แถบแจ้ง "มีเวอร์ชันใหม่" — ให้ผู้ใช้กดอัปเดตเองเมื่อพร้อม (ไม่รีโหลดกลางคัน)
-function UpdateBanner() {
-  const ready = useUpdateReady();
-  const [busy, setBusy] = useState(false);
-  const [offline, setOffline] = useState(false);
-  if (!ready) return null;
-  return (
-    <div className="update-banner">
-      <span><b>มีเวอร์ชันใหม่ของระบบ</b>{offline ? " — ออฟไลน์อยู่ ต่อเน็ตแล้วลองใหม่" : " — อัปเดตเพื่อใช้เวอร์ชันล่าสุด"}</span>
-      <button className="ub-btn" disabled={busy} onClick={() => { setBusy(true); if (!applyUpdate()) { setBusy(false); setOffline(true); } }}>
-        {busy ? "กำลังอัปเดต…" : "อัปเดตเดี๋ยวนี้"}
-      </button>
-    </div>
-  );
+// ─── Root ─────────────────────────────────────────────────────────────────────
+// สร้างข้อความแบบตาราง (TSV) จากเซลล์ที่เลือก — จัดกลุ่มเป็นแถวตามตำแหน่งแนวตั้ง
+// แล้วเรียงในแถวตามแนวนอน เพื่อวางลง Excel/Sheets แล้วลงช่องตรงกัน
+function buildTSV(cells) {
+  if (!cells || !cells.length) return "";
+  const arr = cells.slice().sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  const rows = []; let cur = []; let top0 = null;
+  for (const c of arr) {
+    if (top0 === null || Math.abs(c.top - top0) <= 6) { cur.push(c); if (top0 === null) top0 = c.top; }
+    else { rows.push(cur); cur = [c]; top0 = c.top; }
+  }
+  if (cur.length) rows.push(cur);
+  return rows.map(r => r.slice().sort((a, b) => a.left - b.left).map(c => c.text).join("\t")).join("\n");
 }
 
-// ── กันจอขาว: ถ้าเรนเดอร์พังตรงไหน โชว์ข้อความ + ปุ่มโหลดใหม่ แทนหน้าจอว่างเปล่า ──
-//   (ก่อนหน้านี้ error ระหว่าง render ทำให้ React ถอดทั้งหน้า = จอขาว หาสาเหตุยาก)
-// กู้อัตโนมัติจาก chunk ที่ค้างไม่ตรงเวอร์ชัน: ล้างแคช SW + ถอน SW แล้วโหลดใหม่
-function mlsHardReload() {
-  const reload = () => { try { location.reload(); } catch { /* ignore */ } };
-  // ★ ออฟไลน์: ห้ามล้างแคช/ถอน SW (จะเปิดแอปไม่ได้จนกว่าจะออนไลน์) — โหลดใหม่จาก shell ที่แคชไว้เฉยๆ
-  if (typeof navigator !== "undefined" && navigator.onLine === false) { reload(); return; }
-  try {
-    const cc = (window.caches && caches.keys)
-      ? caches.keys().then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).catch(() => {})
-      : Promise.resolve();
-    const sw = (navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
-      ? navigator.serviceWorker.getRegistrations().then((rs) => Promise.all(rs.map((r) => r.unregister()))).catch(() => {})
-      : Promise.resolve();
-    Promise.all([cc, sw]).finally(reload);
-  } catch { reload(); }
-}
+// กันจอขาว: ถ้าหน้าจอส่วนใดโยน error ตอน render จะโชว์กล่องแจ้ง + ปุ่มลองใหม่
+// แทนที่จะพังทั้งแอพ
 class ErrorBoundary extends Component {
-  constructor(p) { super(p); this.state = { err: null, stack: "" }; }
-  static getDerivedStateFromError(err) { return { err }; }
-  componentDidCatch(err, info) {
-    console.error("App crashed:", err, info?.componentStack);
-    this.setState({ stack: info?.componentStack || "" });
-    // ถ้าเป็น error แบบ chunk ไม่ตรงเวอร์ชัน (deploy ใหม่ทับของเก่า) → กู้อัตโนมัติ 1 ครั้ง
-    const msg = String(err?.message || err || "");
-    if (/#130|Loading chunk|ChunkLoadError|Importing a module script failed|dynamically imported/i.test(msg)) {
-      let healed = false;
-      try { healed = sessionStorage.getItem("mls-healed") === "1"; } catch { /* ignore */ }
-      // ★ ออฟไลน์: ไม่ auto-heal (โหลดใหม่ตอนออฟไลน์ไม่ช่วย + เสี่ยงวน) → โชว์การ์ด crash ให้เลือกเอง
-      if (!healed && !(typeof navigator !== "undefined" && navigator.onLine === false)) { try { sessionStorage.setItem("mls-healed", "1"); } catch { /* ignore */ } mlsHardReload(); }
-    }
-  }
-  render() {
-    if (!this.state.err) return this.props.children;
-    return (
-      <div style={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#eef3f1", fontFamily: "system-ui, sans-serif" }}>
-        <div style={{ maxWidth: 520, background: "#fff", border: "1px solid #e1e9e5", borderRadius: 16, padding: "28px 26px", boxShadow: "0 10px 40px -12px rgba(0,0,0,.15)" }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 8 }}>เกิดข้อผิดพลาดในการแสดงผล</div>
-          <div style={{ fontSize: 13.5, color: "#64748b", lineHeight: 1.7, marginBottom: 16 }}>
-            ลองกด “โหลดใหม่” — ถ้ายังพบปัญหา ให้แคปข้อความด้านล่างส่งให้ผู้ดูแลระบบ
-          </div>
-          <pre style={{ fontSize: 11.5, color: "#b91c1c", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 220, overflow: "auto", margin: "0 0 16px" }}>
-            {String(this.state.err?.message || this.state.err)}
-            {this.state.stack ? "\n\nComponent stack:" + this.state.stack.split("\n").slice(0, 8).join("\n") : ""}
-          </pre>
-          <button onClick={mlsHardReload}
-            style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 10, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-            โหลดใหม่ (ล้างแคช)
-          </button>
+  constructor(props){ super(props); this.state = { err:null }; }
+  static getDerivedStateFromError(err){ return { err }; }
+  componentDidCatch(err, info){ console.error("UI error:", err, info); }
+  render(){
+    if (this.state.err) {
+      return (
+        <div style={{minHeight:"60vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,padding:24,textAlign:"center"}}>
+          <div style={{fontSize:40}}>😵</div>
+          <div style={{fontSize:16,fontWeight:650,color:"#0f172a"}}>เกิดข้อผิดพลาดในการแสดงผลหน้านี้</div>
+          <div style={{fontSize:13,color:"#64748b",maxWidth:460}}>ข้อมูลของคุณยังปลอดภัย ลองกดปุ่มด้านล่างเพื่อโหลดใหม่ ถ้ายังเป็นอยู่ให้แจ้งผู้ดูแลระบบ</div>
+          <button onClick={()=>{ this.setState({err:null}); if(typeof window!=="undefined") window.location.reload(); }}
+            style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:14,fontWeight:600,cursor:"pointer"}}>โหลดหน้าใหม่</button>
         </div>
-      </div>
-    );
+      );
+    }
+    return this.props.children;
   }
 }
 
 export default function App() {
-  const [user, setUser] = useState(getSession());
+  useLang();                                            // re-render ทั้งแอปเมื่อสลับภาษา
+  const [session,  setSessionState] = useState(null);   // โหลดแบบ async ด้านล่าง
+  const [authReady, setAuthReady]   = useState(false);  // true เมื่อเช็ค session เสร็จ
+  const [screen,   setScreen]   = useState("home");
+  const [projects, setProjects] = useState([]);
+  const [accountsRev, setAccountsRev] = useState(0); // bump เมื่อรายการบัญชี (ACCOUNTS) ถูกแก้ → re-render ทั้งแอป
+  const [activeId, setActiveId] = useState(null);
+  const [role,     setRole]     = useState(null);
+  const [tenderCosts, setTCosts]= useState({});
+  const [additions,   setAdditions]  = useState({});
+  const [extraItems,  setExtraItems] = useState([]);
+  const [hiddenAccounts, setHiddenAccounts] = useState([]); // codes of fixed Acc. Codes QS has removed for this project
+  const [incomingPlan, setIncomingPlan] = useState([]); // แผนของเข้าทั้งโปรเจค (จัดซื้อวางแผนก่อนออก PO): [{ id, date, items:[{id,code,amount}] }]
+  const [poEntries,   setPO]    = useState([]);
+  const [loaded,   setLoaded]   = useState(false);
+  const [newProjModal, setNewProjModal] = useState(false);
+  const [syncedAt,    setSyncedAt]    = useState(null);
+  const [syncing,     setSyncing]     = useState(false);
+  const [syncError,   setSyncError]   = useState("");   // ข้อความเตือนเมื่อบันทึก/โหลดพลาด
+  const [exportMsg,   setExportMsg]   = useState("");   // สถานะตอนกด Export (กำลังสร้าง/เสร็จ/พลาด)
+  const runExport = async (fn) => {
+    setExportMsg("⏳ กำลังสร้างไฟล์ Excel…");
+    try { await fn(); setExportMsg("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด"); setTimeout(()=>setExportMsg(""), 3500); }
+    catch (e) { console.warn("export failed:", e); setExportMsg("⚠ สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง"); setTimeout(()=>setExportMsg(""), 4500); }
+  };
 
-  // ฝ่ายผลิต / พนักงานหน้าเครื่อง (role = operator) → เด้งไปหน้าเครื่องใหม่ /station อัตโนมัติ
-  // (admin / supervisor ใช้หน้าปกติเหมือนเดิม) — session แชร์กันทั้งสองส่วนอยู่แล้ว
-  const goStation = !!user && user.role === "operator";
+  const handleLogin = (user) => { setSession(user); setSessionState(user); };
+  const handleLogout = () => {
+    if (!confirmLeaveIfDirty()) return;
+    UnsavedGuard.dirty = false;
+    clearSession(); setSessionState(null);
+    setScreen("home"); setRole(null); setActiveId(null);
+  };
+
+  // เตือนก่อนปิด/รีเฟรช/กดปุ่มย้อนของเบราว์เซอร์ ขณะยังมีการแก้ไขที่ไม่ได้บันทึก
   useEffect(() => {
-    if (goStation) window.location.replace("/station");
-  }, [goStation]);
+    const onBeforeUnload = (e) => { if (UnsavedGuard.dirty) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
 
-  async function logout() {
-    try { await logoutSession(); } catch (_) { /* ignore */ } // ยกเลิก token ฝั่ง DB
-    clearSession();
-    setUser(null);
+  // โหลด session ตอนเปิดแอป — รองรับ auth.js ได้ทั้งสองแบบ:
+  //  • ตัวเดิม: getSession() เป็น synchronous (คืน object/null จาก localStorage)
+  //  • ตัวใหม่: getSession() เป็น async (คืน Promise จาก Supabase Auth)
+  // Promise.resolve() ครอบให้ทำงานได้ทั้งคู่ ส่วน listener จะ logout เฉพาะตอน
+  // เกิดเหตุการณ์ SIGNED_OUT จริง ๆ เท่านั้น (ไม่เผลอล้าง session บน stack เดิม)
+  useEffect(() => {
+    let mounted = true;
+    Promise.resolve(getSession()).then((u) => { if (mounted) { setSessionState(u); setAuthReady(true); } });
+    let subscription;
+    try {
+      const res = supabase.auth?.onAuthStateChange?.((evt, s) => {
+        if (evt === "SIGNED_OUT" && mounted) setSessionState(null);
+      });
+      subscription = res?.data?.subscription;
+    } catch { /* auth.js เดิมไม่ได้ใช้ Supabase Auth — ข้ามได้ */ }
+    return () => { mounted = false; subscription?.unsubscribe?.(); };
+  }, []);
+
+  const fetchProjectData = useCallback(async (id) => {
+    const t  = await sg(`tcs-tenders-${id}`);
+    const po = await sg(`tcs-po-${id}`);
+    const ad = await sg(`tcs-additions-${id}`);
+    const ex = await sg(`tcs-extra-${id}`);
+    const hid = await sg(`tcs-hidden-${id}`);
+    const inp = await sg(`tcs-inplan-${id}`);
+    setTCosts(t || {});
+    setPO(po || []);
+    setAdditions(ad || {});
+    setExtraItems(ex || []);
+    setHiddenAccounts(hid || []);
+    setIncomingPlan(Array.isArray(inp) ? inp : []);
+  }, []);
+
+  const fetchProjects = useCallback(async () => {
+    const list = await sg("tcs-projects");
+    if (list) setProjects(list);
+  }, []);
+  // โหลดรายการบัญชีที่แอดมินแก้ (ใช้ร่วมทุกโครงการ) แล้วทับ ACCOUNTS ในที่
+  const fetchAccounts = useCallback(async () => {
+    const list = await sg("tcs-accounts");
+    if (Array.isArray(list) && list.length) { applyAccountList(list); setAccountsRev(v => v + 1); }
+  }, []);
+
+  // โหลดรายการโครงการ "หลังล็อกอินเสร็จ" — สำคัญมากตอนใช้ RLS: ถ้าอ่านก่อน
+  // Supabase แนบ token จะโดน DB ปฏิเสธแล้วขึ้น 0 โครงการ ทั้งที่มีสิทธิ์อ่าน
+  // ผูกกับ session ไว้ พอล็อกอินเสร็จ (session มีค่า) จะดึงข้อมูลใหม่อัตโนมัติ
+  useEffect(() => {
+    if (!session) { setLoaded(true); return; }
+    (async () => {
+      try { await fetchAccounts(); await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
+      catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า"); }
+      finally { setLoaded(true); }   // กันจอโหลดค้างเสมอ แม้ดึงข้อมูลพลาด
+    })();
+  }, [fetchProjects, fetchAccounts, session]);
+
+  useEffect(() => {
+    if (!activeId || !session) return;
+    fetchProjectData(activeId).catch(e => { console.warn("โหลดข้อมูลโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลโครงการไม่สำเร็จ — ลองเปิดใหม่อีกครั้ง"); });
+  }, [activeId, fetchProjectData, session]);
+
+  useEffect(() => {
+    if (!session) return; // subscribe realtime หลังล็อกอิน เพื่อให้ RLS ยอมส่ง event
+    const channel = supabase.channel("kv_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, async (payload) => {
+        const key = payload.new?.key || payload.old?.key || "";
+        setSyncing(true);
+        try {
+          if (key === "tcs-projects") await fetchProjects();
+          else if (key === "tcs-accounts") { await fetchAccounts(); if (activeId) await fetchProjectData(activeId); }
+          else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}` || key === `tcs-inplan-${activeId}`)) await fetchProjectData(activeId);
+          setSyncedAt(new Date());
+        } catch (e) {
+          console.warn("sync realtime ล้มเหลว:", e);
+        } finally {
+          setSyncing(false); // กันสปินเนอร์ค้างเมื่อ fetch ล้มเหลว
+        }
+      }).subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [activeId, fetchProjects, fetchAccounts, fetchProjectData, session]);
+
+  // ─── Undo / Redo ───────────────────────────────────────────────────────────
+  // ทุกการบันทึกวิ่งผ่าน commit() ซึ่งจดค่าเดิมไว้ก่อนเขียนทับ → กด Ctrl+Z หรือ
+  // ปุ่มย้อนกลับ เพื่อคืนค่าเดิมได้ทุกอย่าง (ลบข้อมูล/ลบคอลัมน์/ลบแถว/แก้ตัวเลข/
+  // เพิ่มรายการ ฯลฯ) เก็บได้หลายขั้น (สูงสุด 60) และทำซ้ำ (redo) ได้
+  const undoRef = useRef([]);
+  const redoRef = useRef([]);
+  const currentRef = useRef({});
+  const [undoInfo, setUndoInfo] = useState({ u: 0, r: 0, label: "" });
+  const [editMode, setEditMode] = useState(false); // true เมื่ออยู่ในโหมดแก้ไข — undo/Ctrl+Z ใช้ได้เฉพาะตอนนี้
+  const editModeRef = useRef(false); editModeRef.current = editMode;
+  const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
+  const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
+  const [copied, setCopied]     = useState(false); // สถานะ "คัดลอกแล้ว"
+  const dragRef = useRef({ pending:false, active:false, ax:0, ay:0, lastX:0, lastY:0, raf:0, scrollRAF:0, scrollEl:null, suppressClick:false });
+  const hiliteRef = useRef([]); // ช่องที่กำลังไฮไลต์ (ไว้คืนค่าเดิมตอนล้าง)
+  const selCellsRef = useRef([]); // เซลล์ที่เลือก {top,left,text} ไว้คัดลอก
+  currentRef.current = {
+    "tcs-projects": projects,
+    [`tcs-tenders-${activeId}`]: tenderCosts,
+    [`tcs-additions-${activeId}`]: additions,
+    [`tcs-po-${activeId}`]: poEntries,
+    [`tcs-extra-${activeId}`]: extraItems,
+    [`tcs-hidden-${activeId}`]: hiddenAccounts,
+    [`tcs-inplan-${activeId}`]: incomingPlan,
+  };
+  const syncUndo = () => setUndoInfo({
+    u: undoRef.current.length, r: redoRef.current.length,
+    label: undoRef.current.length ? undoRef.current[undoRef.current.length - 1].label : "",
+  });
+  // เขียนลงเซิร์ฟเวอร์ พร้อมลองใหม่อัตโนมัติ 1 ครั้งเมื่อเน็ตสะดุดชั่วคราว ก่อนค่อย
+  // แจ้งเตือน (กันเซฟหลุดเพราะ blip เล็ก ๆ). ถ้าส่ง prev มาด้วย จะใช้ ssMerge เพื่อ
+  // "รวม" การแก้ของเราลงบนของล่าสุดบนเซิร์ฟเวอร์ (กันทับงานคนอื่นที่แก้พร้อมกัน).
+  const persist = (key, value, prev) => {
+    const attempt = () => (prev !== undefined ? ssMerge(key, prev, value) : ss(key, value));
+    return attempt()
+      .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+      .catch(() => new Promise(res => setTimeout(res, 900)).then(attempt)
+        .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+        .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); }));
+  };
+  const commit = useCallback((key, next, prev, setState, label) => {
+    undoRef.current.push({ key, value: prev, setState, label });
+    if (undoRef.current.length > 60) undoRef.current.shift();
+    redoRef.current = []; // มีการแก้ใหม่ → ล้าง redo
+    setState(next);
+    persist(key, next, prev);
+    syncUndo();
+  }, []);
+  const undo = useCallback(() => {
+    const e = undoRef.current.pop();
+    if (!e) return;
+    const cur = currentRef.current[e.key];
+    redoRef.current.push({ key: e.key, value: cur, setState: e.setState, label: e.label });
+    e.setState(e.value);
+    persist(e.key, e.value, cur);
+    syncUndo();
+  }, []);
+  const redo = useCallback(() => {
+    const e = redoRef.current.pop();
+    if (!e) return;
+    const cur = currentRef.current[e.key];
+    undoRef.current.push({ key: e.key, value: cur, setState: e.setState, label: e.label });
+    e.setState(e.value);
+    persist(e.key, e.value, cur);
+    syncUndo();
+  }, []);
+  // เปลี่ยนโครงการ "หรือ" เปลี่ยนหน้า → ล้างประวัติ undo (กันย้อนข้ามโครงการ/ข้ามบริบท)
+  useEffect(() => { undoRef.current = []; redoRef.current = []; syncUndo(); }, [activeId, screen]);
+  // คีย์ลัด: Ctrl/Cmd+Z = ย้อนกลับ · Ctrl+Shift+Z หรือ Ctrl+Y = ทำซ้ำ
+  // ไม่ดักถ้ากำลังพิมพ์อยู่ในช่องกรอก (ปล่อยให้ undo ของข้อความทำงานตามปกติ)
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (!editModeRef.current) return; // ใช้ได้เฉพาะตอนอยู่ในโหมดแก้ไข
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = (e.key || "").toLowerCase();
+      if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); redo(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
+
+  // แถบสรุปแบบ Excel — ลากเป็น "กรอบสี่เหลี่ยม" คลุมตัวเลขในตาราง (marquee)
+  // รวมเฉพาะตัวเลขที่อยู่ในกรอบ จึงลากลงคอลัมน์เดียวได้ตรง ๆ ไม่ติดเซลล์ข้าง ๆ
+  // นับเฉพาะเลขที่มีจุดทศนิยม (ยอดเงิน) จึงไม่รวมรหัสบัญชี/ปี ที่เป็นจำนวนเต็ม
+  useEffect(() => {
+    const d = dragRef.current;
+    const INTERACT = 'input,textarea,select,button,a,[contenteditable="true"]';
+    const NUM_RE = /^-?\d[\d,]*\.\d+$/;
+    const HL = "rgba(37,99,235,0.20)";
+    const EDGE = 46, SPEED = 24;
+    const clearHilite = () => { hiliteRef.current.forEach(({el,prev}) => { el.style.backgroundColor = prev; }); hiliteRef.current = []; };
+    // getScroll: ตำแหน่ง/สเกลของตัวเลื่อน (กล่อง .mscroll ถ้ามี, ไม่งั้นใช้ทั้งหน้าต่าง)
+    const getScroll = () => d.scrollEl
+      ? (() => { const r = d.scrollEl.getBoundingClientRect(); return { x:d.scrollEl.scrollLeft, y:d.scrollEl.scrollTop, ox:r.left, oy:r.top }; })()
+      : { x:window.scrollX, y:window.scrollY, ox:0, oy:0 };
+    const compute = () => {
+      const s = getScroll();
+      // จุดปัจจุบันในพิกัด "เนื้อหา" (คงที่แม้เลื่อน) แล้วทำกรอบเทียบกับ anchor
+      const cx = d.lastX - s.ox + s.x, cy = d.lastY - s.oy + s.y;
+      const cb = { left:Math.min(d.ax,cx), top:Math.min(d.ay,cy), right:Math.max(d.ax,cx), bottom:Math.max(d.ay,cy) };
+      // แปลงกลับเป็นพิกัดจอ (client) ตาม scroll ปัจจุบัน — anchor จึงยึดติดเซลล์เดิม
+      const box = { left:cb.left - s.x + s.ox, top:cb.top - s.y + s.oy, right:cb.right - s.x + s.ox, bottom:cb.bottom - s.y + s.oy };
+      setMarquee({ left:box.left, top:box.top, width:box.right-box.left, height:box.bottom-box.top });
+      clearHilite();
+      const nums = []; const cells = new Set(); const cellData = [];
+      document.querySelectorAll("table").forEach((tbl) => {
+        const walker = document.createTreeWalker(tbl, NodeFilter.SHOW_TEXT, {
+          acceptNode(n){
+            // ข้ามตัวเลข USD (บรรทัด ≈ $ ใต้ยอดบาท) ไม่ให้ถูกนับ/รวมซ้ำกับบาท
+            if (n.parentElement && n.parentElement.closest(".usd-sub")) return NodeFilter.FILTER_REJECT;
+            return NUM_RE.test((n.nodeValue||"").trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          },
+        });
+        let node;
+        while ((node = walker.nextNode())) {
+          const rng = document.createRange(); rng.selectNodeContents(node);
+          const r = rng.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) continue;
+          if (r.right >= box.left && r.left <= box.right && r.bottom >= box.top && r.top <= box.bottom) {
+            const txt = node.nodeValue.trim();
+            const v = parseFloat(txt.replace(/,/g, ""));
+            if (!isNaN(v)) {
+              nums.push(v);
+              cellData.push({ top: r.top, left: r.left, text: txt });
+              const td = node.parentElement && node.parentElement.closest("td"); if (td) cells.add(td);
+            }
+          }
+        }
+      });
+      selCellsRef.current = cellData;
+      cells.forEach((td) => { hiliteRef.current.push({ el:td, prev:td.style.backgroundColor }); td.style.backgroundColor = HL; });
+      if (nums.length >= 2) {
+        const sum = nums.reduce((a,b)=>a+b,0);
+        setSelStats({ count:nums.length, sum, avg:sum/nums.length, min:Math.min(...nums), max:Math.max(...nums), vals:nums });
+      } else { setSelStats(null); }
+    };
+    // เลื่อนตารางอัตโนมัติเมื่อลากชนขอบ (จะได้ลากทั้งแถวที่คอลัมน์เยอะได้)
+    const autoScroll = () => {
+      if (!d.active) { d.scrollRAF = 0; return; }
+      let moved = false;
+      const el = d.scrollEl;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (d.lastX > r.right - EDGE && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) { el.scrollLeft += SPEED; moved = true; }
+        else if (d.lastX < r.left + EDGE && el.scrollLeft > 0) { el.scrollLeft -= SPEED; moved = true; }
+        if (d.lastY > r.bottom - EDGE && el.scrollTop + el.clientHeight < el.scrollHeight - 1) { el.scrollTop += SPEED; moved = true; }
+        else if (d.lastY < r.top + EDGE && el.scrollTop > 0) { el.scrollTop -= SPEED; moved = true; }
+      } else {
+        if (d.lastY > window.innerHeight - EDGE) { window.scrollBy(0, SPEED); moved = true; }
+        else if (d.lastY < EDGE) { window.scrollBy(0, -SPEED); moved = true; }
+      }
+      if (moved) { compute(); d.scrollRAF = requestAnimationFrame(autoScroll); }
+      else d.scrollRAF = 0;
+    };
+    const nearEdge = () => {
+      const el = d.scrollEl;
+      if (el) { const r = el.getBoundingClientRect(); return d.lastX > r.right-EDGE || d.lastX < r.left+EDGE || d.lastY > r.bottom-EDGE || d.lastY < r.top+EDGE; }
+      return d.lastY > window.innerHeight-EDGE || d.lastY < EDGE;
+    };
+    const onDown = (e) => {
+      clearHilite(); setSelStats(null); setMarquee(null); selCellsRef.current = []; // คลิกที่ไหนก็ล้างไฮไลต์เดิม
+      if (e.button !== 0) return;
+      const t = e.target;
+      if (!(t instanceof Element) || t.closest(INTERACT) || !t.closest("table")) return;
+      // เริ่มลากเลือกสถิติเฉพาะเมื่อเริ่มบนเซลล์ที่เป็น "ยอดเงิน" (มีจุดทศนิยม)
+      // ถ้าเริ่มบนเซลล์ข้อความ (รหัสบัญชี/ชื่อรายการ/หัวตาราง) ปล่อยให้เลือก-คัดลอกข้อความได้ตามปกติ
+      const startCell = t.closest("td");
+      if (!startCell || !/\d[\d,]*\.\d/.test(startCell.textContent || "")) return;
+      d.scrollEl = t.closest(".mscroll") || t.closest(".hscroll") || t.closest(".fatscroll") || null;
+      const s = getScroll();
+      d.ax = e.clientX - s.ox + s.x; d.ay = e.clientY - s.oy + s.y; // anchor ในพิกัดเนื้อหา
+      d.pending = true; d.active = false; d.lastX = e.clientX; d.lastY = e.clientY;
+    };
+    // Ctrl/Cmd+C = คัดลอกค่าที่เลือก (แบบตาราง) — ไม่ดักถ้ากำลังพิมพ์ในช่องกรอก
+    const onCopy = (e) => {
+      if (!(e.ctrlKey || e.metaKey) || (e.key||"").toLowerCase() !== "c") return;
+      const t = e.target;
+      if (t && (t.tagName==="INPUT" || t.tagName==="TEXTAREA" || t.tagName==="SELECT" || t.isContentEditable)) return;
+      const tsv = buildTSV(selCellsRef.current);
+      if (!tsv) return;
+      e.preventDefault();
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(tsv).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 1300); }).catch(()=>{});
+    };
+    const onMove = (e) => {
+      if (!d.pending) return;
+      if (!d.active) {
+        // d.lastX/Y ยังเป็นตำแหน่งตอน mousedown — ขยับเกิน 5px ถึงเริ่มลากเลือกจริง
+        if (Math.abs(e.clientX - d.lastX) + Math.abs(e.clientY - d.lastY) < 5) return;
+        d.active = true; document.body.style.userSelect = "none";
+      }
+      d.lastX = e.clientX; d.lastY = e.clientY;
+      e.preventDefault();
+      if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; compute(); });
+      if (nearEdge() && !d.scrollRAF) d.scrollRAF = requestAnimationFrame(autoScroll);
+    };
+    const onUp = () => {
+      if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
+      if (d.scrollRAF) { cancelAnimationFrame(d.scrollRAF); d.scrollRAF = 0; }
+      if (d.active) d.suppressClick = true; // คงไฮไลต์ไว้ กันคลิกโดนแถว/เซลล์หลังปล่อยเมาส์
+      d.pending = false; d.active = false;
+      document.body.style.userSelect = "";
+      setMarquee(null);
+    };
+    const onClickCap = (e) => { if (d.suppressClick) { e.stopPropagation(); e.preventDefault(); d.suppressClick = false; } };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("click", onClickCap, true);
+    document.addEventListener("keydown", onCopy);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("click", onClickCap, true);
+      document.removeEventListener("keydown", onCopy);
+      clearHilite();
+    };
+  }, []);
+
+  const saveProjects = useCallback((list) => commit("tcs-projects", list, projects, setProjects, "รายชื่อโครงการ"), [commit, projects]);
+  const saveTenders  = useCallback((t)    => commit(`tcs-tenders-${activeId}`, t, tenderCosts, setTCosts, "ราคาเดิม (Baseline)"), [commit, activeId, tenderCosts]);
+  const saveAdditions= useCallback((a)    => commit(`tcs-additions-${activeId}`, a, additions, setAdditions, "ยอดเพิ่มรายเดือน"), [commit, activeId, additions]);
+  const saveExtraItems=useCallback((ex)   => commit(`tcs-extra-${activeId}`, ex, extraItems, setExtraItems, "รายการ/แถว"), [commit, activeId, extraItems]);
+  const saveHiddenAccounts=useCallback((h)=> commit(`tcs-hidden-${activeId}`, h, hiddenAccounts, setHiddenAccounts, "การซ่อนหมวด"), [commit, activeId, hiddenAccounts]);
+  const saveIncomingPlan=useCallback((v)=> commit(`tcs-inplan-${activeId}`, v, incomingPlan, setIncomingPlan, "แผนของเข้า"), [commit, activeId, incomingPlan]);
+  const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, "PO / จัดซื้อ"), [commit, activeId, poEntries]);
+
+  const openProject = (id) => {
+    if (!confirmLeaveIfDirty()) return;
+    UnsavedGuard.dirty = false;
+    setActiveId(id);
+    if (session?.role === "admin") { setRole(null); setScreen("roleSelect"); }
+    else { setRole(session?.role); setScreen("app"); }
+  };
+  const deleteProject = async (id) => {
+    const proj = projects.find(p => p.id === id);
+    const name = (proj?.name || "").trim();
+    // ยืนยันแบบ "พิมพ์ชื่อโครงการให้ตรง" — กันเผลอลบ เพราะลบแล้วข้อมูลย่อยหายด้วย
+    const typed = window.prompt(
+      `⚠️ ลบโครงการ "${name}" ?\n\n` +
+      `ข้อมูลทั้งหมดของโครงการนี้จะถูกลบด้วย:\n` +
+      `• Tender Cost (ราคาเดิม)\n• PO / จัดซื้อ\n• ยอดเพิ่มรายเดือน · รายการเพิ่ม · หมวดที่ซ่อน\n\n` +
+      `กู้คืนได้จาก Admin → กู้คืนข้อมูล (ได้ถึงสแนปช็อตล่าสุด 12:00/18:00)\n\n` +
+      `ถ้าแน่ใจ พิมพ์ชื่อโครงการให้ตรงเพื่อยืนยัน:\n${name}`
+    );
+    if (typed == null) return;                                   // กดยกเลิก
+    if (typed.trim() !== name) { alert("ชื่อโครงการไม่ตรง — ยกเลิกการลบแล้ว"); return; }
+    // ไม่เข้า quick-undo เพราะการลบโครงการลบคีย์ย่อยด้วย — กู้ทั้งโครงการทำผ่านหน้า
+    // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
+    const next = projects.filter(p => p.id !== id);
+    // ใช้ ssMerge (merge by id) แทน ss ธรรมดา — ตัดเฉพาะโครงการที่ลบออก โดยไม่ทับ
+    // โครงการที่คนอื่นเพิ่งเพิ่มพร้อมกัน และแจ้ง error ถ้าบันทึกไม่สำเร็จ
+    setProjects(next);
+    ssMerge("tcs-projects", projects, next)
+      .then(()=>setSyncedAt(new Date()))
+      .catch(e=>{ console.warn("ลบโครงการไม่สำเร็จ:", e); setSyncError("⚠ ลบโครงการไม่สำเร็จ — ตรวจเน็ตแล้วลองใหม่"); });
+    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`); await sd(`tcs-inplan-${id}`);
+  };
+  const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
+  const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
+
+  if (!authReady) {
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <Loader />
+      </>
+    );
   }
 
-  // ★ session หมดอายุ/ถูกตัดจากเครื่องอื่น → เด้งออกจากระบบทันที ไม่ค้างในระบบแบบใช้งานไม่ได้
-  //   (1) ฟัง event จาก supabase.js เมื่อ action ใดๆ เจอ 'invalid session' → ออกทันที
-  //   (2) เช็คเป็นระยะ (heartbeat) เผื่อถูกตัด/หมดอายุขณะไม่ได้กดอะไร
-  useEffect(() => {
-    if (!user) return;
-    let done = false;
-    function forceOut(msg) {
-      if (done) return; done = true;
-      try { mlsToast(msg || "เซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่", "warn"); } catch (_) { /* ignore */ }
-      clearSession(); setUser(null);
-    }
-    const onInvalid = () => forceOut();
-    window.addEventListener("mls-session-invalid", onInvalid);
-    async function check() {
-      try {
-        const r = await sessionHeartbeat();   // { ok, exists, superseded }
-        if (r && (r.exists === false || r.superseded === true || r.expired === true)) {
-          forceOut("บัญชีถูกใช้ที่อื่น หรือเซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่");
-        }
-      } catch (_) { /* เน็ตสะดุด — ไม่เตะออก */ }
-    }
-    check();
-    const t = setInterval(check, 60000);   // เช็คทุก 60 วินาที
-    return () => { done = true; window.removeEventListener("mls-session-invalid", onInvalid); clearInterval(t); };
-  }, [user]);
+  if (!session) {
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <LoginScreen onLogin={handleLogin} />
+      </>
+    );
+  }
 
-  const content = !user
-    ? <Login onLogin={setUser} />
-    : goStation ? <LoginSplash text="กำลังเปิดหน้างาน…" /> : <Shell user={user} onLogout={logout} />;
-  return <ErrorBoundary><UpdateBanner />{content}<Toaster /><ConfirmHost /><UndoHint /></ErrorBoundary>;
+  if (!loaded) return <Loader />;
+
+  // Non-admins can only ever act as the role tied to their account,
+  // even if they somehow land on screen "roleSelect" or "app" with a stale role.
+  const effectiveRole = session.role === "admin" ? role : session.role;
+
+  const sharedProps = { project:activeProject, tenderCosts, poEntries, saveTenders, savePO,
+    additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
+    incomingPlan, saveIncomingPlan,
+    updateProject,
+    onBack: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen(session.role === "admin" ? "roleSelect" : "home"); },
+    onHome: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("home"); },   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
+    // ปุ่ม "เลือกแผนก" → หน้าแรกของแต่ละแผนก (เฉพาะ admin ที่สลับแผนกได้)
+    onDept: session.role === "admin" ? () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("roleSelect"); } : null,
+    syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
+
+  return (
+    <>
+      <style>{GLOBAL_CSS}</style>
+      {syncError && (
+        <div style={{position:"fixed",left:"50%",top:16,transform:"translateX(-50%)",zIndex:200,maxWidth:"92vw",
+          background:"#fef2f2",color:"#991b1b",border:"1px solid #ef4444",borderRadius:12,padding:"10px 16px",
+          boxShadow:"0 8px 28px rgba(15,23,42,0.18)",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",gap:12}}>
+          <span style={{flex:1}}>{syncError}</span>
+          <button onClick={()=>setSyncError("")} style={{border:"none",background:"none",color:"#991b1b",cursor:"pointer",fontSize:16,fontWeight:650,lineHeight:1}}>×</button>
+        </div>
+      )}
+      {exportMsg && (
+        <div style={{position:"fixed",left:"50%",bottom:22,transform:"translateX(-50%)",zIndex:200,
+          background:"#0f172a",color:"#e2e8f0",borderRadius:10,padding:"10px 18px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
+          fontSize:13,fontWeight:600,whiteSpace:"nowrap"}}>{exportMsg}</div>
+      )}
+      {marquee && marquee.width > 2 && marquee.height > 2 && (
+        <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
+          background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
+      )}
+      {selStats && (
+        <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
+          background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
+          fontSize:12,fontFamily:"'JetBrains Mono',monospace",overflow:"hidden"}}>
+          {(() => {
+            const selRate = effRate(activeProject);   // อัตราแลกเปลี่ยน (0 = ปิด/ไม่โชว์ $)
+            const segs = [
+              {label:"ผลรวม", raw:selStats.sum, clr:"#34d399", money:true},
+              {label:"เฉลี่ย", raw:selStats.avg, clr:"#93c5fd", money:true},
+              {label:"นับ",   text:String(selStats.count), clr:"#fcd34d", money:false},
+              {label:"ต่ำสุด", raw:selStats.min, clr:"#cbd5e1", money:true},
+              {label:"สูงสุด", raw:selStats.max, clr:"#cbd5e1", money:true},
+            ];
+            return segs.map((s,i)=>(
+              <span key={s.label} style={{display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderLeft:i?"1px solid #334155":"none"}}>
+                <span style={{color:"#94a3b8",fontFamily:"system-ui,sans-serif",fontSize:11}}>{s.label}</span>
+                <span style={{display:"flex",flexDirection:"column",alignItems:"flex-end",lineHeight:1.15}}>
+                  <b style={{color:s.clr}}>{s.money ? fmt(s.raw) : s.text}</b>
+                  {s.money && selRate>0 && <b style={{color:"#34d399",fontSize:11,fontWeight:650}}>${fmt(s.raw/selRate)}</b>}
+                </span>
+              </span>
+            ));
+          })()}
+          <button onClick={()=>{ const tsv=buildTSV(selCellsRef.current); if(tsv&&navigator.clipboard?.writeText){ navigator.clipboard.writeText(tsv).then(()=>{setCopied(true); setTimeout(()=>setCopied(false),1300);}); } }}
+            title="คัดลอกค่าที่เลือก (Ctrl+C)"
+            style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",borderRadius:8,padding:"6px 12px",
+              fontFamily:"system-ui,sans-serif",fontSize:12,fontWeight:600,background:copied?"#065f46":"#334155",color:"#fff"}}>
+            {copied ? "✓ คัดลอกแล้ว" : "⧉ คัดลอก"}
+          </button>
+        </div>
+      )}
+      {editMode && (undoInfo.u > 0 || undoInfo.r > 0) && (
+        <div style={{position:"fixed",left:20,bottom:20,zIndex:95,display:"flex",gap:6,alignItems:"center",
+          background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"7px 9px",boxShadow:"0 8px 28px rgba(15,23,42,0.16)"}}>
+          <button onClick={undo} disabled={!undoInfo.u} title="ย้อนกลับ (Ctrl+Z)"
+            style={{display:"flex",alignItems:"center",gap:6,background:undoInfo.u?T.blue:"#e2e8f0",color:undoInfo.u?"#fff":"#94a3b8",
+              border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:undoInfo.u?"pointer":"default"}}>
+            ↩︎ ย้อนกลับ
+          </button>
+          <button onClick={redo} disabled={!undoInfo.r} title="ทำซ้ำ (Ctrl+Shift+Z)"
+            style={{background:undoInfo.r?T.blueLight:"transparent",color:undoInfo.r?T.blue:"#cbd5e1",
+              border:`1px solid ${undoInfo.r?T.blue:T.cardBorder}`,borderRadius:8,padding:"7px 10px",fontSize:13,fontWeight:600,cursor:undoInfo.r?"pointer":"default"}}>
+            ↪︎
+          </button>
+          {undoInfo.label && (
+            <span style={{fontSize:11,color:T.textMuted,maxWidth:170,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",paddingRight:2}}>
+              ล่าสุด: {undoInfo.label}
+            </span>
+          )}
+        </div>
+      )}
+      <ErrorBoundary>
+      {screen === "home" && (
+        <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
+          deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
+          syncedAt={syncedAt} syncing={syncing} session={session} onLogout={handleLogout}
+          onOpenAdmin={() => setScreen("admin")} />
+      )}
+      {screen === "admin" && session.role === "admin" && (
+        <AdminPanel onBack={() => setScreen("home")} onLogout={handleLogout} session={session} />
+      )}
+      {screen === "roleSelect" && session.role === "admin" && (
+        <RoleSelect project={activeProject} updateProject={updateProject}
+          onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
+      )}
+      {screen === "app" && effectiveRole === "qs"          && (
+        <QSView {...sharedProps} onExport={() => runExport(() =>
+          // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
+          Promise.resolve(exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts))
+        )} />
+      )}
+      {screen === "app" && effectiveRole === "procurement" && (
+        <ProcurementView {...sharedProps} onExport={() => runExport(() =>
+          // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
+          Promise.resolve(exportProcurementExcel(activeProject, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts))
+        )} />
+      )}
+      {screen === "app" && effectiveRole === "accounting"  && (
+        <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan))} />
+      )}
+      </ErrorBoundary>
+    </>
+  );
+}
+
+// ─── Login Screen ─────────────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error,    setError]    = useState("");
+  const [busy,     setBusy]     = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!username.trim() || !password) { setError(t("กรอก Username และ Password ให้ครบ","Please enter both Username and Password")); return; }
+    setBusy(true); setError("");
+    try {
+      const user = await verifyLogin(username, password);
+      if (!user) { setError(t("Username หรือ Password ไม่ถูกต้อง หรือบัญชีถูกระงับ","Incorrect Username or Password, or the account is suspended")); setBusy(false); return; }
+      onLogin(user);
+    } catch (err) {
+      setError(t("เกิดข้อผิดพลาด ลองใหม่อีกครั้ง","An error occurred, please try again"));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:T.headerGrad,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <form onSubmit={submit} style={{background:T.card,borderRadius:20,padding:36,width:400,maxWidth:"92vw",boxShadow:"0 24px 60px rgba(0,0,0,0.25)"}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{fontSize:34,marginBottom:8}}>🏗</div>
+          <div style={{fontSize:11,letterSpacing:3,color:T.textMuted,textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
+          <div style={{fontSize:19,fontWeight:700,color:T.textPrimary,marginTop:4}}>{t("เข้าสู่ระบบ","Sign in")}</div>
+          <div style={{fontSize:12,color:T.textMuted,marginTop:4}}>{t("ล็อกอินตามแผนก: QS · จัดซื้อ · บัญชี · Admin","Login by department: QS · Procurement · Accounting · Admin")}</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <label style={{display:"flex",flexDirection:"column",gap:6}}>
+            <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Username</span>
+            <input className="input-base" autoFocus value={username} onChange={e=>setUsername(e.target.value)} placeholder={t("เช่น qs, procurement, accounting, admin","e.g. qs, procurement, accounting, admin")} />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:6}}>
+            <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Password</span>
+            <input className="input-base" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" />
+          </label>
+          {error && <div style={{background:T.redBg,color:T.red,fontSize:12,padding:"9px 12px",borderRadius:8,fontWeight:500}}>{error}</div>}
+          <button className="btn-primary" type="submit" disabled={busy} style={{marginTop:6,opacity:busy?0.7:1}}>
+            {busy ? t("กำลังตรวจสอบ...","Signing in...") : t("เข้าสู่ระบบ","Sign in")}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── User row (admin panel) ────────────────────────────────────────────────
+function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
+  const [resetting, setResetting] = useState(false);
+  const [pw, setPw] = useState("");
+  return (
+    <tr style={{borderBottom:`1px solid #f1f5f9`}}>
+      <td style={{padding:"10px 14px",color:T.textPrimary,fontWeight:600}}>{u.username}{isSelf && <span style={{marginLeft:6,fontSize:10,color:T.textMuted}}>({t("คุณ","you")})</span>}</td>
+      <td style={{padding:"10px 14px",color:T.textSecondary}}>{u.name}</td>
+      <td style={{padding:"10px 14px"}}>
+        <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{ROLE_LABELS[u.role]}</span>
+      </td>
+      <td style={{padding:"10px 14px"}}>
+        <span style={{background:u.active?T.greenBg:T.redBg,color:u.active?T.green:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>
+          {u.active ? t("ใช้งานได้","Active") : t("ระงับแล้ว","Suspended")}
+        </span>
+      </td>
+      <td style={{padding:"10px 14px"}}>
+        {resetting ? (
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <input className="input-base" type="password" autoComplete="new-password" placeholder={t("รหัสผ่านใหม่ (≥ 8 ตัว)","New password (≥ 8 chars)")} value={pw} onChange={e=>setPw(e.target.value)} style={{width:150,padding:"6px 10px"}} />
+            <button className="btn-primary" style={{padding:"6px 12px"}} onClick={()=>{ if(pw.trim().length<8){ alert("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร"); return; } onReset(u.id,pw); setPw(""); setResetting(false); }}>บันทึก</button>
+            <button className="btn-ghost" style={{padding:"6px 10px"}} onClick={()=>{setResetting(false);setPw("");}}>{t("ยกเลิก","Cancel")}</button>
+          </div>
+        ) : (
+          <div style={{display:"flex",gap:8}}>
+            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>{t("รีเซ็ตรหัส","Reset password")}</button>
+            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>onToggle(u.id)}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>
+            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`))) onDelete(u.id);}}>ลบ</button>}
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+// ─── Admin: กู้คืนข้อมูล ─────────────────────────────────────────────────────
+// แสดงประวัติทุกการแก้/ลบจากตาราง kv_history (ต้องรัน kv-history.sql ก่อน)
+// ให้ admin เลือกคีย์ → เลือกเวอร์ชันก่อนหน้า → กดกู้คืนกลับเข้า kv_store
+// การอ่านประวัติและการเขียนคืนถูกจำกัดเฉพาะ admin ด้วย RLS ฝั่ง DB อยู่แล้ว
+function AdminRestoreTab() {
+  const [snaps, setSnaps]     = useState([]);
+  const [projMap, setProjMap] = useState({});
+  const [selKey, setSelKey]   = useState(null);
+  const [dept, setDept]       = useState("all"); // กรองตามแผนก
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy]       = useState(false);
+  const [msg, setMsg]         = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [s, projs] = await Promise.all([loadKvSnapshots(), sg("tcs-projects")]);
+    const map = {}; (projs || []).forEach(p => { map[p.id] = p.name; });
+    setProjMap(map); setSnaps(s); setLoading(false);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const keyLabel = (key) => {
+    if (key === "tcs-projects") return t("📁 รายชื่อโครงการ","📁 Project list");
+    const m = key.match(/^tcs-(tenders|po|additions|extra|hidden|inplan)-(.+)$/);
+    if (m) {
+      const kt = { tenders:"Tender Cost", po:t("PO / จัดซื้อ","PO / Procurement"), additions:t("ยอดเพิ่มรายเดือน","Monthly additions"), extra:t("รายการเพิ่ม","Extra items"), hidden:t("หมวดที่ซ่อน","Hidden categories"), inplan:t("แผนของเข้า","Incoming plan") }[m[1]] || m[1];
+      return `${kt} — ${projMap[m[2]] || m[2]}`;
+    }
+    if (key === "tcs-users") return t("ผู้ใช้ (คีย์เก่า)","Users (legacy key)");
+    if (key === "tcs-logs")  return t("Log (คีย์เก่า)","Log (legacy key)");
+    return key;
+  };
+  const preview = (v) => {
+    if (v == null) return t("(ว่าง)","(empty)");
+    const s = String(v);
+    return s.length > 90 ? s.slice(0, 90) + "…" : s;
+  };
+  const snapLabel = (r) => `${new Date(r.taken_at).toLocaleDateString("th-TH",{day:"numeric",month:"short"})} · ${r.slot}`;
+
+  // จับคู่คีย์ข้อมูล → แผนกเจ้าของ
+  const deptOf = (key) => {
+    if (/^tcs-(tenders|additions|extra|hidden|columns)-/.test(key)) return "qs";
+    if (/^tcs-(po|inplan)-/.test(key)) return "procurement";
+    return "central"; // tcs-projects, tcs-users, tcs-logs, อื่น ๆ
+  };
+  const DEPTS = [["all",t("ทั้งหมด","All")],["qs","QS"],["procurement",t("จัดซื้อ","Procurement")],["central",t("ส่วนกลาง","Central")]];
+  const deptTag = { qs:{label:"QS",color:T.blue,bg:T.blueLight}, procurement:{label:t("จัดซื้อ","Procurement"),color:T.amber,bg:T.amberBg}, central:{label:t("ส่วนกลาง","Central"),color:T.purple,bg:T.purpleBg} };
+
+  // นับจำนวนไฟล์ข้อมูล (คีย์) ต่อแผนก — ใช้โชว์บนแท็บ
+  const allKeys = [...new Set(snaps.map(s => s.key))];
+  const deptCount = { all: allKeys.length, qs:0, procurement:0, central:0 };
+  allKeys.forEach(k => { deptCount[deptOf(k)] = (deptCount[deptOf(k)]||0) + 1; });
+
+  // สแนปช็อตเฉพาะแผนกที่เลือก แล้วรวมเป็น "รอบ" (วันเดียวกัน + รอบเวลาเดียวกัน = 1 รอบ)
+  // แต่ละรอบเก็บเวอร์ชันล่าสุดของแต่ละคีย์ในรอบนั้น เพื่อกู้คืนทั้งชุดในคลิกเดียว
+  const deptSnaps = snaps.filter(s => dept === "all" || deptOf(s.key) === dept);
+  const roundMap = {};
+  deptSnaps.forEach(r => {
+    const rk = `${new Date(r.taken_at).toDateString()}|${r.slot}`;
+    const g = roundMap[rk] || (roundMap[rk] = { rk, slot:r.slot, taken_at:r.taken_at, byKey:{} });
+    const ex = g.byKey[r.key];
+    if (!ex || r.taken_at > ex.taken_at) g.byKey[r.key] = r;
+    if (r.taken_at > g.taken_at) g.taken_at = r.taken_at;
+  });
+  const rounds = Object.values(roundMap).sort((a,b) => b.taken_at.localeCompare(a.taken_at));
+  const roundDateLabel = (r) => new Date(r.taken_at).toLocaleDateString("th-TH",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+  const deptLabelOf = (id) => (DEPTS.find(([d])=>d===id)||[])[1] || t("ข้อมูล","Data");
+
+  // กู้คืนทั้งชุดของแผนกที่เลือก กลับไปยังรอบเวลาที่กด — ย้อนทุกไฟล์พร้อมกัน
+  const doRestoreRound = async (round) => {
+    const rows = Object.values(round.byKey);
+    const dl = deptLabelOf(dept);
+    if (!window.confirm(t(`กู้คืน "${dl}" ทั้งชุด (${rows.length} รายการ)\nกลับเป็นสแนปช็อต ${roundDateLabel(round)} · ${round.slot}?\n\nข้อมูลปัจจุบันของทุกไฟล์ในชุดนี้จะถูกแทนที่ด้วยข้อมูลจากรอบที่เลือก`,`Restore the whole "${dl}" set (${rows.length} items)\nback to snapshot ${roundDateLabel(round)} · ${round.slot}?\n\nCurrent data for every file in this set will be replaced with the selected round`))) return;
+    setBusy(true); setMsg("");
+    let ok = 0, fail = 0;
+    for (const row of rows) {
+      try { await restoreKvSnapshot(row); ok++; }
+      catch (e) { fail++; }
+    }
+    setMsg(fail === 0
+      ? t(`✅ กู้คืน ${dl} สำเร็จ ${ok} รายการ — กลับไปหน้าหลักเพื่อดูข้อมูลที่กู้คืน`,`✅ Restored ${dl}: ${ok} items — go back to the main page to see restored data`)
+      : t(`⚠️ กู้คืนสำเร็จ ${ok} รายการ · ไม่สำเร็จ ${fail} รายการ`,`⚠️ Restored ${ok} items · failed ${fail} items`));
+    await load();
+    setBusy(false);
+  };
+
+  if (loading) return <div style={{color:T.textMuted,fontSize:13}}>{t("กำลังโหลดสแนปช็อต...","Loading snapshots...")}</div>;
+
+  if (!snaps.length) return (
+    <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textSecondary,lineHeight:1.7}}>
+      {t("ยังไม่มีสแนปช็อต","No snapshots yet")}<br/>
+      <span style={{color:T.textMuted}}>{t("ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์","Auto snapshots run twice a day (12:00 and 18:00) after running")} <b>kv-snapshots.sql</b> ใน Supabase</span>
+    </div>
+  );
+
+  return (
+    <div>
+      {msg && (
+        <div style={{marginBottom:14,padding:"10px 14px",borderRadius:10,fontSize:13,fontWeight:600,
+          background:msg.startsWith("✅")?T.greenBg:msg.startsWith("⚠️")?T.amberBg:T.redBg,
+          color:msg.startsWith("✅")?T.green:msg.startsWith("⚠️")?T.amber:T.red}}>{msg}</div>
+      )}
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>
+        {t('สแนปช็อตอัตโนมัติวันละ 2 รอบ — 12:00 และ 18:00 · เลือกแผนก แล้วกด "กู้คืนทั้งชุด" กลับไปยังรอบเวลาที่ต้องการ — ทุกไฟล์ของแผนกนั้นจะย้อนกลับพร้อมกัน','Auto snapshots twice a day — 12:00 and 18:00 · pick a department and press "Restore set" to roll back to a chosen round — all its files roll back together')}
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+        {DEPTS.map(([id,label])=>{
+          const active = dept===id;
+          return (
+            <button key={id} onClick={()=>setDept(id)}
+              style={{padding:"7px 16px",borderRadius:999,border:`1.5px solid ${active?T.blue:T.cardBorder}`,cursor:"pointer",fontSize:12,fontWeight:600,
+                background:active?T.blue:T.card,color:active?"#fff":T.textSecondary}}>
+              {label} <span style={{opacity:0.7,fontWeight:500}}>({deptCount[id]||0})</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {!rounds.length ? (
+        <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textMuted}}>
+          {t("แผนก","Department")} "{deptLabelOf(dept)}" {t("ยังไม่มีสแนปช็อตให้กู้คืน","has no snapshots to restore")}
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{fontSize:12,fontWeight:650,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>
+            {t("รอบสแนปช็อตของ","Snapshot rounds of")} {deptLabelOf(dept)} ({rounds.length} {t("รอบ","rounds")})
+          </div>
+          {rounds.map(round => {
+            const rows = Object.values(round.byKey);
+            return (
+              <div key={round.rk} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                  <span style={{flexShrink:0,fontSize:11,fontWeight:650,padding:"3px 11px",borderRadius:8,background:T.blueLight,color:T.blue}}>{round.slot}</span>
+                  <div style={{fontSize:14,fontWeight:650,color:T.textPrimary}}>{roundDateLabel(round)}</div>
+                  <span style={{fontSize:12,color:T.textMuted}}>· {rows.length} {t("ไฟล์ในชุดนี้","files in this set")}</span>
+                  <div style={{flex:1,minWidth:12}}/>
+                  <button onClick={()=>doRestoreRound(round)} disabled={busy}
+                    className="btn-primary" style={{flexShrink:0,padding:"8px 18px",fontSize:13,opacity:busy?0.5:1,cursor:busy?"default":"pointer"}}>
+                    ↩︎ {t("กู้คืนทั้งชุด","Restore set")} ({rows.length})
+                  </button>
+                </div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:12}}>
+                  {rows.map(r => {
+                    const dt = deptTag[deptOf(r.key)];
+                    return (
+                      <span key={r.id} style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px",borderRadius:7,background:T.bg,border:`1px solid ${T.cardBorder}`,color:T.textSecondary,maxWidth:260}}>
+                        <span style={{flexShrink:0,fontSize:9,fontWeight:650,padding:"0 5px",borderRadius:4,background:dt.bg,color:dt.color}}>{dt.label}</span>
+                        <span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{keyLabel(r.key)}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Admin: จัดการรหัสบัญชี (แก้รหัส+ชื่อ, ห้ามซ้ำ, ย้ายข้อมูลให้) ─────────────
+function AdminAccountsTab() {
+  const [rows, setRows] = useState(() => ACCOUNTS.map(a => ({ rid: uid(), code: a.code, name: a.name, group: a.group, orig: a.code })));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg]   = useState("");
+  const groupOptions = [...new Set([...GROUPS, ...rows.map(r => r.group).filter(Boolean), "Other"])];
+  const setCell = (rid, k, v) => setRows(rs => rs.map(r => r.rid === rid ? { ...r, [k]: v } : r));
+  const addRow  = () => setRows(rs => [...rs, { rid: uid(), code: "", name: "", group: "Other", orig: "" }]);
+  const delRow  = (rid) => setRows(rs => rs.filter(r => r.rid !== rid));
+  const dupCodes = (() => { const seen = {}, dup = new Set(); rows.forEach(r => { const c = (r.code || "").trim(); if (!c) return; if (seen[c]) dup.add(c); seen[c] = 1; }); return dup; })();
+
+  const save = async () => {
+    const clean = rows.map(r => ({ ...r, code: (r.code || "").trim(), name: (r.name || "").trim(), group: (r.group || "Other").trim() }));
+    if (clean.some(r => !r.code)) { setMsg(t("⚠ มีรหัสว่าง — กรอกรหัสให้ครบ","⚠ Some codes are empty — fill them in")); return; }
+    if (clean.some(r => !r.name)) { setMsg(t("⚠ มีชื่อว่าง — กรอกชื่อให้ครบ","⚠ Some names are empty — fill them in")); return; }
+    const codes = clean.map(r => r.code);
+    if (new Set(codes).size !== codes.length) { setMsg("⚠ มีรหัสซ้ำกัน — Acc code ห้ามซ้ำ"); return; }
+    const renameMap = {}; clean.forEach(r => { if (r.orig && r.orig !== r.code) renameMap[r.orig] = r.code; });
+    const nRen = Object.keys(renameMap).length;
+    if (!window.confirm((t(`บันทึกรายการบัญชี ${clean.length} รายการ?`,`Save ${clean.length} account codes?`)) + (nRen ? t(`\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ`,`\n\n${nRen} codes changed — existing data (Tender Cost / PO / monthly / plan) for all projects will be migrated automatically`) : "") + t(`\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`,`\n\nThe page will refresh when done`))) return;
+    setBusy(true); setMsg(t("กำลังบันทึก…","Saving…"));
+    try {
+      if (nRen) { setMsg(t("กำลังย้ายข้อมูลข้ามทุกโครงการ…","Migrating data across all projects…")); await migrateAccountCodes(renameMap); }
+      const list = clean.map(r => ({ code: r.code, name: r.name, group: r.group }));
+      await ss("tcs-accounts", list);
+      applyAccountList(list);
+      setMsg(t("✓ บันทึกเรียบร้อย กำลังรีเฟรช…","✓ Saved, refreshing…"));
+      setTimeout(() => { if (typeof window !== "undefined") window.location.reload(); }, 700);
+    } catch (e) { console.warn("save accounts failed", e); setBusy(false); setMsg(t("บันทึกไม่สำเร็จ: ","Save failed: ") + (e.message || t("ลองใหม่อีกครั้ง","try again"))); }
+  };
+
+  const inp = { padding: "6px 8px", fontSize:12, border: `1px solid ${T.cardBorder}`, borderRadius: 8, width: "100%", fontFamily: "inherit" };
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${T.cardBorder}`, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.textPrimary }}>{t("รหัสบัญชีทั้งหมด","All account codes")} ({rows.length})</div>
+          <div style={{ fontSize:11, color: T.textMuted, marginTop: 2 }}>{t("แก้รหัส/ชื่อได้ · รหัสห้ามซ้ำ · เปลี่ยนรหัสแล้วระบบย้ายข้อมูลเดิมให้ทุกโครงการ · ใช้ร่วมกันทุกโครงการ","Edit code/name · codes must be unique · changing a code migrates existing data across projects · shared by all projects")}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={addRow} className="btn-ghost">+ {t("เพิ่มรหัส","Add code")}</button>
+          <button onClick={save} disabled={busy || dupCodes.size > 0} className="btn-primary" style={{ background: dupCodes.size ? T.textMuted : T.blue }}>{busy ? t("⏳ กำลังบันทึก…","⏳ Saving…") : t("💾 บันทึก","💾 Save")}</button>
+        </div>
+      </div>
+      {msg && <div style={{ padding: "10px 18px", fontSize:12, fontWeight: 600, color: msg.startsWith("✓") ? T.green : (msg.startsWith("⚠") || msg.startsWith("บันทึกไม่") || msg.startsWith("Save failed")) ? T.red : T.textSecondary, background: "#f8fafc" }}>{msg}</div>}
+      <div style={{ maxHeight: "58vh", overflow: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize:12 }}>
+          <thead>
+            <tr>
+              {[["Acc. Code","Acc. Code"], ["ชื่อ / คำอธิบาย","Name / description"], ["กลุ่ม","Group"], ["",""]].map(([h,he], i) => (
+                <th key={h + i} style={{ position: "sticky", top: 0, background: "#f1f5f9", textAlign: "left", padding: "9px 12px", fontSize: 11, color: T.textMuted, fontWeight: 650, borderBottom: `1px solid ${T.cardBorder}`, width: h === "" ? 40 : (h === "Acc. Code" ? 130 : (h === "กลุ่ม" ? 160 : "auto")) }}>{t(h,he)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => {
+              const isDup = dupCodes.has((r.code || "").trim());
+              return (
+                <tr key={r.rid} style={{ borderBottom: `1px solid ${T.cardBorder}` }}>
+                  <td style={{ padding: "5px 10px" }}>
+                    <input value={r.code} onChange={e => setCell(r.rid, "code", e.target.value)} style={{ ...inp, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, borderColor: isDup ? T.red : T.cardBorder, background: isDup ? T.redBg : "#fff" }} />
+                    {r.orig && r.orig !== (r.code || "").trim() && <div style={{ fontSize: 10, color: T.amber, marginTop: 2 }}>{t("เดิม","was")} {r.orig}</div>}
+                  </td>
+                  <td style={{ padding: "5px 10px" }}><input value={r.name} onChange={e => setCell(r.rid, "name", e.target.value)} style={inp} /></td>
+                  <td style={{ padding: "5px 10px" }}>
+                    <input list="acc-groups" value={r.group} onChange={e => setCell(r.rid, "group", e.target.value)} style={inp} />
+                  </td>
+                  <td style={{ padding: "5px 10px", textAlign: "center" }}>
+                    <button onClick={() => delRow(r.rid)} title={t("ลบรหัสนี้","Delete this code")} style={{ background: "none", border: "none", color: T.red, cursor: "pointer", fontSize: 14 }}>🗑</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <datalist id="acc-groups">{groupOptions.map(g => <option key={g} value={g} />)}</datalist>
+      </div>
+      {dupCodes.size > 0 && <div style={{ padding: "10px 18px", fontSize: 12, color: T.red, fontWeight: 600 }}>⚠ {t("มีรหัสซ้ำ","Duplicate codes")}: {[...dupCodes].join(", ")} — {t("แก้ให้ไม่ซ้ำก่อนบันทึก","make them unique before saving")}</div>}
+    </div>
+  );
+}
+
+// ─── Admin Panel ────────────────────────────────────────────────────────────
+function AdminPanel({ onBack, onLogout, session }) {
+  const [tab,   setTab]   = useState("users");
+  const [users, setUsers] = useState([]);
+  const [logs,  setLogs]  = useState([]);
+  const [loaded, setLoadedU] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [draft, setDraft] = useState({ username:"", name:"", role:"qs", password:"" });
+  const [err, setErr] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      const [u, l] = await Promise.all([loadUsers(), loadLogs()]);
+      setUsers(u); setLogs(l);
+    } catch (e) {
+      // ยังไม่ได้ deploy Edge Function admin-users → แสดงหน้าเปล่าแทนจอขาว
+      console.warn("โหลดผู้ใช้/log ไม่สำเร็จ (ยังไม่ได้ deploy edge function admin-users?)", e);
+    } finally {
+      setLoadedU(true);
+    }
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleReset   = async (id, pw)  => setUsers(await resetPassword(users, id, pw));
+  const handleToggle  = async (id)      => setUsers(await toggleActive(users, id));
+  const handleDelete  = async (id)      => setUsers(await deleteUser(users, id));
+  const handleCreate  = async () => {
+    setErr("");
+    if (!draft.username.trim() || !draft.password) { setErr(t("กรอก Username และ Password","Enter Username and Password")); return; }
+    if (draft.password.trim().length < 8) { setErr(t("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร","Password must be at least 8 characters")); return; }
+    try {
+      const next = await createUser(draft);
+      setUsers(next); setAddOpen(false); setDraft({ username:"", name:"", role:"qs", password:"" });
+    } catch (e) { setErr(e.message || t("สร้างผู้ใช้ไม่สำเร็จ","Failed to create user")); }
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
+        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <div>
+          <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
+          <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>Admin Panel</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:12,color:"rgba(255,255,255,0.8)"}}>👤 {session.name} ({ROLE_LABELS[session.role]})</span>
+          <button onClick={onLogout} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>{t("ออกจากระบบ","Logout")}</button>
+        </div>
+      </div>
+
+      <div style={{padding:"28px 32px"}}>
+        <div style={{display:"flex",gap:8,marginBottom:22}}>
+          {[["users",t("👥 จัดการผู้ใช้","👥 Manage users")],["accounts",t("🏷️ รหัสบัญชี","🏷️ Account codes")],["logs",t("📜 Log การเข้าใช้งาน","📜 Access log")],["restore",t("🕘 กู้คืนข้อมูล","🕘 Restore data")]].map(([id,label])=>(
+            <button key={id} onClick={()=>setTab(id)}
+              style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {!loaded ? (
+          <div style={{color:T.textMuted,fontSize:13}}>{t("กำลังโหลด...","Loading...")}</div>
+        ) : tab === "restore" ? (
+          <AdminRestoreTab />
+        ) : tab === "accounts" ? (
+          <AdminAccountsTab />
+        ) : tab === "users" ? (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`}}>
+              <div style={{fontSize:13,fontWeight:600,color:T.textPrimary}}>{t("ผู้ใช้ทั้งหมด","All users")} ({users.length})</div>
+              <button className="btn-primary" onClick={()=>setAddOpen(v=>!v)}>+ {t("เพิ่มผู้ใช้","Add user")}</button>
+            </div>
+            {addOpen && (
+              <div style={{padding:18,borderBottom:`1px solid ${T.cardBorder}`,background:"#fafbfd"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr auto",gap:10,alignItems:"end"}}>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>Username</span>
+                    <input className="input-base" value={draft.username} onChange={e=>setDraft(d=>({...d,username:e.target.value}))} />
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>{t("ชื่อที่แสดง","Display name")}</span>
+                    <input className="input-base" value={draft.name} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} />
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>{t("แผนก","Department")}</span>
+                    <select className="input-base" value={draft.role} onChange={e=>setDraft(d=>({...d,role:e.target.value}))}>
+                      <option value="qs">QS</option>
+                      <option value="procurement">{t("จัดซื้อ","Procurement")}</option>
+                      <option value="accounting">{t("บัญชี","Accounting")}</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{fontSize:11,color:T.textSecondary}}>Password (≥ 8 {t("ตัว","chars")})</span>
+                    <input className="input-base" type="password" autoComplete="new-password" value={draft.password} onChange={e=>setDraft(d=>({...d,password:e.target.value}))} />
+                  </label>
+                  <button className="btn-primary" onClick={handleCreate}>{t("สร้าง","Create")}</button>
+                </div>
+                {err && <div style={{color:T.red,fontSize:12,marginTop:8,fontWeight:500}}>{err}</div>}
+              </div>
+            )}
+            <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr style={{background:"#f8fafc"}}>
+                  {[["Username","Username"],["ชื่อที่แสดง","Display name"],["แผนก","Department"],["สถานะ","Status"],["",""]].map(([h,he])=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {users.map(u => (
+                  <UserRow key={u.id} u={u} onReset={handleReset} onToggle={handleToggle} onDelete={handleDelete} isSelf={u.id===session.id} />
+                ))}
+              </tbody>
+            </table></div>
+          </div>
+        ) : (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+            <div style={{padding:"16px 18px",borderBottom:`1px solid ${T.cardBorder}`,fontSize:13,fontWeight:600,color:T.textPrimary}}>
+              {t("ประวัติการเข้าใช้งานล่าสุด","Recent access history")} ({logs.length})
+            </div>
+            <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr style={{background:"#f8fafc"}}>
+                  {[["เวลา","Time"],["Username","Username"],["แผนก","Department"],["ผลลัพธ์","Result"]].map(([h,he])=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:T.textMuted,fontWeight:600,fontSize:11,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {logs.length===0 ? (
+                  <tr><td colSpan={4} style={{padding:"30px",textAlign:"center",color:T.textMuted}}>{t("ยังไม่มีข้อมูล","No data")}</td></tr>
+                ) : logs.map(l => (
+                  <tr key={l.id} style={{borderBottom:"1px solid #f1f5f9"}}>
+                    <td style={{padding:"9px 14px",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{new Date(l.time).toLocaleString("th-TH")}</td>
+                    <td style={{padding:"9px 14px",color:T.textPrimary,fontWeight:500}}>{l.username}</td>
+                    <td style={{padding:"9px 14px",color:T.textSecondary}}>{ROLE_LABELS[l.role]||l.role}</td>
+                    <td style={{padding:"9px 14px"}}>
+                      <span style={{background:l.result==="success"?T.greenBg:T.redBg,color:l.result==="success"?T.green:T.red,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>
+                        {l.result==="success"?t("สำเร็จ","Success"):l.result==="inactive"?t("บัญชีถูกระงับ","Suspended"):t("ล้มเหลว","Failed")}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Loader ───────────────────────────────────────────────────────────────────
+function Loader() {
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:T.bg}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{width:40,height:40,border:`3px solid ${T.blueMid}`,borderTopColor:T.blue,borderRadius:"50%",animation:"spin 0.7s linear infinite",margin:"0 auto 14px"}}/>
+        <div style={{fontSize:13,color:T.textSecondary}}>{t("กำลังโหลด...","Loading...")}</div>
+      </div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+// ─── SyncBadge ────────────────────────────────────────────────────────────────
+function SyncBadge({ syncing, syncedAt }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(255,255,255,0.15)",backdropFilter:"blur(8px)",borderRadius:8,padding:"5px 12px",fontSize:11,color:"rgba(255,255,255,0.85)"}}>
+      <span style={{width:6,height:6,borderRadius:"50%",background:syncing?"#fbbf24":"#34d399",display:"inline-block",boxShadow:syncing?"0 0 6px #fbbf24":"0 0 6px #34d399",animation:syncing?"pulse 0.8s ease-in-out infinite":"none"}}/>
+      {syncing ? t("กำลัง sync...","Syncing...") : syncedAt ? `sync ${syncedAt.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}` : ""}
+    </div>
+  );
+}
+
+// ─── Search input with a clear (×) button ──────────────────────────────────
+// Small wrapper around the standard .input-base search box used across QS,
+// Procurement, and Accounting toolbars — shows an × to instantly clear the
+// text once something has been typed, instead of having to select-and-delete.
+function SearchInput({ value, onChange, placeholder, width = 240, big = false }) {
+  // big = เด่นขึ้น (กรอบชัด + เงา) แต่ "ขนาดเท่าเดิม"
+  const bigStyle = big ? {
+    border:`2px solid ${value?T.blue:"#94a3b8"}`, borderRadius:10, background:"#fff",
+    boxShadow:"0 1px 4px rgba(15,23,42,0.07)",
+  } : {};
+  return (
+    <div style={{position:"relative",width}}>
+      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        className="input-base" style={{width:"100%",paddingRight:value?30:13,...bigStyle}}
+        onFocus={big?(e=>{e.currentTarget.style.borderColor=T.blue;e.currentTarget.style.boxShadow="0 0 0 3px rgba(37,99,235,0.15)";}):undefined}
+        onBlur={big?(e=>{e.currentTarget.style.borderColor=value?T.blue:"#94a3b8";e.currentTarget.style.boxShadow="0 1px 4px rgba(15,23,42,0.07)";}):undefined}/>
+      {value && (
+        <button type="button" onClick={()=>onChange("")} title={t("ล้างคำค้นหา","Clear search")}
+          style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",width:20,height:20,border:"none",
+            borderRadius:"50%",background:"transparent",color:T.textMuted,fontSize:15,lineHeight:1,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
+          onMouseEnter={e=>{e.currentTarget.style.background="#e2e8f0";e.currentTarget.style.color=T.textPrimary;}}
+          onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=T.textMuted;}}>
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── Group filter (multi-select dropdown) ─────────────────────────────────────
+// แทนแถวชิปหมวดยาว ๆ ที่รก — เป็นปุ่มเดียวเปิด dropdown ติ๊กเลือกได้หลายหมวด
+// selected = อาเรย์ของหมวดที่เลือก (ว่าง = ทุกหมวด)
+function GroupFilter({ selected, onChange, options = GROUPS, color = T.blue }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const toggle = (g) => onChange(selected.includes(g) ? selected.filter(x => x !== g) : [...selected, g]);
+  const has = selected.length > 0;
+  const label = !has ? t("ทุกหมวด","All groups") : selected.length === 1 ? selected[0] : `${selected.length} ${t("หมวด","groups")}`;
+  const rowStyle = (on) => ({ display:"flex",alignItems:"center",gap:8,width:"100%",textAlign:"left",border:"none",
+    background: on ? T.blueLight : "transparent", color: on ? color : T.textSecondary, cursor:"pointer",
+    padding:"7px 10px", borderRadius:8, fontSize:12, fontWeight: on ? 650 : 500 });
+  return (
+    <div ref={ref} style={{position:"relative",flexShrink:0}}>
+      <button onClick={()=>setOpen(o=>!o)} title={t("กรองตามหมวด (เลือกได้หลายหมวด)","Filter by group (multi-select)")}
+        style={{display:"flex",alignItems:"center",gap:7,padding:"6px 12px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap",
+          border:`1.5px solid ${has?color:T.cardBorder}`, background: has?color:T.card, color: has?"#fff":T.textSecondary}}>
+        🏷 {label}
+        {has && <span style={{fontSize:11,opacity:0.85}}>({selected.length})</span>}
+        <span style={{fontSize:9,opacity:0.8}}>▼</span>
+      </button>
+      {open && (
+        <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:60,background:T.card,border:`1px solid ${T.cardBorder}`,
+          borderRadius:12,boxShadow:"0 10px 32px rgba(15,23,42,0.18)",padding:6,minWidth:210,maxHeight:340,overflowY:"auto"}}>
+          <button onClick={()=>{ onChange([]); }} style={rowStyle(!has)}>
+            <span style={{fontSize:13}}>{!has?"◉":"◯"}</span> {t("ทุกหมวด","All groups")}
+          </button>
+          <div style={{height:1,background:T.cardBorder,margin:"4px 2px"}}/>
+          {options.map(g => {
+            const on = selected.includes(g);
+            return (
+              <button key={g} onClick={()=>toggle(g)} style={rowStyle(on)}>
+                <span style={{fontSize:13}}>{on?"☑":"☐"}</span> {g}
+              </button>
+            );
+          })}
+          {has && (
+            <>
+              <div style={{height:1,background:T.cardBorder,margin:"4px 2px"}}/>
+              <button onClick={()=>onChange([])} style={{...rowStyle(false),color:T.red,justifyContent:"center",fontWeight:600}}>
+                ✕ {t("ล้างตัวเลือก","Clear selection")}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── StatCard ─────────────────────────────────────────────────────────────────
+function StatCard({ label, value, sub, color, icon, accent, thb, rate }) {
+  // ถ้าใส่ยอดบาท (thb) + อัตราแลกเปลี่ยน (rate = บาท/USD) จะโชว์ ≈ $ ควบคู่ให้
+  const usd = (rate && rate > 0 && typeof thb === "number") ? thb / rate : null;
+  // เว้นช่องเล็ก ๆ ระหว่าง ฿ กับตัวเลข กันสัญลักษณ์ ฿ ทับหลักแรก (ฟอนต์ mono บางตัว ฿ ยื่น)
+  const shownValue = (typeof value === "string" && value.startsWith("฿"))
+    ? <><span style={{marginRight:3}}>฿</span>{value.slice(1)}</> : value;
+  return (
+    <div style={{background:T.card,borderRadius:14,padding:"20px 22px",border:`1px solid ${T.cardBorder}`,position:"relative",overflow:"hidden"}}>
+      <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:color,borderRadius:"14px 14px 0 0"}}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+        <div style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{label}</div>
+        {icon && <div style={{width:34,height:34,borderRadius:10,background:accent||T.blueLight,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{icon}</div>}
+      </div>
+      <div style={{fontSize:22,fontWeight:650,color:T.textPrimary,letterSpacing:"-0.5px",fontFamily:"'JetBrains Mono',monospace"}}>{shownValue}</div>
+      {usd != null && <div style={{fontSize:14,color:T.green,fontWeight:650,fontFamily:"'JetBrains Mono',monospace",marginTop:3}}>≈ ${fmt0(usd)}</div>}
+      {sub && <div style={{fontSize:11,color:T.textMuted,marginTop:5}}>{sub}</div>}
+    </div>
+  );
+}
+
+// แสดงบรรทัดเป็นดอลลาร์ ($) ใต้ยอดบาทในตาราง — ขนาดราวครึ่งหนึ่งของบาท, ทศนิยม 2 ตำแหน่ง
+// คืน null ถ้าไม่ได้เปิดใช้อัตราแลกเปลี่ยน
+function usdLine(thb, rate) {
+  if (!rate || rate <= 0 || typeof thb !== "number" || !isFinite(thb)) return null;
+  return <div className="usd-sub" style={{fontSize:11,color:T.green,fontWeight:600,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.2,marginTop:2}}>≈ ${fmt(thb/rate)}</div>;
+}
+
+// อัตราแลกเปลี่ยนของโปรเจกต์ที่ควรใช้แสดงผล (0 = ปิด/ไม่แสดง $)
+function effRate(project) {
+  return (project?.showUsd !== false) ? (parseFloat(project?.usdRate) || 0) : 0;
+}
+
+// ตัวควบคุมค่าเงิน: สลับเปิด-ปิดการแสดง $ + แก้ไขอัตราแลกเปลี่ยนได้ (วางข้างปุ่ม Export)
+function CurrencyControl({ project, updateProject }) {
+  const on = project?.showUsd !== false;   // ค่าเริ่มต้น: เปิด
+  const [txt, setTxt] = useState(project?.usdRate ?? "");
+  useEffect(() => { setTxt(project?.usdRate ?? ""); }, [project?.usdRate]);
+  const commitRate = () => {
+    const v = String(txt).trim();
+    if (v !== String(project?.usdRate ?? "")) updateProject({ usdRate: v });
+  };
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",border:`1px solid ${T.cardBorder}`,borderRadius:10,background:T.card}}>
+      <button onClick={()=>updateProject({ showUsd: !on })} title="เปิด/ปิดการแสดงเป็นดอลลาร์ ($)"
+        style={{display:"flex",alignItems:"center",gap:6,border:"none",background:"transparent",cursor:"pointer",padding:0}}>
+        <span style={{width:34,height:18,borderRadius:99,background:on?T.green:"#cbd5e1",position:"relative",transition:"all .15s",display:"inline-block",flexShrink:0}}>
+          <span style={{position:"absolute",top:2,left:on?18:2,width:14,height:14,borderRadius:99,background:"#fff",transition:"all .15s"}}/>
+        </span>
+        <span style={{fontSize:12,fontWeight:650,color:on?T.green:T.textMuted}}>USD</span>
+      </button>
+      <span style={{fontSize:11,color:T.textMuted,whiteSpace:"nowrap"}}>฿/$</span>
+      <input type="number" step="any" min="0" value={txt} placeholder={t("อัตรา","Rate")}
+        onChange={e=>setTxt(e.target.value)} onBlur={commitRate}
+        onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); }}
+        style={{width:64,fontSize:12,padding:"4px 6px",border:`1px solid ${T.cardBorder}`,borderRadius:7,fontFamily:"'JetBrains Mono',monospace",textAlign:"right"}}/>
+    </div>
+  );
+}
+
+// ─── Home Screen ──────────────────────────────────────────────────────────────
+function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
+  const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
+  const [projSearch, setProjSearch] = useState("");
+  const shownProjects = projects.filter(p => {
+    const q = projSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (p.name||"").toLowerCase().includes(q) || (p.client||"").toLowerCase().includes(q);
+  });
+
+  const createProject = () => {
+    if (!draft.name.trim()) return;
+    const id = uid();
+    saveProjects([...projects, { ...draft, id, createdAt: new Date().toISOString() }]);
+    setNewProjModal(false);
+    setDraft({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      {/* Header */}
+      <div style={{background:T.headerGrad,padding:"0 32px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px",flexWrap:"wrap",gap:12}}>
+          <div>
+            <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600,marginBottom:4}}>TENDER COST SYSTEM</div>
+            <div style={{fontSize:22,fontWeight:700,color:"#fff",letterSpacing:"-0.5px"}}>{t("ระบบบริหารต้นทุนโครงการ","Project Cost Management")}</div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · {t("จัดซื้อ · บัญชี","Procurement · Accounting")} — Real-time sync</div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
+            {session?.role === "admin" && (
+              <button className="btn-primary" onClick={onOpenAdmin}
+                style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)"}}>
+                ⚙️ Admin
+              </button>
+            )}
+            {session?.role !== "accounting" && (
+              <button className="btn-primary" onClick={()=>setNewProjModal(true)}
+                style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:16,lineHeight:1}}>+</span> {t("โครงการใหม่","New project")}
+              </button>
+            )}
+            <div style={{width:1,alignSelf:"stretch",background:"rgba(255,255,255,0.2)"}}/>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:12,color:"#fff",fontWeight:600}}>{session?.name}</div>
+              <div style={{fontSize:10,color:"rgba(255,255,255,0.6)"}}>{ROLE_LABELS[session?.role]}</div>
+            </div>
+            <button onClick={onLogout} title={t("ออกจากระบบ","Logout")}
+              style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600}}>
+              {t("ออกจากระบบ","Logout")}
+            </button>
+          </div>
+        </div>
+        {/* Summary row */}
+        <div style={{display:"flex",gap:24,paddingBottom:20}}>
+          {[
+            {label:t("โครงการทั้งหมด","All projects"),value:projects.length,icon:"🏗"},
+            {label:"Active Projects",value:projects.length,icon:"📊"},
+          ].map(s=>(
+            <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.12)",borderRadius:10,padding:"8px 16px"}}>
+              <span style={{fontSize:16}}>{s.icon}</span>
+              <span style={{fontSize:13,color:"rgba(255,255,255,0.85)",fontWeight:600}}>{s.value} {s.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div style={{padding:"28px 32px"}}>
+        {projects.length === 0 ? (
+          <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
+            <div style={{fontSize:52,marginBottom:14}}>🏗</div>
+            <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>{t("ยังไม่มีโครงการ","No projects yet")}</div>
+            <div style={{fontSize:13,marginBottom:20}}>{t('กด "โครงการใหม่" เพื่อเริ่มต้น','Press "New project" to start')}</div>
+            <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ {t("สร้างโครงการแรก","Create first project")}</button>
+          </div>
+        ) : (
+          <>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
+              <input value={projSearch} onChange={e=>setProjSearch(e.target.value)} placeholder={t("🔍 ค้นหาโครงการ / ชื่อลูกค้า…","🔍 Search project / client…")}
+                style={{flex:1,minWidth:220,maxWidth:360,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
+              <span style={{fontSize:12,color:T.textMuted,fontWeight:500}}>
+                {projSearch.trim() ? `${t("พบ","Found")} ${shownProjects.length} ${t("จาก","of")} ${projects.length} ${t("โครงการ","projects")}` : `${projects.length} ${t("โครงการทั้งหมด","projects total")}`}
+              </span>
+            </div>
+            {shownProjects.length === 0 ? (
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบโครงการที่ตรงกับ","No projects match")} "{projSearch}"</div>
+            ) : (
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
+                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={session?.role==="accounting" ? null : ()=>deleteProject(p.id)} />)}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* New Project Modal */}
+      {newProjModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,backdropFilter:"blur(4px)"}}>
+          <div style={{background:T.card,borderRadius:20,padding:32,width:500,maxWidth:"90vw",boxShadow:"0 24px 60px rgba(0,0,0,0.15)",animation:"fadeIn 0.2s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+              <div>
+                <div style={{fontSize:16,fontWeight:650,color:T.textPrimary}}>{t("สร้างโครงการใหม่","Create new project")}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>{t("กรอกข้อมูลโครงการเพื่อเริ่มต้น","Fill in project details to start")}</div>
+              </div>
+              <button onClick={()=>setNewProjModal(false)} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+              {[
+                [t("ชื่อโครงการ *","Project name *"),"name","text","1/-1"],
+                [t("ลูกค้า / Client","Client"),"client","text","1/-1"],
+                [t("พื้นที่รวม (ft²)","Total area (ft²)"),"area","number","auto"],
+                [t("จำนวน Panels","Panels"),"panels","number","auto"],
+                [t("สกุลเงิน","Currency"),"currency","text","auto"],
+                [t("อัตราแลกเปลี่ยน (บาท/USD)","FX rate (THB/USD)"),"usdRate","number","auto"],
+              ].map(([label,key,type,col]) => (
+                <label key={key} style={{display:"flex",flexDirection:"column",gap:6,gridColumn:col}}>
+                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{label}</span>
+                  <input type={type} step={type==="number"?"any":undefined} value={draft[key]} onChange={e=>setDraft(d=>({...d,[key]:e.target.value}))} className="input-base"/>
+                </label>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:10,marginTop:24}}>
+              <button onClick={createProject} disabled={!draft.name.trim()} className="btn-primary" style={{opacity:draft.name.trim()?1:0.5}}>{t("สร้างโครงการ","Create project")}</button>
+              <button onClick={()=>setNewProjModal(false)} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProjectCard({ project, onOpen, onDelete }) {
+  const ageRaw = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
+  const age = Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : null;
+  return (
+    <div className="card-hover" onClick={onOpen} title={t("เปิดโครงการ","Open project")}
+      style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
+      <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:T.headerGrad,borderRadius:"16px 16px 0 0"}}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,paddingTop:2}}>
+        <span style={{fontSize:10,letterSpacing:2,color:T.blue,fontWeight:650,textTransform:"uppercase"}}>PROJECT</span>
+        {onDelete && (
+          <button onClick={e=>{e.stopPropagation();onDelete();}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14,padding:4,borderRadius:6,transition:"color 0.15s"}}
+            onMouseEnter={e=>e.target.style.color="#ef4444"} onMouseLeave={e=>e.target.style.color=T.textMuted}>🗑</button>
+        )}
+      </div>
+      <div style={{fontSize:18,fontWeight:650,color:T.textPrimary,marginBottom:4,lineHeight:1.3}}>{project.name}</div>
+      {project.client && <div style={{fontSize:12,color:T.textSecondary,marginBottom:14}}>{project.client}</div>}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+        {project.area   && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.area} ft²</span>}
+        {project.panels && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.panels} Panels</span>}
+        {project.currency && <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{fontSize:11,color:T.textMuted}}>{age === null ? "—" : age === 0 ? t("สร้างวันนี้","Created today") : `${age} ${t("วันที่แล้ว","days ago")}`}</div>
+        <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>{t("เปิดโครงการ","Open")} →</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Role Select ──────────────────────────────────────────────────────────────
+function RoleSelect({ project, updateProject, onSelect, onBack }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(project);
+  useEffect(() => setDraft(project), [project]);
+
+  const ROLES = [
+    {id:"qs",label:"QS",sub:"Quantity Surveyor",desc:t("ลงราคา Tender Cost\nประมาณการต้นทุนโครงการ","Enter Tender Cost\nestimate project cost"),color:T.blue,bg:T.blueLight,icon:"📐"},
+    {id:"procurement",label:t("จัดซื้อ","Procurement"),sub:"Procurement",desc:t("ลงราคาจริงที่ซื้อ + วันที่\nออก PO และติดตามสถานะ","Enter actual prices + dates\nissue POs and track status"),color:"#d97706",bg:"#fffbeb",icon:"📦"},
+    {id:"accounting",label:t("บัญชี","Accounting"),sub:"Accounting",desc:t("Dashboard ต้นทุน\nBudget vs Actual + Export Excel","Cost dashboard\nBudget vs Actual + Export Excel"),color:T.green,bg:T.greenBg,icon:"📊"},
+  ];
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
+        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <div>
+          <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
+          <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>{project.name}</div>
+        </div>
+        {project.area && (
+          <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+            {[`${project.area} ft²`,`${project.panels} Panels`].map(v=>(
+              <span key={v} style={{background:"rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.9)",fontSize:12,padding:"4px 12px",borderRadius:8,fontWeight:500}}>{v}</span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{padding:"32px"}}>
+        {editing ? (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,marginBottom:28,maxWidth:640}}>
+            <div style={{fontSize:14,fontWeight:600,color:T.textPrimary,marginBottom:16}}>{t("แก้ไขข้อมูลโครงการ","Edit project details")}</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+              {[[t("ชื่อโครงการ","Project name"),"name","text"],[t("ลูกค้า","Client"),"client","text"],[t("สกุลเงิน","Currency"),"currency","text"],[t("อัตราแลกเปลี่ยน (บาท/USD)","FX rate (THB/USD)"),"usdRate","number"],[t("พื้นที่ (ft²)","Area (ft²)"),"area","number"],["Panels","panels","number"]].map(([l,k,t]) => (
+                <label key={k} style={{display:"flex",flexDirection:"column",gap:6}}>
+                  <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{l}</span>
+                  <input type={t} step={t==="number"?"any":undefined} value={draft[k]||""} onChange={e=>setDraft(d=>({...d,[k]:e.target.value}))} className="input-base"/>
+                </label>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:10,marginTop:16}}>
+              <button className="btn-primary" onClick={()=>{updateProject(draft);setEditing(false);}}>บันทึก</button>
+              <button className="btn-ghost" onClick={()=>setEditing(false)}>{t("ยกเลิก","Cancel")}</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={()=>setEditing(true)} className="btn-ghost" style={{marginBottom:24,fontSize:12}}>✏️ {t("แก้ไขข้อมูลโครงการ","Edit project details")}</button>
+        )}
+
+        <div style={{fontSize:13,color:T.textSecondary,marginBottom:20,fontWeight:500}}>{t("เลือก Role การทำงาน","Choose your role")}</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:20,maxWidth:800}}>
+          {ROLES.map(r => (
+            <button key={r.id} onClick={()=>onSelect(r.id)} className="card-hover"
+              style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:18,padding:"28px 24px",cursor:"pointer",textAlign:"left",display:"flex",flexDirection:"column",gap:12,position:"relative",overflow:"hidden"}}>
+              <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:r.color}}/>
+              <div style={{width:44,height:44,borderRadius:12,background:r.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>{r.icon}</div>
+              <div>
+                <div style={{fontSize:20,fontWeight:650,color:r.color}}>{r.label}</div>
+                <div style={{fontSize:11,color:T.textMuted,marginTop:2,letterSpacing:0.5}}>{r.sub}</div>
+              </div>
+              <p style={{margin:0,fontSize:12,color:T.textSecondary,lineHeight:1.7,whiteSpace:"pre-line"}}>{r.desc}</p>
+              <div style={{display:"flex",alignItems:"center",gap:4,fontSize:12,color:r.color,fontWeight:600,marginTop:4}}>{t("เข้าใช้งาน","Enter")} <span>→</span></div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ปุ่มสลับภาษา ไทย / EN ────────────────────────────────────────────────────
+function LangToggle({ dark = true }) {
+  useLang();
+  const on  = dark ? "#fff" : T.textPrimary;
+  const off = dark ? "rgba(255,255,255,0.55)" : T.textMuted;
+  const bg  = dark ? "rgba(255,255,255,0.15)" : "#fff";
+  const bd  = dark ? "rgba(255,255,255,0.3)"  : T.cardBorder;
+  // ปุ่มสลับภาษาแบบช่องเดียว — โชว์ภาษาที่ใช้อยู่ตอนนี้ (TH หรือ EN) กดแล้วสลับ ตัวหนังสือก็สลับตาม
+  return (
+    <button onClick={toggleLang} title={_LANG==="th"?"เปลี่ยนเป็น English":"Switch to ไทย"}
+      style={{background:bg,border:`1px solid ${bd}`,borderRadius:8,padding:"5px 13px",fontSize:13,fontWeight:800,color:on,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,whiteSpace:"nowrap",minWidth:66,justifyContent:"center"}}>
+      🌐 {_LANG==="en" ? "EN" : "TH"}
+    </button>
+  );
+}
+
+// ─── Shell ────────────────────────────────────────────────────────────────────
+function Shell({ role, color, project, onBack, onHome, onDept, children, syncedAt, syncing, session, onLogout }) {
+  const labels = {qs:"QS · Quantity Surveyor",procurement:t("จัดซื้อ · Procurement","Procurement"),accounting:t("บัญชี · Accounting","Accounting")};
+  const gradients = {
+    qs:          "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)",
+    procurement: "linear-gradient(135deg, #78350f 0%, #d97706 100%)",
+    accounting:  "linear-gradient(135deg, #064e3b 0%, #10b981 100%)",
+  };
+  return (
+    <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
+      <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+        <button onClick={onBack} title={t("กลับหน้าก่อนหน้า","Go back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
+        {onHome && (
+          <button onClick={onHome} title={t("ไปหน้าเลือกโครงการ","Go to projects")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>🏠 {t("หน้าโครงการ","Projects")}</button>
+        )}
+        {onDept && (
+          <button onClick={onDept} title={t("ไปหน้าเลือกแผนก","Go to departments")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>🗂 {t("เลือกแผนก","Departments")}</button>
+        )}
+        <div style={{flex:1,minWidth:140}}>
+          <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
+          <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
+        </div>
+        <LangToggle/>
+        <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
+        {project.area && (
+          <div style={{display:"flex",gap:8}}>
+            {[`${project.area} ft²`,`${project.panels} Panels`].map(v=>(
+              <span key={v} style={{background:"rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.85)",fontSize:11,padding:"3px 10px",borderRadius:6}}>{v}</span>
+            ))}
+          </div>
+        )}
+        {session && (
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:11,color:"rgba(255,255,255,0.8)"}}>👤 {session.name}</span>
+            <button onClick={onLogout} title={t("ออกจากระบบ","Logout")}
+              style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 11px",fontSize:11,fontWeight:600}}>
+              {t("ออกจากระบบ","Logout")}
+            </button>
+          </div>
+        )}
+      </div>
+      <div style={{flex:1,overflow:"auto"}}>{children}</div>
+    </div>
+  );
+}
+
+// ─── QS View ─────────────────────────────────────────────────────────────────
+function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
+  const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
+  const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
+  const goTab   = (id) => { if (id !== tab) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setTabHist(h => [...h, tab]); setTab(id); } };
+  const backTab = () => { if (tabHist.length) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); } else onBack(); };
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  // ปุ่ม "Export เดือนนี้" ของแท็บรายเดือน ถูกยกขึ้นมาไว้ข้างปุ่ม Export หลักด้านบน
+  const monthlyExportRef = useRef(null);
+  const registerMonthExport = useCallback(fn => { monthlyExportRef.current = fn; }, []);
+
+  // Shared "add / remove line item" logic — used by both Baseline and Monthly tabs,
+  // and kept in sync with tenderCosts + every month's additions on delete.
+  // Two kinds of extra item:
+  //  - standalone (has `group`): a brand-new scope item with its own Acc-like code
+  //  - sub-item   (has `parentCode`): a breakdown line that rolls up INTO an existing Acc. Code
+  // Sub-items are shared across the Baseline and Monthly tabs — one added in
+  // either place shows up in both, and in every month going forward.
+  // `addedInMonth` (set only when created from the Monthly tab) records which
+  // month it first appeared in, so the UI can show "เพิ่มเมื่อ ..." vs.
+  // "ตั้งแต่เริ่มต้น" for ones that were already in the Baseline.
+  const handleAddExtraItem = ({ name, group, parentCode, code, addedInMonth }) => {
+    if (!name.trim()) return;
+    const item = parentCode
+      ? { code:`EX-${uid()}`, name:name.trim(), parentCode, ...(addedInMonth ? { addedInMonth } : {}) }
+      : { code: code || `EX-${uid()}`, name:name.trim(), group };
+    saveExtraItems([...extraItems, item]);
+    return item.code;
+  };
+
+  const handleDeleteExtraItem = (code) => {
+    if (!confirm(t("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย","Delete this item? All its amounts (baseline + every month) will be deleted too"))) return;
+    saveExtraItems(extraItems.filter(e => e.code !== code));
+    const nextTenders = { ...tenderCosts }; delete nextTenders[code];
+    saveTenders(nextTenders);
+    const nextAdd = {};
+    Object.entries(additions).forEach(([m, obj]) => { const o = {...obj}; delete o[code]; nextAdd[m] = o; });
+    saveAdditions(nextAdd);
+  };
+
+  // Hide / restore a fixed Acc. Code (511010 ... etc). Hiding doesn't erase its stored
+  // numbers — it's reversible — it just removes it from the QS entry list and from
+  // downstream totals, in case a project doesn't use that code at all.
+  const handleHideAccount = (code) => {
+    if (!confirm(t("นำ Acc. Code นี้ออกจากรายการหลัก? (กู้คืนได้ภายหลัง ตัวเลขที่เคยกรอกไว้จะยังไม่หาย)","Remove this Acc. Code from the main list? (restorable later; entered numbers are kept)"))) return;
+    saveHiddenAccounts([...hiddenAccounts, code]);
+  };
+  const handleRestoreAccount = (code) => saveHiddenAccounts(hiddenAccounts.filter(c => c !== code));
+
+  return (
+    <Shell role="qs" color={T.blue} project={project} onBack={backTab} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+      <div style={{padding:"20px 28px 0"}}>
+        <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
+          {[["baseline",t("📐 ราคาเดิม (Baseline)","📐 Baseline")],["monthly",t("📅 รายการเพิ่มรายเดือน","📅 Monthly additions")]].map(([id,label])=>(
+            <button key={id} onClick={()=>goTab(id)}
+              style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+              {label}
+            </button>
+          ))}
+          <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+          {tab==="monthly" && (
+            <button onClick={()=>monthlyExportRef.current && monthlyExportRef.current()} className="btn-ghost"
+              style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
+              ⬇️ {t("Export เดือนนี้","Export this month")}
+            </button>
+          )}
+          <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.blue,color:T.blue}}>
+            ⬇️ Export Excel
+          </button>
+        </div>
+      </div>
+      {tab === "baseline"
+        ? <QSBaselineTab project={project} tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems} additions={additions}
+                         onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
+                         hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
+        : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
+                         extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
+                         hiddenAccounts={hiddenAccounts} setEditMode={setEditMode} project={project} registerMonthExport={registerMonthExport} />}
+    </Shell>
+  );
+}
+
+// ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
+function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, additions = {}, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  const [draft,  setDraft]  = useState({...tenderCosts});
+  const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
+  const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (ราคาเดิม = 0)
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "value" | null
+  const [sortDir, setSortDir] = useState(1);       // 1 = asc, -1 = desc
+  const [saved,  setSaved]  = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addDraft, setAddDraft] = useState({ code:"", name:"", group:GROUPS[0] });
+  const [subFor, setSubFor] = useState(null);       // code of account currently adding a sub-item
+  const [subName, setSubName] = useState("");
+  const [collapsed, setCollapsed] = useState({});   // code -> true means sub-items hidden
+  const [showHidden, setShowHidden] = useState(false);
+  const [forceEdit, setForceEdit] = useState(false); // user explicitly clicked "แก้ไข" to unlock an already-saved baseline
+
+  // The baseline counts as "saved" (and therefore locked, requiring "แก้ไข"
+  // to unlock) once it carries the explicit $saved flag, or — for baselines
+  // saved before this flag existed — once it already has any real value.
+  const hasData = Object.entries(tenderCosts||{}).some(([k,v]) => !k.startsWith("$") && parseFloat(v));
+  const baselineSaved = tenderCosts.$saved === true || hasData;
+  const editingUnlocked = !baselineSaved || forceEdit;
+  useEffect(() => { setEditMode?.(editingUnlocked); return () => setEditMode?.(false); }, [editingUnlocked, setEditMode]);
+
+  // ซิงก์ draft จากค่าที่บันทึกไว้ — แต่ "ห้าม" เขียนทับสิ่งที่กำลังพิมพ์ค้างระหว่างแก้ไข
+  // (เช่น realtime refetch ตอนคนอื่นเซฟ PO ในโครงการเดียวกัน) ยกเว้นตอนสลับโครงการ รีเซ็ตเสมอ
+  const prevProjRef = useRef(project?.id);
+  useEffect(() => {
+    const switched = prevProjRef.current !== project?.id;
+    prevProjRef.current = project?.id;
+    if (switched || !editingUnlocked) setDraft({ ...tenderCosts });
+  }, [tenderCosts, project?.id, editingUnlocked]);
+
+  // ตั้งธง "แก้ค้างยังไม่บันทึก" เมื่อ draft ต่างจากค่าที่บันทึกไว้ (ระหว่างโหมดแก้ไข)
+  const isDirty = editingUnlocked && JSON.stringify(draft) !== JSON.stringify(tenderCosts);
+  useEffect(() => { UnsavedGuard.dirty = isDirty; return () => { UnsavedGuard.dirty = false; }; }, [isDirty]);
+
+  // ยกเลิกการแก้ไข: ทิ้งค่าที่พิมพ์ค้าง คืนกลับเป็นค่าที่บันทึกไว้ล่าสุด แล้วล็อกกลับ
+  const canCancel = baselineSaved; // มีค่าที่บันทึกไว้ให้ย้อนกลับได้
+  const handleCancel = () => { setDraft({ ...tenderCosts }); setForceEdit(false); setAddOpen(false); setSubFor(null); };
+  useEffect(() => {
+    if (!editingUnlocked) return;
+    const onEsc = (e) => { if (e.key === "Escape" && canCancel) { e.preventDefault(); handleCancel(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [editingUnlocked, canCancel, tenderCosts]);
+
+  // Sub-items (e.g. "Silicone Structure") roll up into an existing Acc. Code (e.g. 511025).
+  // Standalone extras (no parentCode) are brand-new items with their own group, shown as their own row.
+  // Shared with the Monthly tab — a sub-item added on either tab shows up on both.
+  const subItemsByParent = {};
+  extraItems.forEach(e => {
+    if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e);
+  });
+  const standaloneExtras = extraItems.filter(e => !e.parentCode);
+  // Baseline only ever shows sub-items that were created as part of the baseline
+  // itself (no addedInMonth). Ones added later from the Monthly tab live only
+  // there, starting from the month they were added — they don't belong to
+  // "ราคาเดิม (Baseline)" and would be confusing to show here with a 0.00 baseline value.
+  const childrenOf = (code) => (subItemsByParent[code] || []).filter(k => !k.addedInMonth);
+
+  // Effective value of a row: sum of its sub-items if it has any, else its own draft value.
+  const effectiveValue = (row) => {
+    const kids = !row.isExtra ? childrenOf(row.code) : [];
+    if (kids.length) return kids.reduce((s,k)=>s+(parseFloat(draft[k.code])||0),0);
+    return parseFloat(draft[row.code]) || 0;
+  };
+
+  const visibleAccounts = ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code));
+  const hiddenList = ACCOUNTS.filter(a => hiddenAccounts.includes(a.code));
+  const allRows = [...visibleAccounts, ...standaloneExtras.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+
+  const base  = allRows.reduce((s,r)=>s+effectiveValue(r),0);
+  const adj3  = base * 0.03;
+  const total = base + adj3;
+
+  const q = search.toLowerCase();
+  const filtered = allRows.filter(a => {
+    if (filter.length && !filter.includes(a.group)) return false;
+    const selfMatch = a.name.toLowerCase().includes(q) || a.code.includes(search);
+    const childMatch = !a.isExtra && childrenOf(a.code).some(k=>k.name.toLowerCase().includes(q));
+    return selfMatch || childMatch;
+  });
+
+  const handleSort = (key) => {
+    if (sortKey === key) setSortDir(d => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+  const hiddenEmptyCount = hideEmpty ? filtered.length - filtered.filter(a => effectiveValue(a) !== 0).length : 0;
+
+  // ── Monthly additions rolled up per Acc. Code (read-only on the Baseline tab) ──
+  // Additions are entered on the "Monthly additions" tab; the monthly Save rolls a
+  // code's sub-items and per-item columns into its plain `code` key each month, so
+  // the all-time total for a code is just the sum of that key across every month
+  // (skip the "$…" meta keys). Same rule buildCombinedBudget() uses, so
+  // Baseline + Additions here matches the grand total shown elsewhere.
+  const rowAddTotal = (row) => Object.keys(additions).reduce((s,m)=> m.startsWith("$") ? s : s + monthAddValue(additions, m, row.code), 0);
+  const rowGrand    = (row) => effectiveValue(row) + rowAddTotal(row);
+  const addAll      = allRows.reduce((s,r)=> s + rowAddTotal(r), 0);   // งานเพิ่มรวมทุก Code ทุกเดือน
+
+  const displayRows = (() => {
+    // ซ่อนแถวที่ไม่มีค่า = ราคาเดิม (รวมรายการย่อย) เป็น 0
+    const baseRows = hideEmpty ? filtered.filter(a => effectiveValue(a) !== 0) : filtered;
+    if (!sortKey) return baseRows;
+    const arr = [...baseRows];
+    arr.sort((a, b) => {
+      let av, bv;
+      if (sortKey === "code")       { av = a.code; bv = b.code; }
+      else if (sortKey === "group") { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
+      else if (sortKey === "name")  { av = a.name; bv = b.name; }
+      else if (sortKey === "add")   { av = rowAddTotal(a); bv = rowAddTotal(b); }
+      else if (sortKey === "grand") { av = rowGrand(a); bv = rowGrand(b); }
+      else                          { av = effectiveValue(a); bv = effectiveValue(b); }
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  })();
+
+  const handleSave = () => {
+    const merged = {...draft};
+    ACCOUNTS.forEach(a => {
+      const kids = childrenOf(a.code);
+      if (kids.length) merged[a.code] = kids.reduce((s,k)=>s+(parseFloat(merged[k.code])||0),0);
+    });
+    const clean = {};
+    Object.entries(merged).forEach(([k,v]) => {
+      if (k.startsWith("$")) return; // meta keys ($saved) are re-added explicitly below
+      if(v!==""&&!isNaN(v)&&parseFloat(v)>0) clean[k]=parseFloat(v);
+    });
+    clean.$saved = true;
+    saveTenders(clean);
+    setForceEdit(false); setAddOpen(false); setSubFor(null);
+    setSaved(true); setTimeout(()=>setSaved(false),2000);
+  };
+
+  const handleAddRow = () => {
+    if (!addDraft.name.trim()) return;
+    const code = addDraft.code.trim();
+    if (code) {
+      const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
+      if (taken) { alert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
+    }
+    onAddExtra({ name:addDraft.name, group:addDraft.group, code: code || undefined });
+    setAddDraft({ code:"", name:"", group:GROUPS[0] }); setAddOpen(false);
+  };
+
+  const handleAddSub = (parentCode) => {
+    if (!subName.trim()) return;
+    onAddExtra({ name:subName, parentCode });
+    setCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
+    setSubName(""); setSubFor(null);
+  };
+
+  const handleDeleteRow = (code) => {
+    onDeleteExtra(code);
+    setDraft(d => { const n = {...d}; delete n[code]; return n; });
+  };
+
+  return (
+    <div style={{padding:"4px 28px 24px"}}>
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
+        <StatCard label={t("ราคาเดิมรวม (Tender Cost)","Total Tender Cost")} value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub={t("ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง","All baseline prices — used as the real budget")} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label={t("เผื่อเศษ/สูญเสีย 3%","Wastage allowance 3%")} value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub={t("ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)","Reference only (not in budget)")} color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label={t("งานเพิ่ม (รวมทุกเดือน)","Additions (all months)")} value={"฿"+fmt0(addAll)} thb={addAll} rate={usdRate} sub={t("รวมยอดที่เพิ่มจากแท็บรายเดือน","Total added from the Monthly tab")} color={T.purple} icon="➕" accent={T.purpleBg}/>
+        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(base+addAll)} thb={base+addAll} rate={usdRate} sub={t("ราคาเดิม + งานเพิ่ม (งบจริง)","Baseline + additions (actual budget)")} color={T.green} icon="✅" accent={T.greenBg}/>
+      </div>
+
+      {/* Filters + Add row + Save */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account Code / ชื่อ...","🔍 Search Account Code / name...")} width={240}/>
+        <button onClick={()=>setHideEmpty(v=>!v)}
+          title={t("ซ่อน/แสดงแถวที่ไม่มีค่า (ราคาเดิม = 0)","Hide/show empty rows (baseline = 0)")}
+          style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",
+            border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
+          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : `⚡ ${t("เฉพาะที่มีค่า","With value only")}`}
+        </button>
+        <GroupFilter selected={filter} onChange={setFilter}/>
+        <div style={{flex:1}}/>
+        {hiddenList.length > 0 && (
+          <button className="btn-ghost" onClick={()=>setShowHidden(v=>!v)} style={{color:T.textMuted}}>
+            🗂 {t("ที่ซ่อนไว้","Hidden")} ({hiddenList.length})
+          </button>
+        )}
+        <button className="btn-ghost" onClick={()=>setAddOpen(v=>!v)} disabled={!editingUnlocked}
+          style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ {t("เพิ่มรายการหลักใหม่","Add new main item")}</button>
+        {!editingUnlocked && (
+          <span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.textMuted,background:"#f1f5f9",padding:"6px 12px",borderRadius:8,fontWeight:600}}>
+            🔒 {t("บันทึกแล้ว","Saved")}
+          </span>
+        )}
+        {editingUnlocked ? (
+          <>
+            <button onClick={handleSave} className="btn-primary"
+              style={{background:saved?T.green:T.blue,minWidth:140}}>
+              {saved?t("✓ บันทึกแล้ว","✓ Saved"):t("บันทึก Tender Cost","Save Tender Cost")}
+            </button>
+            {canCancel && (
+              <button onClick={handleCancel} className="btn-ghost" title={t("ยกเลิกการแก้ไข (Esc)","Cancel editing (Esc)")}
+                style={{color:T.red,borderColor:T.red}}>✕ {t("ยกเลิก","Cancel")}</button>
+            )}
+          </>
+        ) : (
+          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:140}}>
+            ✏️ {t("แก้ไข Tender Cost","Edit Tender Cost")}
+          </button>
+        )}
+      </div>
+
+      {/* Hidden accounts panel */}
+      {showHidden && hiddenList.length > 0 && (
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:14,marginBottom:16}}>
+          <div style={{fontSize:11,color:T.textSecondary,marginBottom:8}}>{t('Acc. Code ที่ซ่อนไว้ — ตัวเลขที่เคยกรอกยังอยู่ กด "กู้คืน" เพื่อนำกลับมาแสดง','Hidden Acc. Codes — entered values are kept; click "Restore" to bring them back')}</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {hiddenList.map(a=>(
+              <div key={a.code} style={{display:"flex",alignItems:"center",gap:8,background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"6px 10px"}}>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:T.textMuted}}>{a.code}</span>
+                <span style={{fontSize:12,color:T.textPrimary}}>{a.name}</span>
+                <button onClick={()=>onRestoreAccount(a.code)} className="btn-ghost" style={{padding:"3px 9px",fontSize:11}}>↺ {t("กู้คืน","Restore")}</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Inline "add standalone row" form */}
+      {addOpen && (
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:10,alignItems:"end"}}>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>{t("Acc. Code (ถ้ามี)","Acc. Code (if any)")}</span>
+            <input className="input-base" value={addDraft.code} onChange={e=>setAddDraft(d=>({...d,code:e.target.value}))}
+              placeholder={t("เช่น 511099","e.g. 511099")} style={{fontFamily:"'JetBrains Mono',monospace"}}
+              onKeyDown={e=>e.key==="Enter"&&handleAddRow()} />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>{t("ชื่อรายการใหม่ (งานที่ไม่มี Acc. Code เดิมรองรับ)","New item name (work without an existing Acc. Code)")}</span>
+            <input className="input-base" value={addDraft.name} onChange={e=>setAddDraft(d=>({...d,name:e.target.value}))}
+              placeholder={t("พิมพ์ชื่อรายการที่ต้องการเพิ่ม","Type the item name to add")} onKeyDown={e=>e.key==="Enter"&&handleAddRow()} autoFocus />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>Group</span>
+            <select className="input-base" value={addDraft.group} onChange={e=>setAddDraft(d=>({...d,group:e.target.value}))}>
+              {GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </label>
+          <button className="btn-primary" onClick={handleAddRow}>+ {t("เพิ่ม","Add")}</button>
+        </div>
+      )}
+
+      {/* Table */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+        <div className="hscroll"><table style={{width:"100%",minWidth:980,borderCollapse:"collapse",fontSize:13}}>
+          <thead>
+            <tr style={{background:"#f8fafc"}}>
+              {[
+                {label:"Acc. Code", key:"code", align:"left"},
+                {label:"Group", key:"group", align:"left"},
+                {label:"Account Name", key:"name", align:"left"},
+                {label:t("ราคาเดิม (THB)","Tender Cost (THB)"), key:"value", align:"right"},
+                {label:t("รวมงานเพิ่ม","Total Additions"), key:"add", align:"right"},
+                {label:t("รวมทั้งหมด","Grand total"), key:"grand", align:"right"},
+                {label:"", key:null, align:"center"},
+              ].map(({label,key,align})=>(
+                <th key={label||"__actions"}
+                  style={{padding:"11px 16px",textAlign:align,color:sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                  <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayRows.map((a,i)=>{
+              const kids = !a.isExtra ? childrenOf(a.code) : [];
+              const hasKids = kids.length > 0;
+              const isCollapsed = hasKids && collapsed[a.code];
+              const rowVal = effectiveValue(a);
+              return (
+                <Fragment key={a.code}>
+                  <tr onClick={()=>hasKids && setCollapsed(c=>({...c,[a.code]:!c[a.code]}))}
+                      style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===a.code?"none":"1px solid #f1f5f9",cursor:hasKids?"pointer":"default"}}>
+                    <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:500}}>
+                      {hasKids && (
+                        <span title={isCollapsed?t("ขยายรายการย่อย","Expand sub-items"):t("ย่อรายการย่อย","Collapse sub-items")}
+                          style={{color:T.textMuted,fontSize:12,marginRight:6,verticalAlign:"middle",display:"inline-block"}}>
+                          {isCollapsed?"▸":"▾"}
+                        </span>
+                      )}
+                      {a.isExtra ? (a.code.startsWith("EX-") ? "—" : a.code) : a.code}
+                    </td>
+                    <td style={{padding:"10px 16px"}}>
+                      <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                    </td>
+                    <td style={{padding:"10px 16px",color:T.textPrimary}}>
+                      {a.name}
+                      {a.isExtra && <span style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{t("รายการใหม่","New item")}</span>}
+                      {hasKids && <span style={{marginLeft:7,fontSize:12,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} {t("รายการย่อย","sub-items")}</span>}
+                      {!a.isExtra && editingUnlocked && (
+                        <button onClick={(e)=>{e.stopPropagation(); setSubFor(subFor===a.code?null:a.code); setSubName(""); setCollapsed(c=>({...c,[a.code]:false}));}} title={t("เพิ่มรายการย่อยใต้ Acc. Code นี้","Add a sub-item under this Acc. Code")}
+                          style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:12,padding:"1px 7px"}}>
+                          + {t("รายการย่อย","Sub-item")}
+                        </button>
+                      )}
+                    </td>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      {hasKids ? (
+                        <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.blueLight,borderRadius:8,color:T.blue,fontWeight:650,fontSize:13}}>
+                          {fmt(rowVal)}
+                          {usdLine(rowVal, usdRate)}
+                        </div>
+                      ) : editingUnlocked ? (
+                        <MoneyInput value={draft[a.code]??""} onChange={v=>setDraft(d=>({...d,[a.code]:v}))}
+                          style={{width:160,background:(parseFloat(draft[a.code])||0)>0?T.blueLight:T.bg}}/>
+                      ) : (
+                        <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}{usdLine(rowVal, usdRate)}</div>
+                      )}
+                    </td>
+                    {(() => { const addV = rowAddTotal(a); const grandV = rowVal + addV; return (<>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      <div style={{width:150,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(addV>0?{background:T.amberBg,color:T.amber,fontWeight:650,borderRadius:8}:{color:T.textMuted})}}>{fmt(addV)}{usdLine(addV, usdRate)}</div>
+                    </td>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:700, ...(grandV>0?{background:T.greenBg,color:T.green,borderRadius:8}:{color:T.textMuted})}}>{fmt(grandV)}{usdLine(grandV, usdRate)}</div>
+                    </td>
+                    </>); })()}
+                    <td style={{padding:"8px 16px",textAlign:"center"}}>
+                      {editingUnlocked && (a.isExtra
+                        ? <button onClick={(e)=>{e.stopPropagation(); handleDeleteRow(a.code);}} title={t("ลบรายการนี้","Delete this item")}
+                            style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14}}>✕</button>
+                        : <button onClick={(e)=>{e.stopPropagation(); onHideAccount(a.code);}} title={t("นำ Acc. Code นี้ออกจากรายการหลัก (กู้คืนได้)","Remove this Acc. Code from the main list (restorable)")}
+                            style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14}}>✕</button>)}
+                    </td>
+                  </tr>
+
+                  {/* Sub-items — roll up into the parent Acc. Code's total above */}
+                  {!isCollapsed && kids.map((k,ki)=>(
+                    <tr key={k.code} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(ki===kids.length-1 && subFor!==a.code)?"1px solid #f1f5f9":"none"}}>
+                      <td style={{padding:"6px 16px 6px 30px",color:T.green,fontSize:13}}>↳</td>
+                      <td/>
+                      <td style={{padding:"6px 16px",color:T.green,fontSize:13,fontStyle:"italic"}}>
+                        {k.name}
+                        {k.addedInMonth && (
+                          <span title={t("เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น","Added later, not from the start")} style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 7px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
+                            {t("เพิ่มเมื่อ","Added")} {monthShortLabel(k.addedInMonth)}
+                          </span>
+                        )}
+                      </td>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        {editingUnlocked ? (
+                          <MoneyInput value={draft[k.code]??""} onChange={v=>setDraft(d=>({...d,[k.code]:v}))}
+                            style={{width:160,fontSize:13,background:(parseFloat(draft[k.code])||0)>0?T.greenBg:T.bg}}/>
+                        ) : (
+                          <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}{usdLine(parseFloat(draft[k.code])||0, usdRate)}</div>
+                        )}
+                      </td>
+                      {(() => { const kBase = parseFloat(draft[k.code])||0; const kAdd = rowAddTotal(k); const kGrand = kBase + kAdd; return (<>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <div style={{width:150,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(kAdd>0?{color:T.amber,fontWeight:600}:{color:T.textMuted})}}>{fmt(kAdd)}{usdLine(kAdd, usdRate)}</div>
+                      </td>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:650, ...(kGrand>0?{color:T.green}:{color:T.textMuted})}}>{fmt(kGrand)}{usdLine(kGrand, usdRate)}</div>
+                      </td>
+                      </>); })()}
+                      <td style={{padding:"6px 16px",textAlign:"center"}}>
+                        {editingUnlocked && (
+                          <button onClick={()=>handleDeleteRow(k.code)} title={t("ลบรายการย่อยนี้","Delete this sub-item")}
+                            style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+
+                  {/* Inline "add sub-item" form for this account */}
+                  {subFor===a.code && (
+                    <tr style={{background:T.greenBg,borderBottom:"1px solid #f1f5f9"}}>
+                      <td/><td/>
+                      <td style={{padding:"7px 16px"}} colSpan={1}>
+                        <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
+                          placeholder={t("ชื่อรายการย่อย เช่น Silicone Structure","Sub-item name e.g. Silicone Structure")} style={{width:"100%",fontSize:13}}
+                          onKeyDown={e=>e.key==="Enter"&&handleAddSub(a.code)} autoFocus />
+                      </td>
+                      <td colSpan={4} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                        <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(a.code)}>+ {t("เพิ่ม","Add")}</button>
+                        <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>{t("ยกเลิก","Cancel")}</button>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+              <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{filtered.length} {t("รายการ","items")}</td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+effectiveValue(a),0))}
+                {usdLine(filtered.reduce((s,a)=>s+effectiveValue(a),0), usdRate)}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+rowAddTotal(a),0))}
+                {usdLine(filtered.reduce((s,a)=>s+rowAddTotal(a),0), usdRate)}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+rowGrand(a),0))}
+                {usdLine(filtered.reduce((s,a)=>s+rowGrand(a),0), usdRate)}
+              </td>
+              <td/>
+            </tr>
+          </tfoot>
+        </table></div>
+      </div>
+    </div>
+  );
+}
+
+// ป้ายแกน X ของกราฟแนวโน้ม — เดือนที่เลือกอยู่จะเป็นชิปสีน้ำเงินเด่นชัด
+function MonthAxisTick({ x, y, payload, selectedLabel }) {
+  const sel = payload && payload.value === selectedLabel;
+  if (sel) {
+    const w = Math.max(52, String(payload.value).length * 8 + 20);
+    return (
+      <g transform={`translate(${x},${y})`}>
+        <rect x={-w/2} y={5} width={w} height={22} rx={11} fill={T.blue}/>
+        <text x={0} y={20} textAnchor="middle" fontSize={11} fontWeight={700} fill="#fff">{payload.value}</text>
+      </g>
+    );
+  }
+  return <text x={x} y={y} dy={17} textAnchor="middle" fontSize={11} fill={T.textMuted}>{payload && payload.value}</text>;
+}
+
+// ─── QS Tab 2: Monthly additions (เดิม / เพิ่มเดือนนี้ / รวมสะสม) ─────────────
+// ── ตรึงคอลัมน์ซ้ายของตารางงบ QS (Acc.Code / Group / Account Name / ยอดก่อนหน้า) ──
+//   4 คอลัมน์แรกไม่เลื่อนซ้าย-ขวา · คอลัมน์รายการที่เหลือเลื่อนได้
+const QSF_W = [120, 118, 320, 150];                 // ความกว้างคงที่ 4 คอลัมน์ที่ตรึง
+const QSF_L = [0, 120, 238, 558];                   // left สะสม (0, 120, 120+118, 238+320)
+const QSF_SPAN3 = QSF_W[0] + QSF_W[1] + QSF_W[2];   // = 558 (สำหรับ footer colSpan=3)
+const qsFrz = (i, bg, z = 3) => ({
+  position: "sticky", left: QSF_L[i], width: QSF_W[i], minWidth: QSF_W[i], maxWidth: QSF_W[i],
+  background: bg, zIndex: z, ...(i === 3 ? { boxShadow: "3px 0 5px -2px rgba(15,23,42,0.13)" } : {}),
+});
+const qsFrzSpan3 = (bg, z = 3) => ({
+  position: "sticky", left: 0, width: QSF_SPAN3, minWidth: QSF_SPAN3, maxWidth: QSF_SPAN3, background: bg, zIndex: z,
+  boxShadow: "3px 0 5px -2px rgba(15,23,42,0.13)",
+});
+// แถวรวมด้านล่าง: ตรึงไว้ (sticky bottom) ไม่ต้องเลื่อนลงไปดู
+const QSF_FOOT = { position: "sticky", bottom: 0, zIndex: 5, background: "#eef2f7" };
+function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project, registerMonthExport }) {
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  const thisMonth = new Date().toISOString().slice(0,7);
+  const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
+  const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
+  const [newMonth, setNewMonth] = useState("");
+  const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
+  const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (รวมสะสม = 0)
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState(null);   // "code" | "group" | "name" | "before" | "add" | "cum" | null
+  const [sortDir, setSortDir] = useState(1);
+  const [draftAdd, setDraftAdd] = useState({...(additions[month]||{})});
+  const [saved, setSaved] = useState(false);
+  const [addExtraOpen, setAddExtraOpen] = useState(false);
+  const [extraDraft, setExtraDraft] = useState({ code:"", name:"", group:GROUPS[0] });
+  const [subFor, setSubFor] = useState(null);   // code of row currently adding a sub-item
+  const [subName, setSubName] = useState("");
+  const [rowCollapsed, setRowCollapsed] = useState({}); // code -> true means sub-items hidden
+  const [addColOpen, setAddColOpen] = useState(false);  // "+ เพิ่มรายการ" inline form open?
+  const [newColName, setNewColName] = useState("");
+  const [forceEdit, setForceEdit] = useState(false);    // user explicitly clicked "แก้ไข" to unlock an already-saved month
+
+  useEffect(() => { if (!months.includes(month) && months.length) setMonth(months[months.length-1]); }, [months]); // eslint-disable-line
+  useEffect(() => { setForceEdit(false); setAddColOpen(false); }, [month]); // switching months always re-locks until "แก้ไข" is clicked again
+  // ผูกปุ่ม "Export เดือนนี้" ที่ยกไปไว้บนหัว (QSView) ให้ยิง export ของเดือนที่เลือกอยู่
+  useEffect(() => {
+    if (!registerMonthExport) return;
+    registerMonthExport(() => exportQSMonthExcel(project, tenderCosts, additions, month, extraItems, hiddenAccounts));
+    return () => registerMonthExport(null);
+  }, [registerMonthExport, project, tenderCosts, additions, month, extraItems, hiddenAccounts]);
+
+  // "เพิ่มรายการ" — named sub-columns (e.g. CC#16, CC#17), each holding its own
+  // set of per-Account-Code entries that add up to a row's monthly total.
+  // The column set itself is stored once at the project level ($columns on
+  // the additions object, a sibling of the month keys) so a column created
+  // in any month automatically carries forward into every other month too —
+  // it isn't something you have to re-create month by month. Projects
+  // created before this feature has no $columns and behave exactly as
+  // before: one plain entry field per row.
+  // คอลัมน์ (รายการย่อย) เก็บ "ต่อเดือน" แล้ว → additions[month].$columns
+  // ของเก่าเคยเก็บระดับโปรเจกต์ (additions.$columns) ยัง fallback ให้เดือนที่ยัง
+  // ไม่มีของตัวเอง เพื่อไม่ให้ข้อมูลเดิมหาย พอเดือนไหนถูกบันทึกก็จะได้ชุดคอลัมน์
+  // เป็นของตัวเอง (self-contained)
+  const columnsOf = (m) => additions[m]?.$columns ?? additions.$columns ?? [];
+  const columns = draftAdd.$columns ?? columnsOf(month);
+  const isMultiCol = columns.length > 0;
+
+  // A month counts as "saved" (and therefore locked, requiring "แก้ไข" to
+  // unlock) once it carries the explicit $saved flag, or — for months saved
+  // before this flag existed — once it already has any real entered value.
+  const monthHasData = Object.entries(additions[month]||{}).some(([k,v]) => !k.startsWith("$") && parseFloat(v));
+  const monthSaved = additions[month]?.$saved === true || monthHasData;
+  const editingUnlocked = !monthSaved || forceEdit;
+
+  // ซิงก์ draftAdd จากค่าที่บันทึกไว้ — รีเซ็ตเสมอเมื่อ "สลับเดือน" แต่ "ห้าม" เขียนทับ
+  // สิ่งที่กำลังพิมพ์ค้างระหว่างแก้ไข (เช่น realtime refetch ตอนคนอื่นเซฟในโครงการเดียวกัน)
+  const prevMonthRef = useRef(month);
+  useEffect(() => {
+    const switched = prevMonthRef.current !== month;
+    prevMonthRef.current = month;
+    if (switched || !editingUnlocked) setDraftAdd({ ...(additions[month] || {}) });
+  }, [month, additions, editingUnlocked]);
+
+  // ตั้งธง "แก้ค้างยังไม่บันทึก" เมื่อ draftAdd ต่างจากค่าที่บันทึกไว้ของเดือนนี้
+  const isDirty = editingUnlocked && JSON.stringify(draftAdd) !== JSON.stringify(additions[month] || {});
+  useEffect(() => { UnsavedGuard.dirty = isDirty; return () => { UnsavedGuard.dirty = false; }; }, [isDirty]);
+
+  const [monthEditMode, setMonthEditMode] = useState(false); // โหมดจัดการเดือน (เพิ่ม/ลบเดือน) แยกจากการแก้ค่าในตาราง
+  // เลื่อนแถวชิปเดือนให้เดือนที่เลือกอยู่ในสายตาเสมอ (เช่นตอนคลิกแท่งกราฟ)
+  const activeChipRef = useRef(null);
+  useEffect(() => { activeChipRef.current?.scrollIntoView({ behavior:"smooth", inline:"center", block:"nearest" }); }, [month]);
+  useEffect(() => { setMonthEditMode(false); }, [month]);     // สลับเดือนแล้วปิดโหมดจัดการเดือน
+  useEffect(() => { setEditMode?.(editingUnlocked || monthEditMode); return () => setEditMode?.(false); }, [editingUnlocked, monthEditMode, setEditMode]);
+
+  // ยกเลิกการแก้ไข: ทิ้งค่าที่พิมพ์ค้างของเดือนนี้ คืนเป็นค่าที่บันทึกไว้ แล้วล็อก/ออกจากโหมดจัดการเดือน
+  const canCancel = monthSaved;
+  const handleCancel = () => { setDraftAdd({ ...(additions[month] || {}) }); setForceEdit(false); setMonthEditMode(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false); };
+  useEffect(() => {
+    if (!editingUnlocked && !monthEditMode) return;
+    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); handleCancel(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [editingUnlocked, monthEditMode, month, additions]);
+
+  // All rows = original 70 account codes + standalone extra items.
+  // Sub-items (parentCode set) can be added right here for a monthly
+  // breakdown, or on the Baseline tab for a baseline breakdown — either way
+  // they roll up into their parent row's figures and aren't listed on their own.
+  const allRows = [...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)), ...extraItems.filter(e=>!e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
+
+  const subItemsByParent = {};
+  extraItems.forEach(e => { if (e.parentCode) (subItemsByParent[e.parentCode] = subItemsByParent[e.parentCode] || []).push(e); });
+  const childrenOf = (code) => subItemsByParent[code] || [];
+
+  // A row's monthly figure is: the sum of its sub-items (if it has any) —
+  // else the sum across that month's named columns (if the month uses them) —
+  // else its own plain entered value. Mirrors the Baseline tab's rollup logic.
+  const kidsAsOf = (code, m) => childrenOf(code).filter(k => !k.addedInMonth || k.addedInMonth <= m);
+  const rowMonthValue = (code, m, draft) => {
+    // ── ระหว่างแก้ไข (มี draft): คิดสด ๆ จากค่าที่พิมพ์ = ผลรวมรายการย่อย/คอลัมน์
+    //    (คอลัมน์ที่ถูกลบออกจากร่างจะไม่ถูกนับ เพราะไม่อยู่ใน columns) ──
+    if (draft) {
+      const kids = kidsAsOf(code, m);
+      if (kids.length) return kids.reduce((s,k)=>s+(parseFloat(draft[k.code])||0),0);
+      if (columns.length) return columns.reduce((s,c)=>s+(parseFloat(draft[`${code}:${c.id}`])||0),0);
+      return parseFloat(draft[code])||0;
+    }
+    // ── ข้อมูลที่บันทึกแล้ว: ค่าธรรมดา (code) คือ "ยอดรวมที่ roll-up ไว้แล้ว"
+    //    (handleSave ตั้งค่านี้ = ผลรวมคอลัมน์/รายการย่อยเสมอ) จึงอ่านตัวเดียวพอ
+    //    — ไม่บวกคอลัมน์ซ้ำ (กันนับซ้ำ) และคอลัมน์ที่ลบไปแล้วก็ถูก roll-up ใหม่ไม่รวมมัน ──
+    return parseFloat(additions[m]?.[code]) || 0;
+  };
+
+  const monthTotal = (m) => allRows.reduce((s,r) => s + rowMonthValue(r.code, m), 0);
+
+  // Sum only top-level rows (accounts + standalone extras). Do NOT sum
+  // Object.values(tenderCosts) directly — sub-item codes (EX-xxxx with a
+  // parentCode) also have their own entries in tenderCosts, and their total
+  // is already rolled up into their parent's value, so a wholesale sum
+  // double-counts every account that has sub-items.
+  const baseTotal = allRows.reduce((s,r) => s + (parseFloat(tenderCosts[r.code]) || 0), 0);
+  const thisMonthAdd = allRows.reduce((s,r) => s + rowMonthValue(r.code, month, draftAdd), 0);
+  const cumulativeSoFar = months.filter(m=>m<month).reduce((s,m)=>s+monthTotal(m),0) + thisMonthAdd + baseTotal;
+
+  // "Live" versions that use the currently-edited draft for the selected month
+  // (instead of the last-saved value) so the top summary updates as you type.
+  const monthTotalLive = (m) => m===month ? thisMonthAdd : monthTotal(m);
+  const sortedMonths = months.length ? months : [thisMonth];
+  const cumulativeLive = (uptoMonth) => baseTotal + sortedMonths.filter(m=>m<=uptoMonth).reduce((s,m)=>s+monthTotalLive(m),0);
+  const grandTotal = cumulativeLive(sortedMonths[sortedMonths.length-1]);
+  // Each bar = one stacked column: "previous" (running total up to the
+  // month before) + "added" (that month's increment) in a different color,
+  // so growth is visible within a single bar instead of a smooth area line.
+  const chartData = [
+    { label:t("เริ่มต้น","Start"), cumulative: baseTotal, previous: baseTotal, added: 0 },
+    ...sortedMonths.map(m => {
+      const added = monthTotalLive(m);
+      const cumulative = cumulativeLive(m);
+      return { label: monthShortLabel(m), monthKey: m, cumulative, previous: cumulative - added, added };
+    }),
+  ];
+  const selectedLabel = (chartData.find(e => e.monthKey === month) || {}).label;   // ป้ายเดือนที่กำลังเลือกอยู่บนกราฟ
+
+  // "ราคาเดิม (Baseline)" should reflect the running total as of the month
+  // BEFORE the one currently selected — not the fixed original baseline —
+  // so it moves forward as prior months get their additions saved.
+  const priorMonths      = sortedMonths.filter(m => m < month);
+  const prevMonthLabel   = priorMonths.length ? monthShortLabel(priorMonths[priorMonths.length-1]) : t("เริ่มต้น","Start");
+  const baselineForMonth = baseTotal + priorMonths.reduce((s,m)=>s+monthTotalLive(m),0);
+
+  const filtered = allRows.filter(r => {
+    if (filter.length && !filter.includes(r.group)) return false;
+    const q = search.toLowerCase();
+    const selfMatch = r.name.toLowerCase().includes(q) || r.code.includes(search);
+    const childMatch = kidsAsOf(r.code, month).some(k=>k.name.toLowerCase().includes(q));
+    return selfMatch || childMatch;
+  });
+
+  // Mirrors the per-row figures computed inline in the table body, so header
+  // sorting can order rows by the same "ยอดก่อนหน้า / เพิ่มเดือนนี้ / รวมสะสม" values shown.
+  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+rowMonthValue(r.code, m),0) + (parseFloat(tenderCosts[r.code])||0);
+  const cumOf = (r) => cumBeforeOf(r) + rowMonthValue(r.code, month, draftAdd);
+
+  const handleSort = (key) => {
+    if (sortKey === key) setSortDir(d => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+  const displayRows = (() => {
+    // ซ่อนแถวที่ไม่มีค่า = รวมสะสมของเดือนนี้เป็น 0 (ทั้งยอดยกมาและเพิ่มเดือนนี้ว่าง)
+    const base = hideEmpty ? filtered.filter(r => cumOf(r) !== 0) : filtered;
+    if (!sortKey) return base;
+    const arr = [...base];
+    arr.sort((a, b) => {
+      let av, bv;
+      if (sortKey === "code")        { av = a.code; bv = b.code; }
+      else if (sortKey === "group")  { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
+      else if (sortKey === "name")   { av = a.name; bv = b.name; }
+      else if (sortKey === "before") { av = cumBeforeOf(a); bv = cumBeforeOf(b); }
+      else if (sortKey === "add")    { av = rowMonthValue(a.code, month, draftAdd); bv = rowMonthValue(b.code, month, draftAdd); }
+      else                           { av = cumOf(a); bv = cumOf(b); }
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  })();
+  const hiddenEmptyCount = hideEmpty ? filtered.length - filtered.filter(r => cumOf(r) !== 0).length : 0;
+
+  const handleAddMonth = () => {
+    if (!newMonth) return;
+    if (months.includes(newMonth)) {
+      // ห้ามซ้ำ — ถ้ามีเดือนนี้อยู่แล้ว แค่กระโดดไปที่เดือนนั้นแทนการสร้างซ้ำ
+      alert(t(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`, `${monthShortLabel(newMonth)} already exists`));
+      setMonth(newMonth); setNewMonth("");
+      return;
+    }
+    // ถ้าเดือนล่าสุดมีคอลัมน์อยู่ ให้ถามก่อนว่าจะคัดลอกมาที่เดือนใหม่ไหม
+    const prevMonth = months.length ? months[months.length - 1] : null;
+    const prevCols = prevMonth ? columnsOf(prevMonth) : [];
+    const monthObj = {};
+    if (prevCols.length) {
+      if (window.confirm(t(`คัดลอกคอลัมน์จากเดือน ${monthShortLabel(prevMonth)} มาที่เดือนใหม่ไหม?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = คัดลอกคอลัมน์ (ยอดเริ่มที่ว่าง) · Cancel = เริ่มเดือนใหม่แบบไม่มีคอลัมน์`, `Copy columns from ${monthShortLabel(prevMonth)} into the new month?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = copy columns (values start empty) · Cancel = start the new month with no columns`))) {
+        monthObj.$columns = prevCols.map(c => ({ ...c }));
+      } else {
+        monthObj.$columns = []; // เริ่มใหม่แบบไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
+      }
+    }
+    saveAdditions({ ...additions, [newMonth]: monthObj });
+    setMonth(newMonth); setNewMonth("");
+  };
+
+  // ลบเดือน — เอาข้อมูลที่เพิ่มในเดือนนั้นออกทั้งหมด (คีย์ meta อย่าง $columns
+  // ที่เป็นระดับโปรเจกต์ไม่ถูกแตะ) แล้วถ้าลบเดือนที่กำลังดูอยู่ก็ย้ายไปเดือนอื่น
+  const handleDeleteMonth = (m) => {
+    if (!window.confirm(t(`ลบเดือน ${monthShortLabel(m)} และข้อมูลที่เพิ่มในเดือนนี้ทั้งหมด?\n(ราคาเดิม/Baseline ไม่ได้รับผลกระทบ)`, `Delete ${monthShortLabel(m)} and all additions entered in this month?\n(Baseline is not affected)`))) return;
+    const next = { ...additions };
+    delete next[m];
+    saveAdditions(next);
+    if (month === m) {
+      const remaining = Object.keys(next).filter(k=>!k.startsWith("$")).sort();
+      setMonth(remaining.length ? remaining[remaining.length-1] : thisMonth);
+    }
+  };
+
+  const handleSave = () => {
+    const merged = {...draftAdd};
+    allRows.forEach(r => {
+      const kids = kidsAsOf(r.code, month);
+      if (kids.length) merged[r.code] = kids.reduce((s,k)=>s+(parseFloat(merged[k.code])||0),0);
+      else if (columns.length) merged[r.code] = columns.reduce((s,c)=>s+(parseFloat(merged[`${r.code}:${c.id}`])||0),0);
+    });
+    const clean = {};
+    Object.entries(merged).forEach(([k,v]) => {
+      if (k.startsWith("$")) return; // meta keys ($saved) are re-added explicitly below
+      if(v!==""&&!isNaN(v)&&parseFloat(v)!==0) clean[k]=parseFloat(v);
+    });
+    clean.$saved = true;
+    const ownCols = draftAdd.$columns;
+    if (columns.length) clean.$columns = columns;
+    else if (Array.isArray(ownCols)) clean.$columns = []; // เดือนนี้ตั้งใจไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
+    if (draftAdd.$fmt && Object.keys(draftAdd.$fmt).length) clean.$fmt = draftAdd.$fmt; // เก็บสีไฮไลต์ที่ผู้ใช้ทำไว้
+    saveAdditions({ ...additions, [month]: clean });
+    setForceEdit(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false);
+    setSaved(true); setTimeout(()=>setSaved(false),2000);
+  };
+
+  const handleCreateExtra = () => {
+    if (!extraDraft.name.trim()) return;
+    const code = extraDraft.code.trim();
+    if (code) {
+      const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
+      if (taken) { alert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
+    }
+    onAddExtra({ name:extraDraft.name, group:extraDraft.group, code: code || undefined });
+    setExtraDraft({ code:"", name:"", group:GROUPS[0] }); setAddExtraOpen(false);
+  };
+
+  const handleAddSub = (parentCode) => {
+    if (!subName.trim()) return;
+    onAddExtra({ name:subName, parentCode, addedInMonth: month });
+    setRowCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
+    setSubName(""); setSubFor(null);
+  };
+
+  const handleDeleteExtra = (code) => {
+    onDeleteExtra(code);
+    setDraftAdd(d => { const n = {...d}; delete n[code]; return n; });
+  };
+
+  // เพิ่ม "รายการ" (คอลัมน์ย่อย) เฉพาะเดือนที่กำลังดูอยู่ (ต่อเดือน ไม่ลามไปเดือนอื่น)
+  // ครั้งแรกที่สร้างคอลัมน์ในเดือนนี้ จะพับค่าที่กรอกแบบช่องเดียวเดิมของเดือนนี้เข้า
+  // เป็นคอลัมน์ "รายการหลัก" ก่อน เพื่อไม่ให้ค่าที่กรอกไว้หาย
+  const handleAddColumn = () => {
+    const name = newColName.trim();
+    if (!name) return;
+    const newCol = { id: uid(), name };
+    const nextDraft = { ...draftAdd };
+    if (columns.length === 0) {
+      const seedCol = { id: "legacy", name: t("รายการหลัก","Main item") };
+      allRows.forEach(r => {
+        const v = nextDraft[r.code];
+        if (v !== undefined && v !== "" && parseFloat(v)) nextDraft[`${r.code}:legacy`] = v;
+      });
+      nextDraft.$columns = [seedCol, newCol];
+    } else {
+      nextDraft.$columns = [...columns, newCol];
+    }
+    setDraftAdd(nextDraft);
+    saveAdditions({ ...additions, [month]: { ...(additions[month] || {}), ...nextDraft } });
+    setNewColName(""); setAddColOpen(false);
+  };
+
+  // ลบคอลัมน์ — เฉพาะเดือนนี้ และเป็นแค่ "ร่าง" เท่านั้น จะมีผลจริงเมื่อกด "บันทึก"
+  // ถ้ากด "ยกเลิก" คอลัมน์และค่าที่กรอกไว้จะกลับคืนมา (ไม่โดนลบ) และคอลัมน์ที่ลบ
+  // ไปแล้วจะไม่ถูกนำไปคิดยอด (เพราะยอด roll-up ตอนบันทึกจะไม่รวมคอลัมน์นั้น)
+  const handleRemoveColumn = (colId) => {
+    if (!confirm(t("ลบคอลัมน์นี้เฉพาะเดือนนี้?\n\n• จะมีผลจริงเมื่อกด \"บันทึก\"\n• กด \"ยกเลิก\" เพื่อคืนคอลัมน์และค่าที่กรอกไว้","Delete this column for this month only?\n\n• Takes effect when you press \"Save\"\n• Press \"Cancel\" to restore the column and entered values"))) return;
+    const nextCols = columns.filter(c => c.id !== colId);
+    const nextDraft = { ...draftAdd };
+    Object.keys(nextDraft).forEach(k => { if (k.endsWith(`:${colId}`)) delete nextDraft[k]; });
+    nextDraft.$columns = nextCols;
+    setDraftAdd(nextDraft);
+    // ไม่ saveAdditions ที่นี่ — รอกด "บันทึก" (handleSave) เท่านั้น เพื่อให้ยกเลิกได้
+  };
+
+  // Excel-style block paste: paste a copied range from Excel/Sheets straight into
+  // the grid. Starting from the focused cell, values flow down (rows) and right
+  // (columns), matching whatever the user copied. Only leaf rows take a value —
+  // parent rows (with sub-items) show a roll-up total and are skipped. Blank
+  // cells in the pasted block are left untouched so pasting one column can't wipe
+  // the others. Values land in the draft; the user still presses "Save this month".
+  const handleGridPaste = (startRowIdx, startColIdx, raw) => {
+    if (!editingUnlocked) return;
+    const grid = String(raw ?? "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n+$/, "")
+      .split("\n")
+      .map(line => line.split("\t"));
+    if (!grid.length) return;
+    setDraftAdd(d => {
+      const next = { ...d };
+      grid.forEach((cells, ri) => {
+        const row = displayRows[startRowIdx + ri];
+        if (!row) return;
+        if (kidsAsOf(row.code, month).length > 0) return; // parent roll-up row — no direct input
+        cells.forEach((cellRaw, ci) => {
+          if (String(cellRaw).trim() === "") return; // don't overwrite with blanks
+          const val = evalMoney(cellRaw);
+          if (val === "") return;
+          if (isMultiCol) {
+            const col = columns[startColIdx + ci];
+            if (!col) return; // ignore columns beyond the current ones
+            next[`${row.code}:${col.id}`] = val;
+          } else {
+            if (ci > 0) return; // single-column grid — only first pasted column applies
+            next[row.code] = val;
+          }
+        });
+      });
+      return next;
+    });
+  };
+
+  // ── Excel-style cell selection ───────────────────────────────────────────────
+  // Selection is a Set of "ri:ci" keys (row-index in displayRows × column-index),
+  // so it supports non-rectangular multi-selection like Excel:
+  //   • plain drag / click  → replace with a rectangle
+  //   • Shift + click        → extend the rectangle from the anchor
+  //   • Ctrl/Cmd + click     → toggle a single cell (add, or de-select it)
+  //   • Ctrl/Cmd + drag      → add a rectangle to what's already selected
+  // Then Ctrl/Cmd+C copies it out as TSV (pastes cleanly into Excel/Sheets) and
+  // Delete/Backspace clears it. Parent roll-up rows carry no direct value.
+  const colCount = isMultiCol ? columns.length : 1;
+  const [selSet, setSelSet] = useState(() => new Set());
+  const selDragRef = useRef(false);
+  const anchorRef = useRef(null);   // {ri,ci} for shift-extend / drag origin
+  const dragModeRef = useRef(null); // {mode:"replace"|"add", base:Set}
+  const inSel = (ri, ci) => selSet.has(ri + ":" + ci);
+  const selCount = selSet.size;
+  const cellKeyOf = (row, ci) => isMultiCol ? `${row.code}:${columns[ci].id}` : row.code;
+  const cellValStr = (row, ci) => {
+    if (kidsAsOf(row.code, month).length > 0) return ""; // parent roll-up — no direct value
+    const raw = draftAdd[cellKeyOf(row, ci)];
+    const n = parseFloat(raw);
+    return (raw == null || raw === "" || isNaN(n)) ? "" : String(n);
+  };
+  const rectKeys = (a, b) => {
+    const keys = [];
+    const r0 = Math.min(a.ri, b.ri), r1 = Math.max(a.ri, b.ri);
+    const c0 = Math.min(a.ci, b.ci), c1 = Math.max(a.ci, b.ci);
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) keys.push(r + ":" + c);
+    return keys;
+  };
+  const onCellDown = (ri, ci, e) => {
+    // เลือกเซลล์ได้ทั้งโหมดดูและแก้ไข (โหมดดูใช้สำหรับไฮไลต์/เปลี่ยนสีอย่างเดียว)
+    const additive = e.ctrlKey || e.metaKey;
+    const ranged   = e.shiftKey && anchorRef.current;
+    // pure selection op — don't focus/edit the input or start a text selection.
+    // In view mode there's no input to focus, so always prevent (avoids selecting the numbers while dragging).
+    if (ranged || additive || !editingUnlocked) e.preventDefault();
+    if (ranged) {
+      setSelSet(new Set(rectKeys(anchorRef.current, { ri, ci })));
+      dragModeRef.current = { mode: "replace" };
+    } else if (additive) {
+      const base = new Set(selSet);
+      const k = ri + ":" + ci;
+      if (base.has(k)) base.delete(k); else base.add(k); // toggle → lets you de-select
+      setSelSet(base);
+      anchorRef.current = { ri, ci };
+      dragModeRef.current = { mode: "add", base: new Set(base) };
+    } else {
+      setSelSet(new Set([ri + ":" + ci]));
+      anchorRef.current = { ri, ci };
+      dragModeRef.current = { mode: "replace" };
+    }
+    selDragRef.current = true;
+  };
+  const onCellEnter = (ri, ci) => {
+    if (!selDragRef.current || !dragModeRef.current || !anchorRef.current) return;
+    const rk = rectKeys(anchorRef.current, { ri, ci });
+    if (dragModeRef.current.mode === "add") {
+      const s = new Set(dragModeRef.current.base);
+      rk.forEach(k => s.add(k));
+      setSelSet(s);
+    } else {
+      setSelSet(new Set(rk));
+    }
+    const ae = typeof document !== "undefined" ? document.activeElement : null;
+    if (ae && ae.tagName === "INPUT" && (ri !== anchorRef.current.ri || ci !== anchorRef.current.ci)) ae.blur();
+  };
+  const selectAll = () => {
+    const s = new Set();
+    for (let r = 0; r < displayRows.length; r++) for (let c = 0; c < colCount; c++) s.add(r + ":" + c);
+    setSelSet(s); anchorRef.current = { ri: 0, ci: 0 };
+  };
+  const deselectAll = () => { setSelSet(new Set()); anchorRef.current = null; };
+  const buildSelTSV = () => {
+    if (!selSet.size) return "";
+    let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+    selSet.forEach(k => { const [r, c] = k.split(":").map(Number); r0 = Math.min(r0, r); r1 = Math.max(r1, r); c0 = Math.min(c0, c); c1 = Math.max(c1, c); });
+    const out = [];
+    for (let r = r0; r <= r1; r++) {
+      const row = displayRows[r];
+      const cells = [];
+      for (let c = c0; c <= c1; c++) cells.push(row && selSet.has(r + ":" + c) ? cellValStr(row, c) : "");
+      out.push(cells.join("\t"));
+    }
+    return out.join("\n");
+  };
+  const clearSelection = () => {
+    if (!selSet.size || !editingUnlocked) return;
+    setDraftAdd(d => {
+      const next = { ...d };
+      selSet.forEach(k => {
+        const [r, c] = k.split(":").map(Number);
+        const row = displayRows[r]; if (!row) return;
+        if (kidsAsOf(row.code, month).length > 0) return;
+        next[cellKeyOf(row, c)] = "";
+      });
+      return next;
+    });
+  };
+  const copySelection = async () => {
+    const tsv = buildSelTSV();
+    if (!tsv) return;
+    try { await navigator.clipboard.writeText(tsv); }
+    catch { /* clipboard API blocked — user can still use Ctrl/Cmd+C */ }
+  };
+  // ── ไฮไลต์เอง: ลากเลือกเซลล์แล้วใส่สีพื้น (bg) หรือสีตัวอักษร (fg) เก็บไว้ใน
+  // additions[month].$fmt (คีย์ $… ถูกข้ามจากการรวมยอดอยู่แล้ว) → บันทึกติดไปกับเดือน
+  const cellFmt = draftAdd.$fmt || {};
+  // แปลง fmt ของเซลล์ → CSS (พื้น/สีตัวอักษร/หนา/เอียง/ขีดเส้นใต้/ขนาด)
+  const cellFmtStyle = (key) => {
+    const f = cellFmt[key]; if (!f) return {};
+    return {
+      ...(f.bg?{background:f.bg}:{}), ...(f.fg?{color:f.fg}:{}),
+      ...(f.b?{fontWeight:800}:{}), ...(f.i?{fontStyle:"italic"}:{}),
+      ...(f.u?{textDecoration:"underline"}:{}), ...(f.sz?{fontSize:f.sz}:{}),
+    };
+  };
+  // รายคีย์เซลล์ (leaf) ที่กำลังเลือกอยู่ — ใช้ร่วมกันทุกเครื่องมือจัดรูปแบบ
+  const selectedCellKeys = () => {
+    const keys = [];
+    selSet.forEach(k => { const [r,c]=k.split(":").map(Number); const row=displayRows[r]; if(!row) return; if(kidsAsOf(row.code,month).length>0) return; keys.push(cellKeyOf(row,c)); });
+    return keys;
+  };
+  const mutateFmt = (fn) => { // fn(cur) → คืน object ใหม่ (หรือ null เพื่อลบ) · ใช้ได้ทั้งโหมดดู/แก้ไข
+    if (!selSet.size) return;
+    const fmt = { ...(draftAdd.$fmt || {}) };
+    selectedCellKeys().forEach(key => {
+      let cur = fn({ ...(fmt[key] || {}) }) || {};
+      Object.keys(cur).forEach(p => { if (cur[p] == null || cur[p] === false) delete cur[p]; });
+      if (Object.keys(cur).length) fmt[key] = cur; else delete fmt[key];
+    });
+    setDraftAdd(d => ({ ...d, $fmt: fmt }));
+    // โหมดดู (ไม่ได้แก้ไข): ค่าตัวเลขล็อกอยู่ จึงเซฟ "เฉพาะสี" ขึ้น backend ทันที ไม่แตะค่าที่บันทึกไว้
+    if (!editingUnlocked) {
+      const base = additions[month] || {};
+      saveAdditions({ ...additions, [month]: { ...base, $fmt: fmt } });
+    }
+  };
+  const applyCellFmt = (patch) => mutateFmt(cur => ({ ...cur, ...patch })); // {bg}/{fg}/{bg:null}…
+  const toggleCellFmt = (prop) => { // สลับ หนา/เอียง/ขีดเส้นใต้
+    const keys = selectedCellKeys();
+    const allOn = keys.length>0 && keys.every(key => (cellFmt[key]||{})[prop]);
+    mutateFmt(cur => ({ ...cur, [prop]: allOn ? null : true }));
+  };
+  const bumpFontSize = (delta) => mutateFmt(cur => { const base = cur.sz || 13; return { ...cur, sz: Math.max(9, Math.min(22, base + delta)) }; });
+  useEffect(() => {
+    const up = () => { selDragRef.current = false; dragModeRef.current = null; };
+    const onCopy = (e) => {
+      if (!selSet.size) return;
+      const ae = document.activeElement;
+      if (ae && ae.tagName === "INPUT" && selSet.size === 1) return; // single active cell → let the input copy normally
+      const tsv = buildSelTSV();
+      if (!tsv) return;
+      e.clipboardData.setData("text/plain", tsv);
+      e.preventDefault();
+    };
+    const onKey = (e) => {
+      if (!selSet.size) return;
+      if (e.key === "Escape") { deselectAll(); return; }
+      const ae = document.activeElement;
+      const editing = ae && ae.tagName === "INPUT";
+      if ((e.key === "Delete" || e.key === "Backspace") && !editing && editingUnlocked) {
+        e.preventDefault();
+        clearSelection();
+      }
+    };
+    document.addEventListener("mouseup", up);
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mouseup", up);
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("keydown", onKey);
+    };
+  });
+
+  return (
+    <div style={{padding:"4px 28px 24px"}}>
+      {/* Trend chart — the whole project's cost growth over time, at a glance */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
+          <span style={{fontSize:13,fontWeight:650,color:T.textPrimary}}>📈 {t("แนวโน้มต้นทุนสะสม","Cumulative cost trend")}</span>
+          <span style={{fontSize:12,color:T.textMuted}}>{t("รวมล่าสุดทั้งโปรเจกต์","Project latest total")}: <b style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b className="usd-sub" style={{color:T.green,fontFamily:"'JetBrains Mono',monospace",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
+        </div>
+        <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap",alignItems:"center"}}>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.blue,display:"inline-block"}}/>{t("ยอดก่อนหน้า (สะสม)","Previous (cumulative)")}</span>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:10,height:10,borderRadius:2,background:T.amber,display:"inline-block"}}/>{t("เพิ่มเดือนนี้","Added this month")}</span>
+          <span style={{color:T.textMuted,fontSize:11}}>· {t("คลิกที่แท่งเพื่อเลือกเดือน (เดือนที่เลือกจะมีกรอบ)","Click a bar to select a month (selected has an outline)")}</span>
+        </div>
+        <ResponsiveContainer width="100%" height={280}>
+          <BarChart data={chartData} margin={{top:14,right:8,left:-14,bottom:6}} barCategoryGap="22%"
+            onClick={(st)=>{ const mk = st && st.activePayload && st.activePayload[0] && st.activePayload[0].payload && st.activePayload[0].payload.monthKey; if (mk) setMonth(mk); }}
+            style={{cursor:"pointer"}}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2f7"/>
+            <XAxis dataKey="label" tick={<MonthAxisTick selectedLabel={selectedLabel}/>} height={34} axisLine={false} tickLine={false} interval={0}/>
+            <YAxis tick={{fontSize:10,fill:T.textMuted}} axisLine={false} tickLine={false} tickFormatter={fmtK}/>
+            <Tooltip cursor={{fill:"rgba(37,99,235,0.06)"}} formatter={(v,name)=>[`${fmt(v)} THB`,name]} labelStyle={{color:T.textPrimary,fontWeight:600,marginBottom:2}}
+              contentStyle={{borderRadius:10,border:`1px solid ${T.cardBorder}`,fontSize:12,boxShadow:"0 4px 14px rgba(0,0,0,0.08)"}}/>
+            <Bar dataKey="previous" stackId="cum" name={t("ยอดก่อนหน้า","Previous")} radius={[0,0,0,0]}>
+              {chartData.map((e,i)=>{ const sel = e.monthKey===month; return <Cell key={i} fill={T.blue} stroke={sel?"#0f172a":"none"} strokeWidth={sel?2.5:0} cursor="pointer"/>; })}
+            </Bar>
+            <Bar dataKey="added" stackId="cum" name={t("เพิ่มเดือนนี้","Added this month")} radius={[5,5,0,0]}>
+              {chartData.map((e,i)=>{ const sel = e.monthKey===month; return <Cell key={i} fill={T.amber} stroke={sel?"#0f172a":"none"} strokeWidth={sel?2.5:0} cursor="pointer"/>; })}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Month picker — คลิกสลับเดือน · เพิ่ม/ลบเดือนได้ทันที (ลบมีเตือนก่อน) */}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,flex:1,minWidth:0}}>
+          {/* Start (baseline) — read-only reference: what date the project began */}
+          <div style={{flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${T.cardBorder}`,background:"#f8fafc",minWidth:140}}>
+            <div style={{fontSize:15,fontWeight:750,color:T.textSecondary,marginBottom:3,letterSpacing:0.2}}>🚩 {t("เริ่มต้น","Start")}</div>
+            <div style={{fontSize:15,fontWeight:650,color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(baseTotal)}</div>
+            <div style={{fontSize:10,color:T.textMuted,marginTop:2}}>{project?.createdAt ? new Date(project.createdAt).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{day:"numeric",month:"short",year:"2-digit"}) : t("ราคาเดิม","baseline")}</div>
+          </div>
+          {sortedMonths.map(m=>{
+            const active = m===month;
+            const add = monthTotalLive(m);
+            const exists = months.includes(m); // เดือนที่มีจริง (ไม่ใช่ default เปล่า) ถึงลบได้
+            return (
+              <div key={m} onClick={()=>setMonth(m)} ref={active?activeChipRef:null}
+                style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 28px 10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
+                  background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
+                <div style={{fontSize:15,fontWeight:750,color:active?"#fff":T.textPrimary,marginBottom:3,letterSpacing:0.2}}>{monthShortLabel(m)}</div>
+                <div style={{fontSize:15,fontWeight:650,color:active?"#dbeafe":T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
+                <div style={{fontSize:13,fontWeight:700,color:active?"#fff":(add>0?T.amber:T.textMuted),marginTop:3}}>{add>0?"+":""}{fmtK(add)} {t("เดือนนี้","this mo.")}</div>
+                {exists && (
+                  <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title={t("ลบเดือนนี้ (มีเตือนก่อนลบ)","Delete this month (asks first)")}
+                    style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
+                      background:active?"rgba(255,255,255,0.2)":T.redBg,color:active?"#fff":T.red,cursor:"pointer",fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                )}
+              </div>
+            );
+          })}
+          <div style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderRadius:12,border:`1.5px dashed ${T.blue}`,background:T.blueLight}}>
+            <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base"
+              style={{border:"none",background:"transparent",padding:"8px 4px",width:118,fontSize:12}}/>
+            <button className="btn-primary" style={{padding:"6px 12px",fontSize:11,whiteSpace:"nowrap",background:T.blue}} onClick={handleAddMonth}>+ {t("เพิ่มเดือน","Add month")}</button>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats for selected month */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+        <StatCard label={t("ยอดยกมา (ก่อนเดือนนี้)","Brought forward (before this month)")} value={"฿"+fmt0(baselineForMonth)} thb={baselineForMonth} rate={usdRate} sub={`${t("สะสมถึง","up to")} ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label={t("เพิ่มเดือนนี้","Added this month")} value={"฿"+fmt0(thisMonthAdd)} thb={thisMonthAdd} rate={usdRate} sub={new Date(month+"-01").toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
+        <StatCard label={t("รวมสะสมถึงเดือนนี้","Cumulative to this month")} value={"฿"+fmt0(cumulativeSoFar)} thb={cumulativeSoFar} rate={usdRate} sub={t("เดิม + เพิ่มสะสมถึงเดือนที่เลือก","Baseline + additions up to selected month")} color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(grandTotal)} thb={grandTotal} rate={usdRate} sub={t("เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)","Baseline + all months (latest)")} color={T.purple} icon="🧮" accent={T.purpleBg}/>
+      </div>
+
+      {/* Toolbar: search + group filter + actions */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account Code / ชื่อ...","🔍 Search Account Code / name...")} width={220}/>
+        <button onClick={()=>setHideEmpty(v=>!v)}
+          title={t("ซ่อน/แสดงแถวที่ไม่มีค่า (รวมสะสม = 0)","Hide/show empty rows (total = 0)")}
+          style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",
+            border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
+          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : `⚡ ${t("เฉพาะที่มีค่า","With value only")}`}
+        </button>
+        <GroupFilter selected={filter} onChange={setFilter}/>
+        <div style={{flex:1}}/>
+        <button className="btn-ghost" onClick={()=>setAddExtraOpen(v=>!v)} disabled={!editingUnlocked}
+          style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ {t("งานพิเศษ","Extra item")}</button>
+        {!editingUnlocked && (
+          <span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.textMuted,background:"#f1f5f9",padding:"6px 12px",borderRadius:8,fontWeight:600}}>
+            🔒 {t("บันทึกแล้ว","Saved")}
+          </span>
+        )}
+        {editingUnlocked ? (
+          <>
+            <button onClick={handleSave} className="btn-primary" style={{background:saved?T.green:T.blue,minWidth:170}}>
+              {saved?t("✓ บันทึกแล้ว","✓ Saved"):t("บันทึกรายการเดือนนี้","Save this month")}
+            </button>
+            {canCancel && (
+              <button onClick={handleCancel} className="btn-ghost" title={t("ยกเลิกการแก้ไข (Esc)","Cancel editing (Esc)")}
+                style={{color:T.red,borderColor:T.red}}>✕ {t("ยกเลิก","Cancel")}</button>
+            )}
+          </>
+        ) : (
+          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:170}}>
+            ✏️ {t("แก้ไขเดือนนี้","Edit this month")}
+          </button>
+        )}
+      </div>
+
+      {editingUnlocked && (
+        <div style={{display:"flex",alignItems:"center",gap:8,margin:"-6px 2px 14px",fontSize:12,color:T.textMuted,flexWrap:"wrap"}}>
+          <span style={{background:T.greenBg,color:T.green,fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:6,whiteSpace:"nowrap"}}>📋 Excel</span>
+          <span>{t("ลากคลุมเลือก · Shift+คลิก ขยายช่วง · Ctrl/Cmd+คลิก เลือก/ยกเลิกทีละช่อง · Ctrl/Cmd+C คัดลอก · Delete ล้าง · วางจาก Excel เติมทั้งบล็อก","Drag to select · Shift+click to extend · Ctrl/Cmd+click to toggle a cell · Ctrl/Cmd+C to copy · Delete to clear · paste from Excel to fill a block")}</span>
+          <div style={{flex:1,minWidth:8}}/>
+          <button onClick={selectAll} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>{t("เลือกทั้งหมด","Select all")}</button>
+          {selCount>0 && (
+            <>
+              <span style={{background:T.blueLight,color:T.blue,fontWeight:700,fontSize:11,padding:"3px 9px",borderRadius:6,whiteSpace:"nowrap"}}>{t("เลือก","Selected")} {selCount}</span>
+              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>📋 {t("คัดลอก","Copy")}</button>
+              <button onClick={clearSelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap",color:T.red,borderColor:T.red}}>🗑 {t("ล้างที่เลือก","Clear")}</button>
+              <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ไฮไลต์เอง: ลากเลือกเซลล์แล้วจัดรูปแบบ (หนา/เอียง/ขีดเส้นใต้/ขนาด/สีพื้น/สีตัวอักษร) — ใช้ได้แม้ไม่ได้อยู่โหมดแก้ไข */}
+      {selCount>0 && (
+        <div style={{display:"flex",alignItems:"center",gap:6,margin:"-8px 2px 14px",fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+          {!editingUnlocked && (
+            <span style={{background:T.blueLight,color:T.blue,fontWeight:700,fontSize:11,padding:"3px 9px",borderRadius:6,whiteSpace:"nowrap"}}>{t("เลือก","Selected")} {selCount}</span>
+          )}
+          {(() => {
+            const on = { padding:0,width:26,height:24,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",cursor:"pointer",fontSize:13,lineHeight:1,color:T.textPrimary };
+            return (<>
+              <button onClick={()=>toggleCellFmt("b")} title={t("ตัวหนา","Bold")} style={{...on,fontWeight:900}}>B</button>
+              <button onClick={()=>toggleCellFmt("i")} title={t("ตัวเอียง","Italic")} style={{...on,fontStyle:"italic",fontFamily:"Georgia,serif"}}>I</button>
+              <button onClick={()=>toggleCellFmt("u")} title={t("ขีดเส้นใต้","Underline")} style={{...on,textDecoration:"underline"}}>U</button>
+              <button onClick={()=>bumpFontSize(-1)} title={t("ลดขนาดตัวอักษร","Smaller")} style={{...on,fontSize:11}}>A−</button>
+              <button onClick={()=>bumpFontSize(1)} title={t("เพิ่มขนาดตัวอักษร","Larger")} style={{...on,fontSize:15,fontWeight:700}}>A+</button>
+            </>);
+          })()}
+          <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
+          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🖍 {t("ไฮไลต์พื้น","Fill")}:</span>
+          {["#FEF3C7","#D1FAE5","#FEE2E2","#DBEAFE","#E5E7EB"].map(bg=>(
+            <button key={bg} onClick={()=>applyCellFmt({bg})} title={t("ใส่สีพื้นให้ช่องที่เลือก","Fill selected cells")}
+              style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:bg,cursor:"pointer",padding:0}}/>
+          ))}
+          <button onClick={()=>applyCellFmt({bg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีพื้น","Remove fill")}>⛔ {t("ล้างพื้น","No fill")}</button>
+          <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
+          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🎨 {t("สีตัวอักษร","Text")}:</span>
+          {[["#DC2626","แดง"],["#059669","เขียว"],["#2563EB","น้ำเงิน"],["#0F172A","ดำ"]].map(([fg,nm])=>(
+            <button key={fg} onClick={()=>applyCellFmt({fg})} title={t(`สีตัวอักษร ${nm}`,"Text color")}
+              style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",color:fg,cursor:"pointer",padding:0,fontWeight:800,fontSize:13,lineHeight:1}}>A</button>
+          ))}
+          <button onClick={()=>applyCellFmt({fg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีตัวอักษร","Reset text color")}>↺ {t("สีปกติ","Default")}</button>
+          {!editingUnlocked && (
+            <>
+              <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
+              <button onClick={selectAll} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>{t("เลือกทั้งหมด","Select all")}</button>
+              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>📋 {t("คัดลอก","Copy")}</button>
+              <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {addExtraOpen && (
+        <div style={{background:"#fafbfd",border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:16,marginBottom:16,display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:10,alignItems:"end"}}>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>{t("Acc. Code (เว้นว่างให้สร้างอัตโนมัติ)","Acc. Code (leave blank = auto)")}</span>
+            <input className="input-base" value={extraDraft.code} onChange={e=>setExtraDraft(d=>({...d,code:e.target.value}))} placeholder={t("เช่น 511099","e.g. 511099")} />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>{t("ชื่อรายการงานเพิ่ม","Extra item name")}</span>
+            <input className="input-base" value={extraDraft.name} onChange={e=>setExtraDraft(d=>({...d,name:e.target.value}))} placeholder={t("เช่น งานเพิ่มกระจกโค้งพิเศษ","e.g. Extra curved glass work")} onKeyDown={e=>e.key==="Enter"&&handleCreateExtra()} />
+          </label>
+          <label style={{display:"flex",flexDirection:"column",gap:5}}>
+            <span style={{fontSize:11,color:T.textSecondary}}>Group</span>
+            <select className="input-base" value={extraDraft.group} onChange={e=>setExtraDraft(d=>({...d,group:e.target.value}))}>
+              {GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </label>
+          <button className="btn-primary" onClick={handleCreateExtra}>+ {t("สร้างรายการ","Create item")}</button>
+        </div>
+      )}
+
+      {/* Main table: เดิม + เพิ่มเดือนนี้ = รวมสะสม */}
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+        <div className="mscroll">
+        <table style={{minWidth: isMultiCol ? "max-content" : "100%", width: isMultiCol ? "max-content" : "100%", borderCollapse:"collapse", fontSize:13}}>
+          <thead>
+            {isMultiCol ? (
+              <>
+                <tr style={{background:"#f8fafc"}}>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="code"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(0,"#f8fafc",7)}}>
+                    <span onClick={()=>handleSort("code")} style={{cursor:"pointer",userSelect:"none"}}>Acc. Code{sortKey==="code"?(sortDir===1?" ▲":" ▼"):""}</span>
+                  </th>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="group"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(1,"#f8fafc",7)}}>
+                    <span onClick={()=>handleSort("group")} style={{cursor:"pointer",userSelect:"none"}}>Group{sortKey==="group"?(sortDir===1?" ▲":" ▼"):""}</span>
+                  </th>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="name"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(2,"#f8fafc",7)}}>
+                    <span onClick={()=>handleSort("name")} style={{cursor:"pointer",userSelect:"none"}}>Account Name{sortKey==="name"?(sortDir===1?" ▲":" ▼"):""}</span>
+                  </th>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"right",color:sortKey==="before"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(3,"#f8fafc",7)}}>
+                    <span onClick={()=>handleSort("before")} style={{cursor:"pointer",userSelect:"none"}}>{t("📐 ยอดก่อนหน้า","📐 Previous")}{sortKey==="before"?(sortDir===1?" ▲":" ▼"):""}</span>
+                  </th>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"center",width:20,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>+</th>
+                  <th colSpan={columns.length+1} style={{padding:"9px 16px",textAlign:"center",color:T.textMuted,fontWeight:650,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>
+                    ➕ {t("เพิ่มเดือนนี้","Add this month")} · {monthShortLabel(month)}
+                  </th>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"center",width:20,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>=</th>
+                  <th rowSpan={2} style={{padding:"11px 16px",textAlign:"right",color:sortKey==="cum"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                    <span onClick={()=>handleSort("cum")} style={{cursor:"pointer",userSelect:"none"}}>{t("✅ รวมสะสม","✅ Total")}{sortKey==="cum"?(sortDir===1?" ▲":" ▼"):""}</span>
+                  </th>
+                  <th rowSpan={2} style={{width:20,borderBottom:`1px solid ${T.cardBorder}`}}></th>
+                </tr>
+                <tr style={{background:"#f8fafc"}}>
+                  {columns.map(c=>(
+                    <th key={c.id} style={{padding:"6px 18px",textAlign:"right",color:T.textMuted,fontWeight:600,fontSize:12,borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:5}}>
+                        <span>{c.name}</span>
+                        {editingUnlocked && <button onClick={()=>handleRemoveColumn(c.id)} title={t("ลบรายการนี้ (เฉพาะเดือนนี้)","Delete this item (this month only)")} style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:12,padding:0}}>✕</button>}
+                      </div>
+                    </th>
+                  ))}
+                  <th style={{padding:"6px 10px",textAlign:"right",borderBottom:`1px solid ${T.cardBorder}`}}>
+                    {editingUnlocked && (addColOpen ? (
+                      <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                        <input autoFocus value={newColName} onChange={e=>setNewColName(e.target.value)} placeholder={t("ชื่อ เช่น CC#17","Name e.g. CC#17")}
+                          className="input-base" style={{width:88,fontSize:12,padding:"4px 6px"}}
+                          onKeyDown={e=>e.key==="Enter"&&handleAddColumn()} />
+                        <button onClick={handleAddColumn} className="btn-primary" style={{padding:"4px 9px",fontSize:12}}>+</button>
+                        <button onClick={()=>setAddColOpen(false)} className="btn-ghost" style={{padding:"4px 7px",fontSize:12}}>×</button>
+                      </div>
+                    ) : (
+                      <button onClick={()=>setAddColOpen(true)} className="btn-ghost" style={{padding:"4px 10px",fontSize:12,whiteSpace:"nowrap"}}>+ {t("เพิ่มรายการ","Add item")}</button>
+                    ))}
+                  </th>
+                </tr>
+              </>
+            ) : (
+              <tr style={{background:"#f8fafc"}}>
+                {[
+                  {label:"Acc. Code", key:"code", align:"left"},
+                  {label:"Group", key:"group", align:"left"},
+                  {label:"Account Name", key:"name", align:"left"},
+                  {label:t("📐 ยอดก่อนหน้า","📐 Previous"), key:"before", align:"right"},
+                  {label:"+", key:null, align:"center", width:20},
+                  {label:t("➕ เพิ่มเดือนนี้","➕ Add this month"), key:"add", align:"right"},
+                  {label:"=", key:null, align:"center", width:20},
+                  {label:t("✅ รวมสะสม","✅ Total"), key:"cum", align:"right"},
+                  {label:"", key:null, width:20},
+                ].map(({label,key,align,width},idx)=>(
+                  <th key={idx}
+                    style={{padding:"11px 16px",textAlign:align||"left",color:key&&sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:label.length>2?0.8:0,textTransform:label.length>2?"uppercase":"none",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap",...(width?{width}:{})}}>
+                    {key==="add" ? (
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
+                        <span onClick={()=>handleSort("add")} style={{cursor:"pointer",userSelect:"none"}}>{label}{sortKey==="add"?(sortDir===1?" ▲":" ▼"):""}</span>
+                        {editingUnlocked && (addColOpen ? (
+                          <div style={{display:"flex",gap:4,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
+                            <input autoFocus value={newColName} onChange={e=>setNewColName(e.target.value)} placeholder={t("ชื่อ เช่น CC#17","Name e.g. CC#17")}
+                              className="input-base" style={{width:88,fontSize:12,padding:"4px 6px",textTransform:"none"}}
+                              onKeyDown={e=>e.key==="Enter"&&handleAddColumn()} />
+                            <button onClick={handleAddColumn} className="btn-primary" style={{padding:"4px 9px",fontSize:12}}>+</button>
+                            <button onClick={()=>setAddColOpen(false)} className="btn-ghost" style={{padding:"4px 7px",fontSize:12}}>×</button>
+                          </div>
+                        ) : (
+                          <button onClick={(e)=>{e.stopPropagation();setAddColOpen(true);}} className="btn-ghost" style={{padding:"3px 8px",fontSize:12,whiteSpace:"nowrap",textTransform:"none"}}>+ {t("เพิ่มรายการ","Add item")}</button>
+                        ))}
+                      </div>
+                    ) : (
+                      <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
+                    )}
+                  </th>
+                ))}
+              </tr>
+            )}
+          </thead>
+          <tbody>
+            {displayRows.map((r,i) => {
+              const kids = kidsAsOf(r.code, month);
+              const hasKids = kids.length > 0;
+              const isCollapsed = hasKids && rowCollapsed[r.code];
+              const cumBefore = cumBeforeOf(r);
+              const thisVal = rowMonthValue(r.code, month, draftAdd);
+              const cum = cumBefore + thisVal;
+              const rowBg = i % 2 === 0 ? T.card : "#fafbfd";
+              return (
+                <Fragment key={r.code}>
+                  <tr onClick={()=>hasKids && setRowCollapsed(c=>({...c,[r.code]:!c[r.code]}))}
+                      style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===r.code?"none":"1px solid #f1f5f9",cursor:hasKids?"pointer":"default"}}>
+                    <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:500, ...qsFrz(0,rowBg)}}>
+                      {hasKids && (
+                        <span title={isCollapsed?t("ขยายรายการย่อย","Expand sub-items"):t("ย่อรายการย่อย","Collapse sub-items")}
+                          style={{color:T.textMuted,fontSize:12,marginRight:6,verticalAlign:"middle",display:"inline-block"}}>
+                          {isCollapsed?"▸":"▾"}
+                        </span>
+                      )}
+                      {r.code}
+                    </td>
+                    <td style={{padding:"10px 16px", ...qsFrz(1,rowBg)}}>
+                      <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{r.group}</span>
+                    </td>
+                    <td style={{padding:"10px 16px",color:T.textPrimary, ...qsFrz(2,rowBg)}}>
+                      {r.name}
+                      {r.isExtra && <span style={{marginLeft:7,fontSize:12,background:T.amberBg,color:T.amber,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{t("งานเพิ่ม","Extra")}</span>}
+                      {hasKids && <span style={{marginLeft:7,fontSize:12,background:T.greenBg,color:T.green,padding:"1px 8px",borderRadius:6,fontWeight:600}}>{kids.length} {t("รายการย่อย","sub-items")}</span>}
+                      {editingUnlocked && (
+                        <button onClick={(e)=>{e.stopPropagation(); setSubFor(subFor===r.code?null:r.code); setSubName(""); setRowCollapsed(c=>({...c,[r.code]:false}));}} title={t("เพิ่มรายการย่อยใต้ Acc. Code นี้","Add a sub-item under this Acc. Code")}
+                          style={{marginLeft:9,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",fontSize:12,padding:"1px 7px"}}>
+                          + {t("รายการย่อย","Sub-item")}
+                        </button>
+                      )}
+                    </td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace", ...qsFrz(3,rowBg)}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
+                    <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
+                    {isMultiCol ? (
+                      hasKids ? (
+                        <td colSpan={columns.length} style={{padding:"8px 16px",textAlign:"right"}}>
+                          <div style={{width:"100%",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:650,fontSize:13}}>
+                            {fmt(thisVal)}
+                            {usdLine(thisVal, usdRate)}
+                          </div>
+                        </td>
+                      ) : columns.map((c,ci)=>{
+                        const ck = `${r.code}:${c.id}`;
+                        const cv = parseFloat(draftAdd[ck])||0;
+                        const on = inSel(i,ci);
+                        const hl = cellFmtStyle(ck);
+                        return (
+                          <td key={c.id}
+                            onMouseDown={e=>onCellDown(i,ci,e)}
+                            onMouseEnter={()=>onCellEnter(i,ci)}
+                            style={{padding:"8px 10px",textAlign:"right",...(on?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
+                            {editingUnlocked ? (
+                              <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
+                                onPaste={raw=>handleGridPaste(i,ci,raw)}
+                                style={{width:104,fontSize:13,background:cv!==0?T.amberBg:(on?"transparent":T.bg),...hl}}/>
+                            ) : (
+                              <div style={{width:104,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(cv!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted}),...hl}}>{fmt(cv)}{usdLine(cv, usdRate)}</div>
+                            )}
+                          </td>
+                        );
+                      })
+                    ) : (
+                      <td
+                        onMouseDown={!hasKids?e=>onCellDown(i,0,e):undefined}
+                        onMouseEnter={!hasKids?()=>onCellEnter(i,0):undefined}
+                        style={{padding:"8px 16px",textAlign:"right",...(inSel(i,0)&&!hasKids?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
+                        {hasKids ? (
+                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:650,fontSize:13}}>
+                            {fmt(thisVal)}
+                            {usdLine(thisVal, usdRate)}
+                          </div>
+                        ) : editingUnlocked ? (
+                          <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
+                            onPaste={raw=>handleGridPaste(i,0,raw)}
+                            style={{width:130,background:thisVal!==0?T.amberBg:(inSel(i,0)?"transparent":T.bg),...cellFmtStyle(r.code)}}/>
+                        ) : (
+                          <div style={{width:130,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(thisVal!==0?{background:T.amberBg,color:T.amber,fontWeight:700,borderRadius:8}:{color:T.textMuted}),...cellFmtStyle(r.code)}}>{fmt(thisVal)}{usdLine(thisVal, usdRate)}</div>
+                        )}
+                      </td>
+                    )}
+                    <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:cum!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{fmt(cum)}{usdLine(cum, usdRate)}</td>
+                    <td style={{padding:"8px 16px",textAlign:"center"}}>
+                      {r.isExtra && editingUnlocked && (
+                        <button onClick={(e)=>{e.stopPropagation(); handleDeleteExtra(r.code);}} title={t("ลบรายการงานเพิ่ม","Delete extra item")}
+                          style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13}}>✕</button>
+                      )}
+                    </td>
+                  </tr>
+
+                  {/* Sub-items — this month's value rolls up into the parent row above.
+                      Only sub-items added on/before the currently-viewed month appear here
+                      (kidsAsOf already filtered them), so a sub-item created in ก.ย. simply
+                      doesn't exist in ส.ค. or earlier — no ghost "0.00" row. */}
+                  {!isCollapsed && kids.map((k,ki) => {
+                    const kBaseVal = parseFloat(tenderCosts[k.code]) || 0;
+                    const kCumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[k.code])||0),0) + kBaseVal;
+                    const kThisVal = parseFloat(draftAdd[k.code]) || 0;
+                    const kCum = kCumBefore + kThisVal;
+                    const isNewThisMonth = k.addedInMonth === month;
+                    const subBg = isNewThisMonth ? T.greenBg : (i%2===0?T.card:"#fafbfd");
+                    return (
+                      <tr key={k.code} style={{background:subBg,borderLeft:`3px solid ${isNewThisMonth?T.green:"#e2e8f0"}`,borderBottom:(ki===kids.length-1 && subFor!==r.code)?"1px solid #f1f5f9":"none",transition:"background 0.2s"}}>
+                        <td style={{padding:"7px 16px 7px 27px",color:T.green,fontSize:13, ...qsFrz(0,subBg)}}>↳</td>
+                        <td style={qsFrz(1,subBg)}/>
+                        <td style={{padding:"7px 16px",color:T.green,fontSize:13,fontStyle:"italic", ...qsFrz(2,subBg)}}>
+                          {k.name}
+                          {k.addedInMonth && (
+                            isNewThisMonth ? (
+                              <span title={t("รายการนี้เพิ่งเพิ่มเข้ามาในเดือนนี้","Added this month")} style={{marginLeft:8,fontSize:12,background:T.green,color:"#fff",padding:"2px 8px",borderRadius:6,fontWeight:650,fontStyle:"normal",letterSpacing:0.2}}>
+                                ✨ {t("ใหม่เดือนนี้","New this month")}
+                              </span>
+                            ) : (
+                              <span title={t("เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น — เดือนก่อนหน้านั้นจะไม่แสดงรายการนี้","Added later, not from the start — earlier months don't show it")} style={{marginLeft:8,fontSize:12,background:T.amberBg,color:T.amber,padding:"2px 8px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
+                                {t("เพิ่มเมื่อ","Added")} {monthShortLabel(k.addedInMonth)}
+                              </span>
+                            )
+                          )}
+                        </td>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:kCumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...qsFrz(3,subBg)}}>{fmt(kCumBefore)}{usdLine(kCumBefore, usdRate)}</td>
+                        <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
+                        <td style={{padding:"7px 16px",textAlign:"right"}}>
+                          {editingUnlocked ? (
+                            <MoneyInput value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
+                              style={{width:130,fontSize:13,background:kThisVal!==0?T.greenBg:T.bg}}/>
+                          ) : (
+                            <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(kThisVal!==0?{background:T.greenBg,color:T.green,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(kThisVal)}{usdLine(kThisVal, usdRate)}</div>
+                          )}
+                        </td>
+                        <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>=</td>
+                        <td style={{padding:"7px 16px",textAlign:"right",color:kCum!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:13}}>{fmt(kCum)}{usdLine(kCum, usdRate)}</td>
+                        <td style={{padding:"7px 16px",textAlign:"center"}}>
+                          {editingUnlocked && (
+                            <button onClick={()=>handleDeleteExtra(k.code)} title={t("ลบรายการย่อยนี้","Delete this sub-item")}
+                              style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14,opacity:0.7}}
+                              onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=0.7}>✕</button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {/* Inline "add sub-item" form for this row */}
+                  {subFor===r.code && (
+                    <tr style={{background:T.greenBg,borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={qsFrz(0,T.greenBg)}/><td style={qsFrz(1,T.greenBg)}/>
+                      <td style={{padding:"7px 16px", ...qsFrz(2,T.greenBg)}}>
+                        <input className="input-base" value={subName} onChange={e=>setSubName(e.target.value)}
+                          placeholder={t("ชื่อรายการย่อย เช่น Silicone Structure","Sub-item name e.g. Silicone Structure")} style={{width:"100%",fontSize:13}}
+                          onKeyDown={e=>e.key==="Enter"&&handleAddSub(r.code)} autoFocus />
+                      </td>
+                      <td colSpan={(isMultiCol ? 8+columns.length : 9)-3} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                        <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(r.code)}>+ {t("เพิ่ม","Add")}</button>
+                        <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>{t("ยกเลิก","Cancel")}</button>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+            {filtered.length === 0 && (
+              <tr><td colSpan={isMultiCol ? 8+columns.length : 9} style={{padding:"28px 16px",textAlign:"center",color:T.textMuted,fontSize:13}}>{t("ไม่พบรายการที่ตรงกับการค้นหา","No items match your search")}</td></tr>
+            )}
+          </tbody>
+          <tfoot>
+            <tr style={{background:"#eef2f7",borderTop:`2px solid ${T.textMuted}`}}>
+              <td colSpan={3} style={{padding:"14px 16px",color:T.textSecondary,fontSize:13,fontWeight:700, ...qsFrzSpan3("#eef2f7"), bottom:0, zIndex:6}}>{t("รวม","Total")} {filtered.length} {t("รายการ","items")}</td>
+              <td style={{padding:"14px 16px",textAlign:"right",color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:700,fontSize:14, ...qsFrz(3,"#eef2f7"), bottom:0, zIndex:6}}>
+                {fmt(filtered.reduce((s,r)=>s+cumBeforeOf(r),0))}
+                {usdLine(filtered.reduce((s,r)=>s+cumBeforeOf(r),0), usdRate)}
+              </td>
+              <td style={QSF_FOOT}/>
+              {isMultiCol
+                ? columns.map(c => { const ct = filtered.reduce((s,r)=> s + (parseFloat(draftAdd[`${r.code}:${c.id}`])||0), 0); return (
+                    <td key={c.id} style={{padding:"10px 14px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
+                      <span style={{display:"inline-block",fontFamily:"'JetBrains Mono',monospace",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
+                      {usdLine(ct, usdRate)}
+                    </td>
+                  ); })
+                : (() => { const ct = filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0); return (
+                    <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
+                      <span style={{display:"inline-block",fontFamily:"'JetBrains Mono',monospace",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
+                      {usdLine(ct, usdRate)}
+                    </td>
+                  ); })()
+              }
+              <td style={QSF_FOOT}/>
+              <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
+                {(() => { const g = filtered.reduce((s,r)=>s+cumBeforeOf(r)+rowMonthValue(r.code, month, draftAdd),0); return (<>
+                  <span style={{display:"inline-block",background:T.green,color:"#fff",fontWeight:800,padding:"5px 11px",borderRadius:8,fontFamily:"'JetBrains Mono',monospace",fontSize:15}}>{fmt(g)}</span>
+                  {usdLine(g, usdRate)}
+                </>); })()}
+              </td>
+              <td style={QSF_FOOT}/>
+            </tr>
+          </tfoot>
+        </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Money input ────────────────────────────────────────────────────────────
+// ช่องกรอกยอดเงินที่ (1) โชว์ , คั่นหลักพันให้อ่านง่าย และ (2) พิมพ์บวก/ลบได้
+// เช่น "20000+10000" แล้วกด Enter → รวมเป็น 30,000 ให้อัตโนมัติ
+// เก็บค่าเป็นตัวเลขล้วน (string ไม่มี ,) ไว้เบื้องหลัง โค้ดส่วนอื่นใช้ parseFloat ได้ตามเดิม
+const evalMoney = (expr) => {
+  const cleaned = String(expr ?? "").replace(/[,\s]/g, "");
+  if (!cleaned) return "";
+  const terms = cleaned.match(/[+-]?\d*\.?\d+/g);
+  if (!terms) return "";
+  const sum = terms.reduce((s, t) => s + (parseFloat(t) || 0), 0);
+  if (isNaN(sum)) return "";
+  // เงินติดลบไม่มีความหมาย (งบ/ยอด PO/ยอดรับ) — ยังพิมพ์สูตรลบได้ (เช่น 100-20=80)
+  // แต่ถ้าผลรวมออกมาติดลบ ให้เป็น 0 กันข้อมูลเสียหาย
+  return String(Math.max(0, sum));
+};
+const fmtMoneyInput = (v) => {
+  if (v === "" || v == null || isNaN(Number(v))) return "";
+  return Number(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
+};
+function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style, onPaste }) {
+  const [focused, setFocused] = useState(false);
+  const [text, setText] = useState("");
+  const commit = () => { onChange(evalMoney(text)); setFocused(false); };
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      className={className}
+      disabled={disabled}
+      placeholder={placeholder}
+      style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", ...(style || {}) }}
+      value={focused ? text : fmtMoneyInput(value)}
+      onFocus={() => { setFocused(true); setText(value != null && value !== "" ? String(value) : ""); }}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s]/g, ""))}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); e.currentTarget.blur(); } }}
+      onBlur={commit}
+      onPaste={(e) => {
+        // Excel-style block paste: if the clipboard holds a grid (tabs / newlines),
+        // let the parent distribute it across many cells instead of pasting into one.
+        if (!onPaste) return;
+        const raw = e.clipboardData?.getData("text") ?? "";
+        if (/[\t\n\r]/.test(raw.replace(/\s+$/, ""))) {
+          e.preventDefault();
+          e.currentTarget.blur();
+          onPaste(raw);
+        }
+      }}
+      title={t("พิมพ์บวก/ลบได้ เช่น 20000+10000 แล้วกด Enter เพื่อรวมยอด · วางจาก Excel ได้ทั้งบล็อก","Type +/- e.g. 20000+10000 then Enter to sum · paste a whole block from Excel")}
+    />
+  );
+}
+
+// ─── Procurement: PO Detail Modal ──────────────────────────────────────────────
+// Read-only detail view opened by clicking any PO row. Lets the user confirm
+// exactly what was entered without hunting through a wide table, and offers
+// Edit / Delete from the same place.
+// ── ช่องเลือก Account Code แบบพิมพ์ค้นหาได้ (แทน <select> เดิม) ──────────────────
+function AccountPicker({ value, onChange, options }) {
+  useLang();
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+  const sel = options.find(a => a.code === value);
+  const ql = q.trim().toLowerCase();
+  const list = ql ? options.filter(a => (`${a.code} ${a.name}`).toLowerCase().includes(ql)) : options;
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  return (
+    <div ref={ref} style={{position:"relative"}}>
+      <button type="button" onClick={()=>{ setOpen(o=>!o); setQ(""); }}
+        className="input-base" style={{width:"100%",textAlign:"left",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:6}}>
+        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color: sel?T.textPrimary:T.textMuted}}>
+          {sel ? `${sel.code} · ${sel.name}` : t("— เลือก Account Code —","— Select Account Code —")}
+        </span>
+        <span style={{color:T.textMuted,fontSize:11}}>▾</span>
+      </button>
+      {open && (
+        <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:80,background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,boxShadow:"0 14px 34px rgba(15,23,42,0.2)",overflow:"hidden"}}>
+          <div style={{padding:8,borderBottom:`1px solid ${T.cardBorder}`}}>
+            <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder={t("🔍 พิมพ์ค้นหา รหัส / ชื่อบัญชี","🔍 Type to search code / name")}
+              className="input-base" style={{width:"100%",fontSize:13}} />
+          </div>
+          <div className="mscroll" style={{maxHeight:260,overflowY:"auto"}}>
+            {value && (
+              <div onClick={()=>{ onChange(""); setOpen(false); }} style={{padding:"8px 12px",cursor:"pointer",fontSize:12,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>
+                {t("— ล้างการเลือก —","— Clear selection —")}
+              </div>
+            )}
+            {list.length===0 && <div style={{padding:12,fontSize:12,color:T.textMuted}}>{t("ไม่พบรหัสที่ค้นหา","No matching code")}</div>}
+            {list.map(a => (
+              <div key={a.code} onClick={()=>{ onChange(a.code); setOpen(false); }}
+                style={{padding:"8px 12px",cursor:"pointer",fontSize:13,display:"flex",gap:8,alignItems:"baseline",background:a.code===value?T.blueLight:"transparent"}}
+                onMouseEnter={e=>e.currentTarget.style.background = a.code===value?T.blueLight:T.bg}
+                onMouseLeave={e=>e.currentTarget.style.background = a.code===value?T.blueLight:"transparent"}>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:600,flexShrink:0}}>{a.code}</span>
+                <span style={{color:T.textSecondary,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
+  const [confirmDel, setConfirmDel] = useState(false); // ยืนยันลบในแอป (กันกรณี window.confirm ถูกบล็อกใน webview)
+  // กด Esc = ปิด/ยกเลิกหน้ารายละเอียด
+  useEffect(() => {
+    if (!rawPo) return;
+    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); onClose?.(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [rawPo, onClose]);
+  if (!rawPo) return null;
+  const po = migratePO(rawPo);
+  const items = po.items;
+  const supplier = po.supplier;
+  const inc = incomingStatus(po), pay = paymentStatus(po);
+  const history = poHistory(po);
+  const lastUpd = poLastUpdate(po);
+  const locked = !canEditPO(po, session);
+  const receivedDates = poReceivedDates(po);
+  const paidDate = poPaidDate(po);
+  // ยอด "ของเข้าจริง" รวมทุกงวด ห้ามเกินยอดสั่ง — ใช้ปิดปุ่มบันทึก + เตือนค้างไว้
+  // (ยอดแผนเกินมี overPlanned เตือนแบบไม่บล็อกอยู่แล้ว จะได้ไม่กันการบันทึกยอดที่รับจริง)
+  const overCapItem = items.find(it => {
+    const o = itemOrdered(it); if (!(o > 0)) return false;
+    const recvSum = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+    return Math.round(recvSum*100) > Math.round(o*100);
+  });
+
+  // Record actual received / split remaining into a new round, then persist.
+  const setItemRounds = (itemId, rounds) =>
+    onChangePO?.({ ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) });
+  // ลงยอดของเข้าจริง — ห้ามให้ยอดรวมทุกงวดเกิน "ยอดสั่ง" ของ PO นั้น (บล็อก+เตือน)
+  const setActualAmount = (itemId, roundId, val) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    const ordered = itemOrdered(it);
+    const newVal = parseFloat(val)||0;
+    const otherReceived = (it.rounds||[]).filter(r=>r.id!==roundId).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+    if (ordered>0 && Math.round((otherReceived + newVal)*100) > Math.round(ordered*100)) {
+      const maxAllow = Math.max(ordered - otherReceived, 0);
+      setCapWarn(`⚠ ${it.code||"รายการนี้"}: ยอดของเข้ารวมห้ามเกินยอดสั่ง ${fmt(ordered)} — งวดนี้กรอกได้ไม่เกิน ${fmt(maxAllow)} (ระบบไม่บันทึกค่าที่เกิน)`);
+      return; // บล็อก: ไม่บันทึกค่าที่เกินยอดสั่ง
+    }
+    setCapWarn("");
+    updateRound(itemId, roundId, "actualAmount", val);
+  };
+  const updateRound = (itemId, roundId, key, val) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    setItemRounds(itemId, it.rounds.map(r => r.id===roundId ? {...r,[key]:val} : r));
+  };
+  // เพิ่มงวดของเข้าใหม่ (งวดเปล่า) — ให้ผู้ใช้กรอกยอด/วันของเข้าเอง โดยยอดของเข้า
+  // รวมทุกงวดถูกจำกัดไม่ให้เกินยอดสั่งอยู่แล้ว (setActualAmount) จึงไม่ตั้งยอดแผนซ้ำ
+  const splitRound = (itemId) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }]);
+  };
+  // ลบงวดส่งของ — ต้องเหลืออย่างน้อย 1 งวดเสมอ (ใช้แก้กรณีมีงวดเกิน/ซ้ำ)
+  const removeRound = (itemId, roundId) => {
+    const it = po.items.find(i=>i.id===itemId); if (!it) return;
+    if ((it.rounds||[]).length <= 1) return;
+    if (!confirm(t("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)","Delete this round? (its entered amount/date will be removed)"))) return;
+    setItemRounds(itemId, it.rounds.filter(r => r.id !== roundId));
+  };
+  const roundBadge = (r) => {
+    if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
+    // ถ้าวันของเข้าจริงยังมาไม่ถึง (วันในอนาคต) = ยังไม่ถือว่ารับของ แสดงเป็น "นัดรับ"
+    if (r.actualDate > todayStr()) return [t(`นัดรับ ${r.actualDate} (ยังไม่ถึงวัน)`,`Due ${r.actualDate} (not yet)`), INCOMING_BG.pending, INCOMING_CLR.pending];
+    return roundPaid(po,r) ? [t("ถึงกำหนดจ่ายแล้ว","Payment due"), PAYMENT_BG.paid, PAYMENT_CLR.paid]
+                           : [t("ของเข้าแล้ว · รอครบกำหนด","Received · awaiting due"), INCOMING_BG.partial, INCOMING_CLR.partial];
+  };
+
+  const Row = ({ label, value, mono }) => (
+    <div style={{display:"flex",justifyContent:"space-between",gap:16,padding:"10px 0",borderBottom:`1px solid #f1f5f9`}}>
+      <span style={{fontSize:12,color:T.textMuted,fontWeight:500}}>{label}</span>
+      <span style={{fontSize:13,color:T.textPrimary,fontWeight:600,textAlign:"right",fontFamily:mono?"'JetBrains Mono',monospace":undefined}}>{value ?? "—"}</span>
+    </div>
+  );
+
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:20,animation:"fadeIn 0.15s ease"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,padding:26,width:"100%",maxWidth:520,maxHeight:"88vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+          <div>
+            <div style={{fontSize:16,fontWeight:650,color:T.textPrimary}}>{poSupplierLabel(po)}</div>
+            <div style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>{poNumbersLabel(po)}</div>
+          </div>
+          <button onClick={onClose} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted,flexShrink:0}}>×</button>
+        </div>
+
+        {locked && (
+          <div style={{display:"flex",alignItems:"center",gap:6,background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:11,color:"#92400e"}}>
+            🔒 {t("รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)","Fully received & paid — actual amount/date still editable (delete PO and edit vendor/category/order: Admin only)")}
+          </div>
+        )}
+
+        {/* Status is a live dropdown here too — the most natural place to
+            update it right after reviewing everything else on the PO. */}
+        <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap",alignItems:"center"}}>
+          <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)} disabled={locked}/>
+          <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{incLabel(inc)}</span>
+          <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{payLabel(pay)}</span>
+          {po.paymentType && (
+            <span style={{background:PAYMENT_TYPE_BG[po.paymentType],color:PAYMENT_TYPE_CLR[po.paymentType],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{PAYMENT_TYPE_ICON[po.paymentType]} {payTypeLabelT(po)}</span>
+          )}
+        </div>
+        {lastUpd && (
+          <div style={{fontSize:11,color:T.textMuted,marginBottom:4}}>
+            🕓 {t("อัปเดตล่าสุด","Last updated")} {relativeTime(lastUpd.at)} {t("โดย","by")} <b style={{color:T.textSecondary}}>{lastUpd.user}</b>
+          </div>
+        )}
+
+        {/* Supplier (one per PO) + top-line dates */}
+        <div style={{marginTop:10,background:T.bg,borderRadius:10,padding:"10px 12px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+            <div><span style={{fontSize:13,fontWeight:650,color:T.textPrimary}}>{supplier.name||"—"}</span>
+              {supplier.poNumber && <span style={{fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",marginLeft:8}}>{supplier.poNumber}</span>}</div>
+            <span style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.amber}}>{fmt(poTotal(po))}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(poTotal(po)/usdRate)}</span>}</span>
+          </div>
+        </div>
+
+        <div style={{marginTop:4}}>
+          <Row label={t("วันเปิด PO","PO date")} value={po.date} mono />
+          <Row label={t("วันรับของ","Received")} value={receivedDates.length ? receivedDates.join(", ") : t("ยังไม่ได้รับ","Not received")} mono={receivedDates.length>0} />
+          <Row label={t("วันจ่ายเงิน","Payment date")} value={paidDate || t("ยังไม่ถึงกำหนด","Not due yet")} mono={!!paidDate} />
+          <Row label={t("วิธีจ่ายเงิน","Payment method")} value={po.paymentType ? `${PAYMENT_TYPE_ICON[po.paymentType]} ${payTypeLabelT(po)}` : "—"} />
+        </div>
+
+        {/* Per account-code: receiving in installments, with auto-pay + split */}
+        <div style={{marginTop:12}}>
+          <div style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>📦 {t("ของเข้า / จ่ายเงิน (แบ่งงวดได้)","Incoming / payment (by rounds)")}</div>
+          {items.map((it,ii)=>{
+            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            const ordered = itemOrdered(it), recv = itemReceived(it), remain = itemRemaining(it);
+            const planned = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0); // ยอดรวมที่วางแผนไว้ทุกงวด
+            const planRemain = Math.max(ordered - planned, 0);   // ยอดที่ยัง "ไม่ถูกวางแผน" (ไว้แบ่งงวดเพิ่ม)
+            const overPlanned = planned - ordered;               // >0 = รวมทุกงวดเกินยอดสั่ง (มีงวดเกิน/ซ้ำ)
+            const paidAmt = (it.rounds||[]).filter(r=>roundPaid(po,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+            return (
+              <div key={it.id||ii} style={{background:T.bg,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+                  <div style={{minWidth:0}}>
+                    <span style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{it.code||"—"}</span>
+                    <span style={{fontSize:12,color:T.textSecondary,marginLeft:8}}>{acc?.name||"—"}</span>
+                  </div>
+                  <span style={{fontSize:12,color:T.textMuted}}>สั่ง <b style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b></span>
+                </div>
+
+                {(it.rounds||[]).map((r,ri)=>{
+                  const [label,bg,clr] = roundBadge(r);
+                  const payDate = roundPayDate(po,r);
+                  const late = r.actualDate && r.planDate && r.actualDate>r.planDate;
+                  return (
+                    <div key={r.id||ri} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:10,marginBottom:6,background:T.card}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:8}}>
+                        <span style={{fontSize:11,fontWeight:650,color:T.textSecondary}}>งวดที่ {ri+1}{(parseFloat(r.planAmount)||0)>0 ? ` · แผน ${fmt(r.planAmount)}` : ""}</span>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
+                          {!locked && it.rounds.length>1 && (
+                            <button type="button" onClick={()=>removeRound(it.id,r.id)} title={t("ลบงวดนี้","Delete round")}
+                              style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:13,padding:"2px 4px",borderRadius:6,lineHeight:1}}>🗑</button>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                        <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                          <span style={{fontSize:10,color:T.textSecondary}}>{t("ยอดของเข้าจริง (บาท)","Actual received (THB)")}</span>
+                          <MoneyInput value={r.actualAmount} placeholder={t("บาท","THB")}
+                            onChange={v=>setActualAmount(it.id,r.id,v)}/>
+                        </label>
+                        <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                          <span style={{fontSize:10,color:T.textSecondary}}>{t("วันของเข้าจริง","Actual date")}</span>
+                          <input type="date" value={r.actualDate}
+                            onChange={e=>updateRound(it.id,r.id,"actualDate",e.target.value)} className="input-base"/>
+                        </label>
+                      </div>
+                      <div style={{marginTop:6,fontSize:11,color:T.textSecondary}}>
+                        💰 {t("วันครบกำหนดจ่าย","Payment due")}: <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{payDate||"—"}</span>
+                        <span style={{color:T.textMuted}}> ({po.paymentType==="cash"?t("เงินสด","Cash"):po.paymentType==="credit"?t(`เครดิต ${po.creditDays} วัน`,`Credit ${po.creditDays}d`):t("ยังไม่ระบุวิธีจ่าย","No method")})</span>
+                        {late && <span style={{color:T.red}}> · {t("ของมาช้า","late arrival")}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Progress + split */}
+                <div style={{height:8,borderRadius:6,background:T.cardBorder,overflow:"hidden",marginTop:6}}>
+                  <div style={{height:"100%",width:`${ordered>0?Math.min(recv/ordered*100,100):0}%`,background:remain>0?T.amber:T.green}}/>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:5,fontSize:11,color:T.textSecondary}}>
+                  <span>{t("ของเข้าแล้ว","Received")} <b style={{fontFamily:"'JetBrains Mono',monospace",color:T.textPrimary}}>{fmt(recv)}</b> / {fmt(ordered)}</span>
+                  <span>{t("จ่ายแล้ว","Paid")} <b style={{fontFamily:"'JetBrains Mono',monospace",color:paidAmt>0?T.green:T.textMuted}}>{fmt(paidAmt)}</b></span>
+                </div>
+                {Math.round(overPlanned*100)>0 && (
+                  <div style={{marginTop:8,fontSize:11,color:T.red,background:T.redBg,borderRadius:8,padding:"7px 10px",lineHeight:1.4}}>
+                    ⚠ {t("ยอดรวมทุกงวด","Total all rounds")} <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
+                  </div>
+                )}
+                {!locked && ordered>0 && remain>0.001 ? (
+                  <button type="button" onClick={()=>splitRound(it.id)} className="btn-ghost"
+                    style={{marginTop:8,padding:"6px 12px",fontSize:12,borderColor:T.amber,color:T.amber}}>
+                    ➕ {t("เพิ่มงวดของเข้า — เหลือรับอีก","Add round — remaining")} {fmt(remain)}
+                  </button>
+                ) : recv>0.001 && remain<=0.001 && ordered>0 ? (
+                  <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ {t("ของเข้าครบตามยอดสั่งแล้ว","Fully received")}</div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+
+        {po.notes && (
+          <div style={{padding:"10px 0 0"}}>
+            <div style={{fontSize:12,color:T.textMuted,fontWeight:500,marginBottom:4}}>{t("หมายเหตุ","Notes")}</div>
+            <div style={{fontSize:13,color:T.textPrimary,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{po.notes}</div>
+          </div>
+        )}
+
+        {/* Edit history — a running log of who changed what, so status
+            changes and edits are always traceable after the fact. */}
+        {history.length > 0 && (
+          <div style={{marginTop:14,borderTop:`1px solid ${T.cardBorder}`,paddingTop:10}}>
+            <button onClick={()=>setHistoryOpen(v=>!v)}
+              style={{background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>
+              <span style={{transition:"transform 0.15s",transform:historyOpen?"rotate(90deg)":"none",display:"inline-block"}}>▸</span>
+              📜 {t("ประวัติการแก้ไข","Edit history")} ({history.length})
+            </button>
+            {historyOpen && (
+              <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:0}}>
+                {history.map((h,i)=>(
+                  <div key={h.id||i} style={{display:"flex",gap:10,padding:"7px 0",borderBottom:i<history.length-1?"1px solid #f1f5f9":"none"}}>
+                    <span style={{fontSize:14,flexShrink:0}}>{HISTORY_ICON[h.action]||"•"}</span>
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{fontSize:12,color:T.textPrimary,fontWeight:500}}>{h.message}</div>
+                      <div style={{fontSize:11,color:T.textMuted,marginTop:1}}>{formatDateTime(h.at)} · {h.user}{h.role?` (${h.role})`:""}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {(capWarn || overCapItem) && (
+          <div style={{marginTop:14,fontSize:12,color:T.red,background:T.redBg,border:`1px solid ${T.red}`,borderRadius:10,padding:"9px 12px",lineHeight:1.5}}>
+            {capWarn || `⚠ ${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง ${fmt(itemOrdered(overCapItem))} — แก้ให้ไม่เกินก่อน จึงจะกดบันทึกได้ (ปุ่มบันทึกถูกปิดไว้)`}
+          </div>
+        )}
+        <div style={{display:"flex",gap:10,marginTop:16,flexWrap:"wrap",alignItems:"center"}}>
+          <button
+            onClick={()=>{
+              // ตรวจอีกครั้งก่อนปิด: ยอดของเข้าจริงรวมของทุกรายการห้ามเกินยอดสั่ง
+              const bad = po.items.find(it => { const o=itemOrdered(it); const rc=(it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0); return o>0 && Math.round(rc*100) > Math.round(o*100); });
+              if (bad) { setCapWarn(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
+              setCapWarn(""); onClose();
+            }}
+            disabled={!!overCapItem} className="btn-primary"
+            title={overCapItem?t(`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`,`${overCapItem.code||"item"}: total across rounds exceeds order — fix before saving`):undefined}
+            style={{background:overCapItem?"#e2e8f0":T.green,color:overCapItem?"#94a3b8":"#fff",cursor:overCapItem?"not-allowed":"pointer"}}>{overCapItem?"⚠":"💾"} {t("บันทึก","Save")}</button>
+          {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title={t("แก้ผู้ขาย / หมวด / ยอดสั่ง","Edit vendor / category / order")}>✏️ {t("แก้ไข PO","Edit PO")}</button>}
+          {confirmDel ? (
+            <span style={{display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,borderRadius:10,padding:"4px 6px 4px 12px"}}>
+              <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>{t("ลบ PO นี้จริงไหม? ย้อนกลับไม่ได้","Delete this PO? Cannot be undone")}</span>
+              <button onClick={()=>{ setConfirmDel(false); onDelete(po.id, true); }} className="btn-primary" style={{background:T.red,padding:"5px 12px",fontSize:12}}>🗑 {t("ลบเลย","Delete")}</button>
+              <button onClick={()=>setConfirmDel(false)} className="btn-ghost" style={{padding:"5px 10px",fontSize:12}}>{t("ยกเลิก","Cancel")}</button>
+            </span>
+          ) : (
+            <button onClick={()=>setConfirmDel(true)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 {t("ลบ","Delete")}</button>
+          )}
+          <div style={{flex:1}}/>
+          <button onClick={onClose} className="btn-ghost">{t("ปิด","Close")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// A status badge that's also a dropdown — lets anyone change a PO's status
+// in one click from wherever it's shown, instead of opening the full edit form.
+function StatusPicker({ status, onChange, compact, disabled }) {
+  return (
+    <select value={status} disabled={disabled} onClick={e=>e.stopPropagation()} onChange={e=>{ e.stopPropagation(); onChange(e.target.value); }}
+      style={{background:STATUS_BG[status],color:STATUS_CLR[status],fontSize:compact?11:12,padding:compact?"3px 8px":"5px 10px",
+        borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[status]}40`,cursor:disabled?"not-allowed":"pointer",outline:"none",
+        opacity:disabled?0.65:1}} title={disabled?t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only"):undefined}>
+      {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
+    </select>
+  );
+}
+
+// ─── จัดซื้อ: แผนของเข้าทั้งโปรเจค (ใช้ฟอร์มเดียวกับ PO) ────────────────────────
+//  แผน = อ็อบเจ็กต์รูปเดียวกับ PO (isPlan:true) สร้าง/แก้ผ่านฟอร์ม PO โดยติ๊ก
+//  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
+//  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
+function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {}, additions = {}, extraItems = [], hiddenAccounts = [], onNew, onEdit, onConvert, onDelete }) {
+  const list = Array.isArray(plans) ? plans : [];
+  const pos = Array.isArray(poEntries) ? poEntries : [];
+  const acctList = exportAccountList(extraItems, hiddenAccounts);
+  const nameOf = (code) => acctList.find(a => a.code === code)?.name || ACCOUNTS.find(a => a.code === code)?.name || "";
+  const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
+  const planDates = (pl) => poRounds(pl).map(r => r.planDate).filter(Boolean).sort();
+  const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
+  const monthLbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
+  const today = todayStr();
+  const [mSearch, setMSearch] = useState("");            // ค้นหาในตารางของเข้ารายเดือน (Acc. Code/ชื่อ)
+  const [mSort, setMSort] = useState({ key: "code", dir: "asc" }); // เรียงตามหัวคอลัมน์
+
+  // ── รวมรายการของเข้า แยกที่มา: จริง(รับแล้ว/PO) vs แผน — เดือนไหนมีทั้งคู่จะโชว์ 2 ค่า
+  const entries = [];
+  const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
+  list.forEach(pl => poItems(pl).forEach(it => (it.rounds || []).forEach(r => {
+    const amt = parseFloat(r.planAmount) || 0; if (!amt) return;
+    entries.push({ code: it.code, mk: (r.planDate || pl.date || "").slice(0, 7), amount: amt, src: "plan", late: lateOf(r), received: false });
+  })));
+  pos.forEach(p => poItems(p).forEach(it => (it.rounds || []).forEach(r => {
+    if (roundReceived(r)) {
+      const amt = parseFloat(r.actualAmount) || 0; if (!amt) return;
+      entries.push({ code: it.code, mk: r.actualDate.slice(0, 7), amount: amt, src: "po", late: false, received: true });
+    } else {
+      // ยังไม่รับ = "PO รอเข้า" — ใช้ "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
+      const amt = parseFloat(r.actualAmount) || parseFloat(r.planAmount) || 0; if (!amt) return;
+      entries.push({ code: it.code, mk: (r.actualDate || r.planDate || p.date || "").slice(0, 7), amount: amt, src: "po", late: lateOf(r), received: false });
+    }
+  })));
+  const months = [...new Set(entries.map(e => e.mk).filter(Boolean))].sort();
+
+  // แต่ละช่องเก็บแยก: rec(รับแล้ว) / po(PO ยังไม่รับ) / plan(แผน) + ธง late
+  const cellMap = {};
+  entries.forEach(e => {
+    const c = (cellMap[e.code] = cellMap[e.code] || {});
+    const cell = (c[e.mk] = c[e.mk] || { rec: 0, po: 0, poLate: false, plan: 0, planLate: false });
+    if (e.received) cell.rec += e.amount;
+    else if (e.src === "po") { cell.po += e.amount; if (e.late) cell.poLate = true; }
+    else { cell.plan += e.amount; if (e.late) cell.planLate = true; }
+  });
+  const codes = Object.keys(cellMap).sort();
+  const cellOf = (code, mk) => cellMap[code]?.[mk] || null;
+  const cellTot = (c) => c ? (c.rec + c.po + c.plan) : 0;
+  const realTot = (code) => months.reduce((s, mk) => { const c = cellOf(code, mk); return s + (c ? c.rec + c.po : 0); }, 0); // "มีจริง" = รับแล้ว + PO
+  const rowTot = (code) => months.reduce((s, mk) => s + cellTot(cellOf(code, mk)), 0);
+  const colTot = (mk) => shownCodes.reduce((s, c) => s + cellTot(cellOf(c, mk)), 0);
+
+  // ── คอลัมน์ต้นทุน: Tender Cost / Stock / Balance Cost ────────────────────────
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  const budgetOf = (code) => parseFloat(combinedBudget[code]) || 0;
+  const committedOf = (code) => pos.reduce((s, p) => s + poAmountForCode(p, code), 0);
+  const plannedOf = (code) => list.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
+  const stockOf = (code) => pos.reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.store) || 0), 0), 0);
+  const takeoffOf = (code) => [...pos, ...list].reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.takeoff) || 0), 0), 0); // Take off (กรอกเอง)
+  const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
+  const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // "Pending PO" = งบ − Stock − Issue PO − แผน (ยอดที่ยังต้องสั่ง)
+  const balPOof   = (code) => budgetOf(code) - stockOf(code) - issuePOof(code);                      // "Balance Cost" = Tender Cost − Stock − Issue PO
+  // ── ค้นหา + เรียงลำดับตามหัวคอลัมน์ ──────────────────────────────────────────
+  const sortVal = (code, key) => {
+    switch (key) {
+      case "code":    return code;
+      case "name":    return nameOf(code);
+      case "tender":  return budgetOf(code);
+      case "takeoff": return takeoffOf(code);
+      case "stock":   return stockOf(code);
+      case "issue":   return issuePOof(code);
+      case "pending": return balCostOf(code);
+      case "total":   return rowTot(code);
+      case "balcost": return balPOof(code);
+      default:        return key.startsWith("m:") ? cellTot(cellOf(code, key.slice(2))) : code;
+    }
+  };
+  const mQ = mSearch.trim().toLowerCase();
+  const shownCodes = codes
+    .filter(c => !mQ || c.toLowerCase().includes(mQ) || nameOf(c).toLowerCase().includes(mQ))
+    .sort((a, b) => {
+      const va = sortVal(a, mSort.key), vb = sortVal(b, mSort.key);
+      const d = (typeof va === "string" || typeof vb === "string")
+        ? String(va).localeCompare(String(vb), "th")
+        : (va - vb);
+      return mSort.dir === "asc" ? d : -d;
+    });
+  const grand = shownCodes.reduce((s, c) => s + rowTot(c), 0);
+  const toggleSort = (key) => setMSort(s => s.key === key
+    ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: (key === "code" || key === "name") ? "asc" : "desc" });
+  const arrow = (key) => mSort.key === key ? (mSort.dir === "asc" ? " ▲" : " ▼") : "";
+
+  const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
+  const nM = { ...cM, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
+  const hM = (bg) => ({ ...cM, background: bg, fontWeight: 650, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
+  const bCost = "#f4e9ef";
+  // ตรึงคอลัมน์แรก 2 ช่อง (รหัส/ชื่อบัญชี) ให้ไม่เลื่อนหายตอนดูเดือนไกล ๆ
+  const COL1_W = 86;
+  const stickyBody0 = { position: "sticky", left: 0, background: "#fff", zIndex: 1 };
+  const stickyBody1 = { position: "sticky", left: COL1_W, background: "#fff", zIndex: 1 };
+  const stickyHead0 = { left: 0, zIndex: 3 };
+  const stickyHead1 = { left: COL1_W, zIndex: 3 };
+  const money = (n) => n ? (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n)) : "-";
+  const sum = (fn) => shownCodes.reduce((s, c) => s + fn(c), 0);
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto", background: T.amber }}>+ {t("เพิ่ม PO","Add PO")}</button>
+      </div>
+
+      {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
+      {months.length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📦 {t("รายการของเข้ารายเดือน (แผน + PO จริง)","Monthly incoming (plan + real PO)")}</div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
+              <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, background: clr, display: "inline-block" }}/>{label}
+              </span>
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+            <SearchInput value={mSearch} onChange={setMSearch} placeholder={t("🔍 ค้นหา Acc. Code / ชื่อบัญชี","🔍 Search Acc. Code / account name")} width={260} big/>
+            <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownCodes.length}/{codes.length} {t("รายการ","items")}</span>
+          </div>
+          <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+            <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
+              <thead>
+                <tr>
+                  <th onClick={()=>toggleSort("code")}    style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
+                  <th onClick={()=>toggleSort("name")}    style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
+                  <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("tender")}</th>
+                  <th onClick={()=>toggleSort("takeoff")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Take off{arrow("takeoff")}</th>
+                  <th onClick={()=>toggleSort("stock")}   style={{ ...hM(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
+                  <th onClick={()=>toggleSort("issue")}   style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Issue PO{arrow("issue")}</th>
+                  <th onClick={()=>toggleSort("pending")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("pending")}</th>
+                  {months.map(mk => <th key={mk} onClick={()=>toggleSort("m:"+mk)} style={{ ...hM("#eef3ee"), cursor:"pointer", userSelect:"none" }}>{monthLbl(mk)}{arrow("m:"+mk)}</th>)}
+                  <th onClick={()=>toggleSort("total")}   style={{ ...hM("#eef3ee"), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("total")}</th>
+                  <th onClick={()=>toggleSort("balcost")} style={{ ...hM("#eaeef5"), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balcost")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownCodes.map(code => {
+                  const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code), bpo = balPOof(code);
+                  return (
+                    <tr key={code}>
+                      <td style={{ ...cM, ...stickyBody0, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: T.blue }}>{code}</td>
+                      <td style={{ ...cM, ...stickyBody1, color: T.textSecondary }}>{nameOf(code)}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(iss)}{iss ? usdLine(iss, usdRate) : null}</td>
+                      <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
+                      {months.map(mk => {
+                        const c = cellOf(code, mk); const tot = cellTot(c);
+                        return (
+                          <td key={mk} style={{ ...nM, fontWeight: 600, color: tot ? T.textPrimary : T.textMuted }}>
+                            {!tot ? "-" : (<>
+                              {c.rec > 0 && <div style={{ color: T.green }}>{fmt(c.rec)}</div>}
+                              {c.po > 0 && <div style={{ color: c.poLate ? T.amber : T.textPrimary }}>{fmt(c.po)}{c.poLate ? " ⚠" : ""}</div>}
+                              {c.plan > 0 && <div style={{ color: c.planLate ? T.amber : T.red }}>{fmt(c.plan)} *{c.planLate ? "⚠" : ""}</div>}
+                              {usdLine(tot, usdRate)}
+                            </>)}
+                          </td>
+                        );
+                      })}
+                      <td style={{ ...nM, fontWeight: 600, background: "#f6faf6", color: T.textPrimary }}>{rowTot(code) ? fmt(rowTot(code)) : "-"}{rowTot(code) ? usdLine(rowTot(code), usdRate) : null}</td>
+                      <td style={{ ...nM, fontWeight: 600, background: "#eaeef5", color: bpo < 0 ? T.red : T.textPrimary }}>{money(bpo)}{bpo ? usdLine(Math.abs(bpo), usdRate) : null}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td style={{ ...cM, ...stickyBody0, fontWeight: 700, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(budgetOf))}{sum(budgetOf) ? usdLine(sum(budgetOf), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(takeoffOf))}{sum(takeoffOf) ? usdLine(sum(takeoffOf), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(stockOf))}{sum(stockOf) ? usdLine(sum(stockOf), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(issuePOof))}{sum(issuePOof) ? usdLine(sum(issuePOof), usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
+                  {months.map(mk => <td key={mk} style={{ ...nM, fontWeight: 650, background: "#e6ede6" }}>{colTot(mk) ? fmt(colTot(mk)) : "-"}{colTot(mk) ? usdLine(colTot(mk), usdRate) : null}</td>)}
+                  <td style={{ ...nM, fontWeight: 700, background: "#e6ede6" }}>{grand ? fmt(grand) : "-"}{grand ? usdLine(grand, usdRate) : null}</td>
+                  <td style={{ ...nM, fontWeight: 700, background: "#e2e8f2", color: sum(balPOof) < 0 ? T.red : T.textPrimary }}>{money(sum(balPOof))}{sum(balPOof) ? usdLine(Math.abs(sum(balPOof)), usdRate) : null}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary, marginBottom: 10 }}>📝 {t("จัดการแผน","Manage plans")}</div>
+      {sorted.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
+          <div style={{ fontSize:32,marginBottom:10 }}>📅</div>{t("ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม","No incoming plans — press “+ Add plan” to start")}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {sorted.map(pl => {
+            const items = poItems(pl);
+            const total = items.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
+            const ds = planDates(pl);
+            return (
+              <div key={pl.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+                  <span style={{ background: T.amberBg, color: T.amber, fontWeight: 650, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 {t("ของเข้า","Incoming")} {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
+                  {pl.supplier?.name && <span style={{ fontSize: 12, color: T.textSecondary }}>· {pl.supplier.name}</span>}
+                  <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} {t("รายการ","items")}</span>
+                  <span style={{ marginLeft: "auto", textAlign: "right" }}>
+                    <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 650, color: T.textPrimary }}>฿{fmt(total)}</span>
+                    {total ? usdLine(total, usdRate) : null}
+                  </span>
+                  <button onClick={() => onConvert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ ทำเป็น PO จริง</button>
+                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {items.map(it => (
+                    <span key={it.id} style={{ background: "#f8fafc", border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "5px 10px", fontSize: 12 }}>
+                      <b style={{ fontFamily: "'JetBrains Mono',monospace", color: T.blue }}>{it.code}</b> {nameOf(it.code)} · <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>฿{fmt(parseFloat(it.amount) || 0)}</b>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Procurement View ─────────────────────────────────────────────────────────
+function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode, incomingPlan={}, saveIncomingPlan }) {
+  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  const [tab,    setTab]    = useState("list"); // "list" | "tracking"
+  const [tabHist, setTabHist] = useState([]);   // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
+  const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
+  const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
+  const [view,   setView]   = useState("browse"); // "browse" | "add"
+  const blankItem = () => ({ id:uid(), code:"", takeoff:"", store:"", amount:"",
+    rounds:[{ id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }] });
+  const emptyForm = () => ({
+    date:new Date().toISOString().slice(0,10), status:"PO Issued",
+    supplier:{ name:"", poNumber:"" },
+    paymentType:"", creditDays:DEFAULT_CREDIT_DAYS, notes:"",
+    items:[ blankItem() ], isPlan:false,
+  });
+  const [form,   setForm]   = useState(emptyForm);
+  const [editId, setEditId] = useState(null);
+  const [editingPlan, setEditingPlan] = useState(false); // true = กำลังแก้ "แผนของเข้า" (มาจากลิสต์แผน)
+  const [payModal, setPayModal] = useState(null);        // {po, date} — ตอนตั้งสถานะ Paid ให้กรอกวันจ่ายเอง
+  const [filter, setFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [detailId, setDetailId] = useState(null);
+  const [collapsed, setCollapsed] = useState({});
+  const plans = Array.isArray(incomingPlan) ? incomingPlan : [];
+  // อยู่ในโหมดแก้ไขเมื่อเปิดฟอร์มเพิ่ม/แก้ PO หรือเปิดหน้ารายละเอียด (บันทึกของเข้า/แบ่งงวด)
+  useEffect(() => { setEditMode?.(view==="add" || detailId!=null); return () => setEditMode?.(false); }, [view, detailId, setEditMode]);
+
+  const detailPO = poEntries.find(p => p.id === detailId) || null;
+  const openDetail  = (p) => setDetailId(p.id);
+  const closeDetail = () => setDetailId(null);
+  const toggleGroup = (code) => setCollapsed(c => ({...c, [code]: !c[code]}));
+
+  // Budget (QS) = baseline Tender Cost + every monthly addition (ค่าธรรมดา +
+  // คอลัมน์ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตรงกัน
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+  // Sum only top-level codes (accounts not hidden + standalone extras).
+  // combinedBudget also carries an entry for every sub-item (EX-xxxx with a
+  // parentCode) since those persist in tenderCosts/additions individually —
+  // their total is already rolled into their parent's value, so summing
+  // Object.values(combinedBudget) wholesale would double-count them.
+  const topLevelCodes = [
+    ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)).map(a => a.code),
+    ...extraItems.filter(e => !e.parentCode).map(e => e.code),
+  ];
+  const tenderTotal = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
+  const totalComm   = poEntries.reduce((s,p)=>s+poTotal(p),0);
+  const totalPaid   = poEntries.reduce((s,p)=>s+poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0),0);
+  const paidCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
+
+  // Late-item alert counts, shown as a banner regardless of which tab is
+  // active so problems surface immediately instead of only inside "ติดตามของเข้า/จ่ายเงิน".
+  const lateIncomingCount = poEntries.filter(p=>incomingStatus(p)==="late").length;
+  const latePaymentCount  = poEntries.filter(p=>paymentStatus(p)==="late" && p.status!=="Paid").length;
+
+  // Supplier (single) + item (account-code line) helpers
+  const updateSupplierField = (key, val) => setForm(f=>({...f, supplier:{...f.supplier, [key]:val}}));
+  const addItemRow    = () => setForm(f=>({...f, items:[...f.items, blankItem()]}));
+  const removeItemRow = (id) => setForm(f=>({...f, items: f.items.length>1 ? f.items.filter(it=>it.id!==id) : f.items}));
+  const updateItemRow = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>it.id===id?{...it,[key]:val}:it)}));
+  // Update the first (order-time) round of an item — used for its แผนของเข้า date.
+  const updateItemPlan = (id, key, val) => setForm(f=>({...f, items: f.items.map(it=>{
+    if (it.id!==id) return it;
+    const rounds = it.rounds && it.rounds.length ? it.rounds.slice() : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}];
+    rounds[0] = {...rounds[0], [key]:val};
+    return {...it, rounds};
+  })}));
+
+  // Budget / net / % helpers for the % field on each account-code line.
+  const budgetForCode = (code) => parseFloat(combinedBudget[code])||0;
+  // ยอด PO ที่สั่งไปแล้ว + แผนที่มีอยู่แล้วของ code นี้ (ยกเว้นรายการที่กำลังแก้อยู่)
+  const otherCommitted = (code) => poEntries.reduce((s,p)=> (!editingPlan && p.id===editId) ? s : s + poAmountForCode(p, code), 0);
+  const otherPlanned   = (code) => plans.reduce((s,pl)=> (editingPlan && pl.id===editId) ? s : s + poAmountForCode(pl, code), 0);
+  // ของใน store ที่ "บันทึกไว้แล้ว" ในรายการ PO อื่นของ code นี้ (ยกเว้นรายการที่กำลังแก้อยู่)
+  // — ต้องหักด้วย ไม่งั้น "ต้องสั่งสุทธิ" ในฟอร์มจะไม่ตรงกับ Balance Cost ในตาราง
+  const otherStock = (code) => poEntries.reduce((s,p)=> (!editingPlan && p.id===editId) ? s : s + poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0), 0);
+  // "ต้องสั่งสุทธิ" = ยอดที่เหลือต้องสั่งจริง = งบ − store(ในฟอร์ม) − store ที่บันทึกไว้แล้ว − PO ที่สั่งแล้ว − แผนที่มี
+  // "ต้องสั่งสุทธิ" อ้างอิงจาก Take off (กรอกเอง) — ไม่ผูกกับงบโครงการ (QS) อีกต่อไป
+  const itemNet = (it) => (parseFloat(it.takeoff)||0) - (parseFloat(it.store)||0) - otherStock(it.code) - otherCommitted(it.code) - otherPlanned(it.code);
+  const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
+  // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
+
+  const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+
+  const submit = () => {
+    // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
+    // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
+    if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert(t("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก","PO value cannot be negative — please fix before saving")); return; }
+    const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
+      id: it.id || uid(), code: it.code, takeoff: it.takeoff || "", store: it.store || "", amount: it.amount,
+      rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
+        id: r.id || uid(),
+        planDate: r.planDate || "",
+        planAmount: idx===0 ? (r.planAmount || it.amount) : (r.planAmount || ""),
+        actualAmount: r.actualAmount || "",
+        actualDate: r.actualDate || "",
+      })),
+    }));
+    if (!validItems.length) { alert(t("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ","Please select an Account Code and enter at least one value")); return; }
+    // กันยอดของเข้าจริงรวมทุกงวดเกินยอดสั่งของแต่ละรายการ (แจ้งเตือน + บันทึกไม่ได้)
+    const overItem = validItems.find(it => {
+      const o = parseFloat(it.amount)||0; if (!(o>0)) return false;
+      const rc = it.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+      return Math.round(rc*100) > Math.round(o*100);
+    });
+    if (overItem) { alert(t(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`,`⚠ ${overItem.code}: total received across rounds (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) exceeds ordered ${fmt(overItem.amount)} — fix before saving`)); return; }
+    // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
+    if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { alert(t("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก","A real PO needs a PO number before saving")); return; }
+    const payload = {
+      date: form.date, status: form.status, notes: form.notes || "",
+      supplier: { name: form.supplier.name.trim(), poNumber: (form.supplier.poNumber||"").trim() },
+      paymentType: form.paymentType || "", creditDays: parseInt(form.creditDays,10) || DEFAULT_CREDIT_DAYS,
+      items: validItems,
+    };
+    const toPlan = !!form.isPlan;   // ติ๊ก "แผนของเข้า" ไว้ไหม
+
+    const prev = editId ? (editingPlan ? plans.find(x=>x.id===editId) : poEntries.find(x=>x.id===editId)) : null;
+    const entries = [];
+    if (prev && prev.status !== payload.status) entries.push(historyEntry(session, "status", `${t("เปลี่ยนสถานะ","Status change")}: ${prev.status} → ${payload.status}`));
+    entries.push(historyEntry(session, prev ? "edited" : "created", toPlan ? (prev?t("แก้ไขแผนของเข้า","Edited incoming plan"):t("สร้างแผนของเข้า","Created incoming plan")) : (prev?t("แก้ไขข้อมูล PO","Edited PO"):t("สร้างรายการ PO","Created PO"))));
+    const withLog = { ...payload, isPlan: toPlan, history: [...entries.reverse(), ...(prev?.history||[])].slice(0,40) };
+
+    if (editingPlan) {
+      // ต้นทางเป็น "แผน": ติ๊กแผนอยู่ = อัปเดตแผน · เอาติ๊กออก = แปลงแผน → PO จริง (ย้ายออก)
+      if (toPlan) saveIncomingPlan(plans.map(pl=>pl.id===editId?{...withLog,id:editId}:pl));
+      else { saveIncomingPlan(plans.filter(pl=>pl.id!==editId)); savePO([...poEntries,{...withLog,id:uid()}]); }
+    } else if (toPlan) {
+      // ต้นทางเป็น PO (หรือรายการใหม่) แต่ติ๊กเป็นแผน → บันทึกเป็นแผน (ถ้าเดิมเป็น PO ให้ย้ายออก)
+      if (editId && poEntries.some(p=>p.id===editId)) savePO(poEntries.filter(p=>p.id!==editId));
+      saveIncomingPlan([...plans,{...withLog,id:uid()}]);
+    } else {
+      // PO ปกติ (ใหม่/แก้ไข)
+      savePO(editId ? poEntries.map(p=>p.id===editId?{...withLog,id:editId}:p) : [...poEntries,{...withLog,id:uid()}]);
+    }
+    setEditId(null); setEditingPlan(false);
+    setForm(emptyForm());
+    setView("browse");
+  };
+
+  // Persist an in-place update to a PO's items/rounds (used by the detail view
+  // when recording actual goods received or splitting a round). Migrates the
+  // record to the new shape on first touch so it's normalised going forward.
+  const updatePO = (updated) => savePO(poEntries.map(x=>x.id===updated.id?updated:x));
+
+  // One-click status change — used by the StatusPicker wherever a PO is
+  // listed, so procurement doesn't need to open the full edit form just to
+  // move a PO from "PO Issued" to "Delivered". Still fully logged. Locked
+  // once a PO is fully received + fully paid, unless the current user is admin.
+  const applyStatus = (po, newStatus, paidDate) => {
+    const patch = { ...po, status: newStatus };
+    if (newStatus === "Paid") patch.paidDate = paidDate || todayStr();   // จำวันจ่ายที่กำหนดเอง
+    const label = `${t("เปลี่ยนสถานะ","Status change")}: ${po.status} → ${newStatus}` + (newStatus === "Paid" && patch.paidDate ? ` (${t("จ่าย","paid")} ${patch.paidDate})` : "");
+    const updated = withHistory(patch, historyEntry(session, "status", label));
+    savePO(poEntries.map(x=>x.id===po.id?updated:x));
+  };
+  const changeStatus = (po, newStatus) => {
+    if (newStatus === po.status) return;
+    if (!canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
+    // ตั้งเป็น "Paid" → เตือนถ้ายังไม่มีการรับของเลย แล้วให้กรอกวันจ่ายเองก่อน
+    if (newStatus === "Paid") {
+      const anyReceived = poRounds(po).some(r => roundReceived(r));
+      if (!anyReceived && !window.confirm(t("PO นี้ยังไม่มีการรับของเลย — ยืนยันว่าจ่ายแล้วจริง?","This PO has no received goods yet — confirm it is really paid?"))) return;
+      setPayModal({ po, date: po.paidDate || todayStr() });
+      return;
+    }
+    applyStatus(po, newStatus);
+  };
+
+  const openEdit = (p) => {
+    if (!canEditPO(p, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
+    const P = migratePO(p);
+    setForm({
+      date: P.date, status: P.status, notes: P.notes || "",
+      supplier: { name: P.supplier.name || "", poNumber: P.supplier.poNumber || "" },
+      paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
+      items: P.items.map(it=>({
+        id: it.id || uid(), code: it.code || "", takeoff: it.takeoff || "", store: it.store || "", amount: it.amount || "",
+        rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
+          .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
+      })), isPlan:false,
+    });
+    setEditId(p.id); setEditingPlan(false); setView("add"); setDetailId(null);
+  };
+  // โหลด PO/แผน (โครงสร้างเดียวกัน) เข้าฟอร์ม — ใช้ร่วมกันทั้งแก้แผนและแปลงเป็น PO
+  const loadIntoForm = (p, asPlan) => {
+    const P = migratePO(p);
+    setForm({
+      date: P.date || todayStr(), status: P.status || "PO Issued", notes: P.notes || "",
+      supplier: { name: P.supplier?.name || "", poNumber: P.supplier?.poNumber || "" },
+      paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
+      items: (P.items||[]).map(it=>({
+        id: it.id || uid(), code: it.code || "", takeoff: it.takeoff || "", store: it.store || "", pct: it.pct ?? "", amount: it.amount || "",
+        rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
+          .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
+      })), isPlan: asPlan,
+    });
+    setEditId(p.id); setEditingPlan(true); setDetailId(null); setView("add");
+  };
+  const openNewPO   = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:false }); setDetailId(null); setView("add"); };
+  const openNewPlan = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:true }); setDetailId(null); setView("add"); };
+  const openEditPlan = (pl) => loadIntoForm(pl, true);   // แก้แผน (ติ๊กแผนอยู่)
+  const startConvert = (pl) => loadIntoForm(pl, false);  // แปลงแผน → PO (เอาติ๊กออกให้แล้ว กดบันทึกก็เป็น PO)
+  const deletePlan = (id) => {
+    const pl = (plans||[]).find(p=>p.id===id);
+    const d = pl ? (poRounds(pl).map(r=>r.planDate).filter(Boolean).sort()[0] || pl.date || "") : "";
+    const info = pl ? `${d||"(ไม่มีวัน)"}${pl.supplier?.name?` · ${pl.supplier.name}`:""} · ฿${fmt0(poItems(pl).reduce((s,it)=>s+(parseFloat(it.amount)||0),0))}` : "";
+    if (window.confirm(t(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`,`Delete this incoming plan?${info?`\n\n${info}`:""}\n\n(deletes the "plan" only — real PO unaffected)`))) saveIncomingPlan(plans.filter(pl=>pl.id!==id));
+  };
+  const deletePO = (id, confirmed=false) => {
+    const po = poEntries.find(x=>x.id===id);
+    if (po && !canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin","This PO is fully received & paid — Admin only can delete")); return; }
+    // ถามยืนยันก่อนลบ (ลบแล้วย้อนกลับไม่ได้) — ถ้า confirmed=true แปลว่ายืนยันในแอปมาแล้ว
+    const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ${fmt(poTotal(po))} บาท` : "";
+    if (!confirmed && !window.confirm(t(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`,`Confirm deleting this PO?\n\n${label}\n\n⚠ This cannot be undone`))) return;
+    savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
+    if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
+  };
+  const closeForm = () => { setView("browse"); setEditId(null); setEditingPlan(false); setForm(emptyForm()); };
+  // ปุ่ม "กลับ" — ย้อนทีละชั้น: ฟอร์ม → ปิดฟอร์ม, รายละเอียด → ปิด, สลับแท็บ → ย้อนแท็บ,
+  // สุดทางแล้วค่อยออกไปหน้าก่อนหน้า (เลือกโครงการ/เลือกโรล)
+  const backNav = () => {
+    if (view === "add")       return closeForm();
+    if (detailId != null)     return closeDetail();
+    if (tabHist.length)       { const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); return; }
+    onBack();
+  };
+  // กด Esc ระหว่างเปิดฟอร์มเพิ่ม/แก้ PO = ยกเลิก (ปิดฟอร์มโดยไม่บันทึก)
+  useEffect(() => {
+    if (view !== "add") return;
+    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); closeForm(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [view]);
+
+  const filtered = poEntries.filter(p=>{
+    const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
+    return (filter==="All"||p.status===filter)&&
+      (search===""||[itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(search.toLowerCase()));
+  });
+
+  // Group the filtered POs by Account Code so long lists stay organised and
+  // scannable — a PO split across several codes appears once per code, with
+  // only that code's share of the amount counted in that group's subtotal.
+  const groupedFiltered = {};
+  filtered.forEach(p => {
+    poItems(p).forEach(it => {
+      if (!it.code) return;
+      (groupedFiltered[it.code] = groupedFiltered[it.code] || []).push({ po:p, item:it });
+    });
+  });
+  const groupTotals = Object.fromEntries(Object.entries(groupedFiltered).map(([c,rows])=>[c, rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0)]));
+  const sortedGroupCodes = Object.keys(groupedFiltered).sort();
+
+  return (
+    <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+      {payModal && (
+        <div onClick={()=>setPayModal(null)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,width:"min(380px,100%)",overflow:"hidden",boxShadow:"0 24px 60px rgba(15,23,42,0.3)"}}>
+            <div style={{background:"linear-gradient(135deg,#065f46,#10b981)",padding:"14px 20px",color:"#fff",fontWeight:650,fontSize:15}}>💵 {t("บันทึกการจ่ายเงิน","Record payment")}</div>
+            <div style={{padding:20,display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{fontSize:12,color:T.textSecondary}}>{poSupplierName(payModal.po)} · <b>฿{fmt(poTotal(payModal.po))}</b></div>
+              <label style={{fontSize:12,color:T.textSecondary,display:"flex",flexDirection:"column",gap:5}}>
+                {t("วันที่จ่ายเงิน","Payment date")}
+                <input type="date" value={payModal.date} onChange={e=>setPayModal(m=>({...m,date:e.target.value}))} className="input-base" style={{padding:"8px 10px"}}/>
+              </label>
+            </div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10,padding:"14px 20px",borderTop:`1px solid ${T.cardBorder}`}}>
+              <button onClick={()=>setPayModal(null)} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
+              <button onClick={()=>{ if(!payModal.date){alert(t("เลือกวันที่จ่าย","Select a payment date"));return;} applyStatus(payModal.po,"Paid",payModal.date); setPayModal(null); }} className="btn-primary" style={{background:T.green}}>{t("บันทึกจ่ายแล้ว","Save as paid")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{padding:"24px 28px"}}>
+        {view!=="add" && (
+          <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center"}}>
+            {[["list",t("📋 รายการ PO","📋 PO List")],["inplan",t("📅 แผนของเข้า","📅 Incoming plan")]].map(([id,label])=>(
+              <button key={id} onClick={()=>goTab(id)}
+                style={{background:tab===id?T.amber:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.amber:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                {label}
+              </button>
+            ))}
+            <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+            <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.amber,color:T.amber}}>
+              ⬇️ Export Excel
+            </button>
+          </div>
+        )}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+          <StatCard label="Budget (QS)" value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t("เดิม + เพิ่มรายเดือนทุกเดือน","Baseline + all monthly additions")} color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label="Committed (PO)" value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} ${t("รายการ","items")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
+          <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} ${t("รายการ","items")} · ${t("จ่ายอัตโนมัติ","auto-paid")}`} color={T.green} icon="✅" accent={T.greenBg}/>
+          <StatCard label={t("Budget คงเหลือ","Budget remaining")} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ${t("ใช้ไปแล้ว","used")}`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
+        </div>
+
+        {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
+          <div onClick={()=>{ goTab("inplan"); setTrackingOnlyIssues(true); }}
+            style={{background:T.redBg,border:`1.5px solid #fecaca`,borderRadius:12,padding:"12px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}>
+            <span style={{fontSize:20}}>⚠️</span>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,fontWeight:650,color:T.red}}>
+                {t("มีรายการที่ต้องรีบดู","Items that need attention")}
+                {lateIncomingCount>0 && <span> — {t("ของเข้าล่าช้า","late incoming")} {lateIncomingCount} {t("รายการ","items")}</span>}
+                {lateIncomingCount>0 && latePaymentCount>0 && <span>,</span>}
+                {latePaymentCount>0 && <span> {t("จ่ายเงินเกินกำหนด","overdue payments")} {latePaymentCount} {t("รายการ","items")}</span>}
+              </div>
+              <div style={{fontSize:11,color:"#b91c1c",marginTop:1}}>{t("คลิกเพื่อดูรายละเอียดทั้งหมด","Click to see all details")}</div>
+            </div>
+            <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>{t("ดูรายการ","View")} →</span>
+          </div>
+        )}
+
+        {view==="add" ? (
+          <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:28,maxWidth:680,animation:"fadeIn 0.2s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+              <div>
+                <div style={{fontSize:15,fontWeight:650,color:T.textPrimary}}>{(editId||editingPlan) ? (form.isPlan?t("แก้ไขแผนของเข้า","Edit incoming plan"):t("บันทึกเป็น PO จริง","Save as real PO")) : (form.isPlan?t("เพิ่มแผนของเข้า","Add incoming plan"):t("เพิ่ม PO ใหม่","Add new PO"))}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>{t("เลือกด้านล่างว่าจะบันทึกเป็น PO จริง หรือ แผนของเข้า (ฟอร์มเดียวกัน)","Choose below: save as a real PO or an incoming plan (same form)")}</div>
+              </div>
+              <button onClick={closeForm} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted}}>×</button>
+            </div>
+            {/* สวิตช์: PO จริง / แผนของเข้า — ติ๊กแผนจากลิสต์แผนแล้วเปลี่ยนเป็น PO = แปลงเป็น PO จริง */}
+            <div style={{display:"flex",gap:6,marginBottom:18,background:T.bg,padding:4,borderRadius:10,width:"fit-content"}}>
+              {[[t("🧾 PO จริง","🧾 Real PO"),false,T.blue],[t("📅 แผนของเข้า","📅 Incoming plan"),true,T.amber]].map(([label,val,clr])=>(
+                <button key={label} onClick={()=>setForm(f=>({...f,isPlan:val}))}
+                  style={{border:"none",borderRadius:8,padding:"7px 18px",fontSize:13,fontWeight:600,cursor:"pointer",
+                    background: form.isPlan===val ? clr : "transparent", color: form.isPlan===val ? "#fff" : T.textSecondary}}>{label}</button>
+              ))}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+              <label style={{display:"flex",flexDirection:"column",gap:6}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("วันที่สั่ง PO","PO order date")}</span>
+                <input type="date" value={form.date} onChange={e=>setForm(f=>({...f, date:e.target.value}))} className="input-base"/>
+              </label>
+              <label style={{display:"flex",flexDirection:"column",gap:6}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("สถานะ","Status")}</span>
+                <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} className="input-base">
+                  {PO_STATUS.map(s=><option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
+
+              {/* Supplier — exactly one vendor per PO. */}
+              <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
+                <span style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>🏢 Supplier · {t("ชื่อไม่บังคับ","name optional")}{!form.isPlan && <span style={{color:T.red}}> · {t("เลข PO บังคับ","PO no. required")} *</span>}</span>
+              </div>
+              <div style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <input placeholder={t("ชื่อ Supplier (ถ้ามี)","Supplier name (optional)")} value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
+                <input placeholder={form.isPlan ? t("เลข PO (ถ้ามี)","PO no. (optional)") : t("เลข PO *","PO no. *")} value={form.supplier.poNumber} onChange={e=>updateSupplierField("poNumber",e.target.value)} className="input-base"
+                  style={!form.isPlan && !(form.supplier.poNumber||"").trim() ? {borderColor:T.red, background:T.redBg} : undefined}/>
+              </div>
+
+              {/* Account-code line items — each carries its own store amount and
+                  its % of the net-to-purchase (budget − store). */}
+              <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",gap:8,marginTop:6,paddingTop:14,borderTop:`1px dashed ${T.cardBorder}`}}>
+                <span style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>📐 {t("หมวดต้นทุน * (กรอกของใน store และ % ของยอดสั่ง)","Cost items * (enter store qty and % of order)")}</span>
+              </div>
+              <div style={{gridColumn:"1/-1",display:"flex",flexDirection:"column",gap:12}}>
+                {form.items.map((it)=>{
+                  const budget = budgetForCode(it.code);
+                  const net = itemNet(it);
+                  const amt = parseFloat(it.amount)||0;
+                  const pct = net>0 ? Math.round(amt/net*100) : 0;
+                  const prevOrdered = poEntries.reduce((s,p)=> p.id===editId ? s : s + poAmountForCode(p, it.code), 0);
+                  const cumPct = net>0 ? Math.round((prevOrdered+amt)/net*100) : 0;
+                  return (
+                  <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:12}}>
+                      <AccountPicker value={it.code} onChange={code=>updateItemRow(it.id,"code",code)} options={ACCOUNTS} />
+                      <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
+                        style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
+                    </div>
+                    {/* แถวบน: Take off (กรอกเอง) · store · ต้องสั่งสุทธิ (อ่านอย่างเดียว) */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>Take off <span style={{color:T.textMuted,fontWeight:400}}>({t("กรอกเอง","manual")})</span></span>
+                        <MoneyInput value={it.takeoff} onChange={v=>updateItemRow(it.id,"takeoff",v)}/>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("มีใน store","In store")}</span>
+                        <MoneyInput value={it.store} onChange={v=>updateItemRow(it.id,"store",v)}/>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:net<0?T.red:T.amber,fontWeight:500}}>{t("ต้องสั่งสุทธิ","Net to order")} {net<0?t("(เกิน)","(over)"):""}</span>
+                        <input className="input-base" readOnly tabIndex={-1} value={net<0?`-${fmtMoneyInput(Math.abs(net))}`:fmtMoneyInput(net)}
+                          style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,background:net<0?T.redBg:T.amberBg,color:net<0?T.red:T.amber,borderColor:"transparent"}}/>
+                      </label>
+                    </div>
+                    {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("มูลค่า PO นี้ (THB)","This PO value (THB)")}</span>
+                        <MoneyInput value={it.amount} onChange={v=>setItemAmount(it.id,v)}/>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("% ของยอดสั่ง (กรอกเอง)","% of order (manual)")}</span>
+                        <div style={{position:"relative",display:"flex",alignItems:"center"}}>
+                          <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)}
+                            className="input-base" style={{textAlign:"right",fontFamily:"'JetBrains Mono',monospace",flex:1,paddingRight:26}}/>
+                          <span style={{position:"absolute",right:11,fontSize:13,color:(it.pct??"")!==""?T.textPrimary:T.textMuted,fontWeight:600,pointerEvents:"none"}}>%</span>
+                        </div>
+                      </label>
+                      <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("แผนของเข้า (งวดแรก)","Incoming plan (1st round)")}</span>
+                        <input type="date" value={it.rounds?.[0]?.planDate||""} onChange={e=>updateItemPlan(it.id,"planDate",e.target.value)} className="input-base"/>
+                      </label>
+                    </div>
+                    {it.code && ((it.pct??"")!=="" || amt>0) && (
+                      <div style={{marginTop:10,fontSize:11,color:T.textSecondary}}>
+                        {t("% ของยอดสั่ง PO นี้","% of this PO order")}: <b style={{color:(parseFloat(it.pct)||0)>100?T.red:T.textPrimary,fontSize:12}}>{(it.pct??"")!=="" ? `${it.pct}%` : "—"}</b> <span style={{color:T.textMuted}}>({t("ที่กรอกเอง","manual")})</span>
+                        {amt>0 && <span style={{color:T.textMuted}}> · {t("ยอดจริง","actual")} {fmt(amt)} = {budget>0?Math.round(amt/budget*100):0}% {t("ของงบรวม","of total budget")}</span>}
+                      </div>
+                    )}
+                  </div>
+                  );
+                })}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <button type="button" onClick={addItemRow} className="btn-ghost" style={{padding:"6px 12px",fontSize:12}}>+ {t("เพิ่ม Account Code","Add Account Code")}</button>
+                  {form.items.length>1 && <span style={{fontSize:12,color:T.textSecondary}}>{t("รวม","Total")}: <b style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(formTotal)}</b></span>}
+                </div>
+              </div>
+
+              <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("วิธีจ่ายเงิน","Payment method")}</span>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"cash"}))}
+                    style={{flex:"1 1 160px",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="cash"?T.green:T.cardBorder}`,background:form.paymentType==="cash"?T.greenBg:T.card,color:form.paymentType==="cash"?T.green:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
+                    💵 {t("เงินสด","Cash")} <span style={{fontWeight:450,fontSize:11,opacity:0.8}}>({t("จ่ายวันของเข้า","pay on arrival")})</span>
+                  </button>
+                  <button type="button" onClick={()=>setForm(f=>({...f,paymentType:"credit",creditDays:f.creditDays||DEFAULT_CREDIT_DAYS}))}
+                    style={{flex:"1 1 160px",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${form.paymentType==="credit"?T.blue:T.cardBorder}`,background:form.paymentType==="credit"?T.blueLight:T.card,color:form.paymentType==="credit"?T.blue:T.textSecondary,fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s"}}>
+                    💳 {t("เครดิต","Credit")}
+                  </button>
+                  {form.paymentType==="credit" && (
+                    <span style={{display:"flex",alignItems:"center",gap:6}}>
+                      <input type="number" value={form.creditDays} onChange={e=>setForm(f=>({...f,creditDays:e.target.value}))} className="input-base" style={{width:76}}/>
+                      <span style={{fontSize:12,color:T.textSecondary}}>{t("วัน","days")}</span>
+                    </span>
+                  )}
+                </div>
+                {form.paymentType && (
+                  <span style={{fontSize:11,color:T.blue}}>{t("วันครบกำหนดจ่ายคำนวณอัตโนมัติจาก \"วันของเข้าจริง\" ของแต่ละงวด","Due date is auto-calculated from each round's actual arrival date")}{form.paymentType==="credit"?` + ${form.creditDays||DEFAULT_CREDIT_DAYS} ${t("วัน","days")}`:""} — {t("จ่ายอัตโนมัติเมื่อถึงกำหนด","auto-paid when due")}</span>
+                )}
+              </label>
+
+              <label style={{display:"flex",flexDirection:"column",gap:6,gridColumn:"1/-1"}}>
+                <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("หมายเหตุ","Notes")}</span>
+                <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} className="input-base" style={{resize:"vertical"}}/>
+              </label>
+            </div>
+            {/* เว้นที่ด้านล่างให้พ้นแถบ "ย้อนกลับ/ทำซ้ำ" ที่ลอยมุมซ้ายล่าง ไม่ให้ทับปุ่ม */}
+            <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap",alignItems:"center"}}>
+              <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editingPlan && !form.isPlan ? t("แปลงเป็น PO จริง","Convert to real PO") : form.isPlan ? t("บันทึกแผน","Save plan") : (editId?t("บันทึก","Save"):t("เพิ่ม PO","Add PO"))}</button>
+              <button onClick={closeForm} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
+              {editId && (
+                <button onClick={()=>{ if (editingPlan) { deletePlan(editId); closeForm(); } else deletePO(editId); }}
+                  style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,color:T.red,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                  🗑 {editingPlan ? t("ลบแผนนี้","Delete this plan") : t("ลบ PO นี้","Delete this PO")}
+                </button>
+              )}
+            </div>
+          </div>
+        ) : tab==="inplan" ? (
+          <>
+            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPO} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+            {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
+            <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
+              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14}}>🚚 {t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
+              <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
+                onStatusChange={changeStatus} session={session} usdRate={usdRate}
+                tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
+                onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+              <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account, supplier, PO...","🔍 Search Account, supplier, PO...")} width={240}/>
+              <div style={{display:"flex",gap:5,flex:1,flexWrap:"wrap"}}>
+                {["All",...PO_STATUS].map(s=>(
+                  <button key={s} onClick={()=>setFilter(s)}
+                    style={{background:filter===s?T.amber:"transparent",border:`1.5px solid ${filter===s?T.amber:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===s?"#fff":T.textSecondary,fontSize:11,cursor:"pointer",fontWeight:500,transition:"all 0.15s"}}>{s}</button>
+                ))}
+              </div>
+              {filtered.length>0 && (
+                <button onClick={()=>{
+                    const allCollapsed = Object.keys(groupTotals).every(c=>collapsed[c]);
+                    const next = {}; Object.keys(groupTotals).forEach(c=>{ next[c] = !allCollapsed; });
+                    setCollapsed(next);
+                  }}
+                  className="btn-ghost" style={{padding:"7px 14px",fontSize:12}}>
+                  {Object.keys(groupTotals).length>0 && Object.keys(groupTotals).every(c=>collapsed[c]) ? `⬇️ ${t("ขยายทั้งหมด","Expand all")}` : `⬆️ ${t("ย่อทั้งหมด","Collapse all")}`}
+                </button>
+              )}
+              <button onClick={openNewPO} className="btn-primary" style={{background:T.amber}}>+ {t("เพิ่ม PO","Add PO")}</button>
+            </div>
+
+            {filtered.length===0 ? (
+              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+                <div style={{fontSize:32,marginBottom:12}}>📋</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{poEntries.length===0?t("ยังไม่มีรายการ","No items yet"):t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
+                <div style={{fontSize:12}}>{poEntries.length===0?t('กด "+ เพิ่ม PO" เพื่อเริ่มต้น','Press "+ Add PO" to start'):t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {sortedGroupCodes.map(code => {
+                  const acc  = ACCOUNTS.find(a=>a.code===code);
+                  const rows = groupedFiltered[code].slice().sort((a,b)=> (b.po.date||"").localeCompare(a.po.date||""));
+                  const isCollapsed = !!collapsed[code];
+                  const groupTotal = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
+                  // งบ + ยอดที่ต้องสั่งเพิ่ม (งบ − ของใน store − PO ที่สั่งแล้วของ code นี้ทั้งหมด)
+                  const grpBudget = parseFloat(combinedBudget[code]) || 0;
+                  const grpCommitted = poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
+                  const grpStock = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
+                  const grpToOrder = grpBudget - grpStock - grpCommitted;
+                  return (
+                    <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                      <div onClick={()=>toggleGroup(code)} style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",flexWrap:"wrap"}}>
+                        <span style={{color:T.textMuted,fontSize:11,transition:"transform 0.15s",transform:isCollapsed?"rotate(-90deg)":"none"}}>▾</span>
+                        <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{code}</span>
+                        <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
+                        <span style={{flex:1}}/>
+                        <span style={{fontSize:11,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
+                        <span style={{fontSize:11,color:T.textMuted}}>{t("ต้องสั่งเพิ่ม","To order")} <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
+                        <span style={{color:T.textMuted,fontSize:11}}>{rows.length} {t("รายการ","items")}</span>
+                        <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
+                      </div>
+                      {!isCollapsed && (
+                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+                          <thead>
+                            <tr>
+                              {[["วันเปิด PO","Open date"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ / จ่ายเงิน","Delivery / Payment"],["สถานะ","Status"],["",""]].map(([h,he],hi)=>(
+                                <th key={hi} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map(({po:p,item},i)=>{
+                              const splitAcrossCodes = poItems(p).length>1;
+                              const inc = incomingStatus(p), pay = paymentStatus(p);
+                              const locked = !canEditPO(p, session);
+                              const receivedDates = poReceivedDates(p);
+                              const paidDate = poPaidDate(p);
+                              return (
+                              <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>openDetail(p)}
+                                style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:"pointer"}}
+                                onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
+                                onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
+                                <td style={{padding:"10px 16px",color:T.textMuted,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
+                                <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
+                                <td style={{padding:"10px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{poNumbersLabel(p)}</td>
+                                <td style={{padding:"10px 16px",textAlign:"right"}}>
+                                  <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+                                  {usdLine(parseFloat(item.amount)||0, usdRate)}
+                                  {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("จาก","from")} {poItems(p).length} {t("รหัส · รวม","codes · total")} {fmt(poTotal(p))}</div>}
+                                </td>
+                                <td style={{padding:"10px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
+                                  {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
+                                </td>
+                                <td style={{padding:"10px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:paidDate?T.green:T.textMuted,fontWeight:paidDate?600:450}}>
+                                  {paidDate || "—"}
+                                </td>
+                                <td style={{padding:"10px 16px"}}>
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                                    <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{incLabel(inc)}</span>
+                                    {p.status!=="Paid" && (
+                                      <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{payLabel(pay)}</span>
+                                    )}
+                                    {p.paymentType && (
+                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{PAYMENT_TYPE_ICON[p.paymentType]} {payTypeLabelT(p)}</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td style={{padding:"10px 16px"}}>
+                                  <div style={{display:"flex",alignItems:"center",gap:4}}>
+                                    <StatusPicker status={p.status} onChange={s=>changeStatus(p,s)} disabled={locked} compact/>
+                                    {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
+                                  </div>
+                                  {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
+                                </td>
+                                <td style={{padding:"10px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข (ลบได้ในหน้านี้)","Edit (delete available here)")}
+                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
+                                </td>
+                              </tr>
+                            );})}
+                          </tbody>
+                        </table></div>
+                      )}
+                    </div>
+                  );
+                })}
+                <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
+                  <span>{filtered.length} {t("รายการทั้งหมด","items total")}</span>
+                  <span style={{color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
+    </Shell>
+  );
+}
+
+// ─── Procurement: Incoming / Payment Tracking tab ─────────────────────────────
+// Groups every PO by its Account Code so the team can see, at a glance and per
+// cost line, which deliveries and payments are on track vs. overdue.
+function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[] }) {
+  const trkBudget = buildCombinedBudget(tenderCosts, additions);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
+  const [groupBy, setGroupBy] = useState("code"); // "code" = จัดกลุ่มตาม Acc. Code · "po" = จัดกลุ่มตาม PO
+  const STATUS_FILTERS = [["all","ทั้งหมด","All"],["pending","รอของเข้า","Awaiting"],["late","ล่าช้า","Late"],["received","รับแล้ว","Received"],["payPending","รอจ่าย","Awaiting pay"],["paid","จ่ายแล้ว","Paid"]];
+  const matchesStatus = (p) => {
+    const inc = incomingStatus(p), pay = paymentStatus(p);
+    switch (statusFilter) {
+      case "pending":    return inc === "pending";
+      case "late":       return inc === "late" || pay === "late";
+      case "received":   return inc === "received" || inc === "partial";
+      case "payPending": return pay === "pending";
+      case "paid":       return pay === "paid";
+      default:           return true;
+    }
+  };
+  // Which Account-Code groups are collapsed — lets a busy board with many
+  // PO rows be tidied away group by group instead of scrolling forever.
+  const [collapsed, setCollapsed] = useState(() => new Set());
+  const toggleGroup = (code) => setCollapsed(prev => {
+    const next = new Set(prev);
+    next.has(code) ? next.delete(code) : next.add(code);
+    return next;
+  });
+
+  const counts = poEntries.reduce((acc,p) => {
+    const inc = incomingStatus(p), pay = paymentStatus(p);
+    if (inc==="pending") acc.incPending++;
+    if (inc==="late")    acc.incLate++;
+    if (pay==="pending") acc.payPending++;
+    if (pay==="paid")    acc.payPaid++;
+    return acc;
+  }, { incPending:0, incLate:0, payPending:0, payPaid:0 });
+
+  const q = search.toLowerCase();
+  const passesFilter = (p) => {
+    const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
+    const matchesSearch = q==="" || [itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(q);
+    const hasIssue = incomingStatus(p)==="late" || paymentStatus(p)==="late";
+    return matchesSearch && (!onlyIssues || hasIssue) && matchesStatus(p);
+  };
+
+  const filteredEntries = poEntries.filter(passesFilter);
+
+  // Group by Account Code (via each PO's line items), sorted by code — a PO
+  // split across several codes shows once per code, sharing the same
+  // delivery-batch info since deliveries belong to the whole PO.
+  const groups = {};
+  filteredEntries.forEach(p => {
+    poItems(p).forEach(it => {
+      if (!it.code) return;
+      (groups[it.code] = groups[it.code] || []).push({ po:p, item:it });
+    });
+  });
+  const sortedCodes = Object.keys(groups).sort();
+  // จัดกลุ่มตาม PO (ทางเลือก) — หนึ่งใบต่อกลุ่ม เรียงตามวันเปิด PO แล้วเลข PO
+  const posSorted = filteredEntries.slice().sort((a,b)=> (a.date||"").localeCompare(b.date||"") || poNumbersLabel(a).localeCompare(poNumbersLabel(b)));
+  // คีย์ที่ใช้ย่อ/ขยายทั้งหมด ตามโหมดที่เลือก
+  const allGroupKeys = groupBy==="po" ? posSorted.map(p=>p.id) : sortedCodes;
+
+  // committed/stock ต่อ code ต้องคิดจาก PO "ทั้งหมด" ไม่ใช่เฉพาะที่ผ่านตัวกรอง
+  // (ไม่งั้น "ต้องสั่งเพิ่ม" จะเพี้ยน/เกินจริงเมื่อเปิดฟิลเตอร์สถานะหรือเฉพาะล่าช้า)
+  const committedAll = {}, stockAll = {};
+  poEntries.forEach(p => poItems(p).forEach(it => {
+    if (!it.code) return;
+    committedAll[it.code] = (committedAll[it.code] || 0) + (parseFloat(it.amount) || 0);
+    stockAll[it.code]     = (stockAll[it.code]     || 0) + (parseFloat(it.store)  || 0);
+  }));
+
+  const DateCell = ({ value, lateTint }) => (
+    <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:value?(lateTint?T.red:T.textPrimary):T.textMuted,fontWeight:value&&lateTint?650:450}}>
+      {value || "—"}
+    </span>
+  );
+  const Badge = ({ text, clr, bg }) => (
+    <span style={{background:bg,color:clr,fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{text}</span>
+  );
+  // Renders every delivery batch on a PO — one line per shipment, so a PO
+  // that arrives in 2-3 batches shows each plan → actual date with its own status.
+  const DeliveryList = ({ po }) => {
+    const deliveries = poDeliveries(po);
+    const multiSupplier = poSuppliers(po).length > 1;
+    if (!deliveries.length) return <span style={{fontSize:13,color:T.textMuted}}>—</span>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {deliveries.map((d,i)=>{
+          const st = deliveryStatus(d);
+          return (
+            <div key={d.id||i} style={{display:"flex",alignItems:"center",gap:5}}>
+              {deliveries.length>1 && <span style={{fontSize:12,color:T.textMuted,fontWeight:650,minWidth:14}}>#{i+1}</span>}
+              {multiSupplier && <span style={{fontSize:12,color:T.textSecondary,fontWeight:600,whiteSpace:"nowrap"}}>{d.supplierName||"—"}:</span>}
+              <DateCell value={d.plan} lateTint={st==="late"}/>
+              <span style={{color:T.textMuted,fontSize:12}}>→</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","Pending")}</span>
+              {(() => {
+                const received = st === "received";   // รับจริงแล้ว (วันรับมาถึงแล้ว) → เขียว
+                // แสดง "ยอดของเข้าจริง" ถ้ากรอกไว้แล้ว (ให้ตรงกับหน้ารายละเอียด) ไม่มีค่อยใช้ยอดแผน
+                const amt = (parseFloat(d.actualAmount)||0) || (parseFloat(d.planAmount)||0);
+                if (!amt) return <span style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>(—)</span>;
+                return <span style={{fontSize:12,color:received?T.green:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontWeight:received?650:450}}>({fmt(amt)})</span>;
+              })()}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // แถวเดียว (ต่อ item) ใช้ได้ทั้งโหมดจัดกลุ่มตาม Acc. Code และตาม PO
+  // showAcc=true → โชว์ Acc. Code/ชื่อบัญชีแทนคอลัมน์ วันเปิด/Supplier/PO (ใช้ในโหมดจัดกลุ่มตาม PO)
+  const renderRow = ({po:p,item},i,showAcc=false) => {
+    // แถวนี้แยกตาม item → คิด/แสดงเฉพาะงวดของ item นี้ ไม่เอางวดของ code อื่นในใบเดียวกันมาปน
+    const pItem = { ...p, items:[item] };
+    const inc = incomingStatus(pItem), pay = paymentStatus(pItem);
+    const splitAcrossCodes = poItems(p).length>1;
+    const locked = !canEditPO(p, session);
+    const receivedDates = poReceivedDates(pItem);
+    const paidDate = poPaidDate(pItem);
+    const acc = ACCOUNTS.find(a=>a.code===item.code);
+    return (
+      <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>onView?.(p)}
+        style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
+        onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
+        onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
+        {showAcc ? (
+          <>
+            <td style={{padding:"9px 16px",color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{item.code||"—"}</td>
+            <td style={{padding:"9px 16px",color:T.textSecondary,fontSize:13}} colSpan={2}>{acc?.name||"—"}</td>
+          </>
+        ) : (
+          <>
+            <td style={{padding:"9px 16px",color:T.textMuted,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
+            <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
+            <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{poNumbersLabel(p)}</td>
+          </>
+        )}
+        <td style={{padding:"9px 16px",textAlign:"right"}}>
+          <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+          {usdLine(parseFloat(item.amount)||0, usdRate)}
+          {!showAcc && splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("รวม","total")} {fmt(poTotal(p))}</div>}
+        </td>
+        <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
+          {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
+        </td>
+        <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:paidDate?T.green:T.textMuted,fontWeight:paidDate?600:450}}>
+          {paidDate || "—"}
+        </td>
+        <td style={{padding:"9px 16px"}}><DeliveryList po={pItem}/></td>
+        <td style={{padding:"9px 16px"}}>
+          <DateCell value={poNextDueDate(pItem)} lateTint={false}/>
+          {p.paymentType && (
+            <div style={{marginTop:3}}>
+              <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${payTypeLabelT(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+            </div>
+          )}
+        </td>
+        <td style={{padding:"9px 16px"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
+            <Badge text={incLabel(inc)} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+            <Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+          </div>
+        </td>
+        <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",alignItems:"center",gap:4}}>
+            <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
+            {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
+          </div>
+          {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
+        </td>
+        <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+          <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
+            style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
+        </td>
+      </tr>
+    );
+  };
+  const thStyle = (align) => ({padding:"9px 16px",textAlign:align,color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`});
+  const theadRow = (mode) => (
+    <tr>
+      {mode==="po" ? (<>
+        <th style={thStyle("left")}>Acc. Code</th>
+        <th colSpan={2} style={thStyle("left")}>Account Name</th>
+      </>) : (<>
+        <th style={thStyle("left")}>{t("วันเปิด PO","Open date")}</th>
+        <th style={thStyle("left")}>Supplier</th>
+        <th style={thStyle("left")}>PO No.</th>
+      </>)}
+      {[["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ","Delivery"],["แผนจ่ายเงิน","Payment plan"],["ติดตาม","Track"],["สถานะ","Status"],["",""]].map(([h,he],ci)=>(
+        <th key={ci} style={thStyle(h==="มูลค่า (THB)"?"right":"left")}>{t(h,he)}</th>
+      ))}
+    </tr>
+  );
+
+  return (
+    <div>
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Acc. Code, supplier, PO...","🔍 Search Acc. Code, supplier, PO...")} width={240}/>
+        <button onClick={()=>setOnlyIssues(v=>!v)}
+          style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
+          ⚠️ {t("แสดงเฉพาะรายการล่าช้า","Show late only")}
+        </button>
+        <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
+          style={{padding:"7px 12px",border:`1.5px solid ${statusFilter!=="all"?T.amber:T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:statusFilter!=="all"?T.amber:T.textSecondary,background:"#fff",cursor:"pointer"}}>
+          {STATUS_FILTERS.filter(([k])=>k!=="late").map(([k,l,e])=><option key={k} value={k}>{t(l,e)}</option>)}
+        </select>
+        <select value={groupBy} onChange={e=>{ setGroupBy(e.target.value); setCollapsed(new Set()); }}
+          style={{padding:"7px 12px",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:T.textSecondary,background:"#fff",cursor:"pointer"}}>
+          <option value="code">{t("จัดกลุ่ม: ตาม Acc. Code","Group: by Acc. Code")}</option>
+          <option value="po">{t("จัดกลุ่ม: ตาม PO","Group: by PO")}</option>
+        </select>
+        <button onClick={()=>setCollapsed(new Set(allGroupKeys))}
+          style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
+          ▲ {t("ย่อทั้งหมด","Collapse all")}
+        </button>
+        <button onClick={()=>setCollapsed(new Set())}
+          style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
+          ▼ {t("ขยายทั้งหมด","Expand all")}
+        </button>
+        <div style={{flex:1}}/>
+      </div>
+
+      {filteredEntries.length===0 ? (
+        <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+          <div style={{fontSize:32,marginBottom:12}}>🚚</div>
+          <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
+          <div style={{fontSize:13}}>{t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
+        </div>
+      ) : groupBy==="po" ? (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          {posSorted.map(p => {
+            const items = poItems(p);
+            const isCollapsed = collapsed.has(p.id);
+            const inc = incomingStatus(p), pay = paymentStatus(p);
+            return (
+              <div key={p.id} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                <div onClick={()=>toggleGroup(p.id)}
+                  style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
+                  <span style={{color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{poNumbersLabel(p)}</span>
+                  <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{poSupplierName(p)}</span>
+                  <span style={{fontSize:12,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>{t("เปิด","Opened")} {p.date}</span>
+                  <span style={{flex:1}}/>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("มูลค่า","Value")} <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(poTotal(p))}</b></span>
+                  <span style={{color:T.textMuted,fontSize:12}}>{items.length} {t("รายการ","items")}</span>
+                  <Badge text={incLabel(inc)} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+                  <Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+                </div>
+                {!isCollapsed && (
+                <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+                  <thead>{theadRow("po")}</thead>
+                  <tbody>{items.map((it,ii)=>renderRow({po:p,item:it},ii,true))}</tbody>
+                </table></div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          {sortedCodes.map(code => {
+            const acc = ACCOUNTS.find(a=>a.code===code);
+            const rows = groups[code];
+            const lateCount = rows.filter(({po:p})=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
+            const isCollapsed = collapsed.has(code);
+            // งบ + ยอดที่ต้องสั่งเพิ่ม (งบ − ของใน store − PO ที่สั่งแล้วของ code นี้)
+            // ใช้ committed/stock จาก PO ทั้งหมด (committedAll/stockAll) ไม่ผูกกับตัวกรอง
+            const grpBudget = parseFloat(trkBudget[code]) || 0;
+            const grpCommitted = committedAll[code] || 0;
+            const grpStock = stockAll[code] || 0;
+            const grpToOrder = grpBudget - grpStock - grpCommitted;
+            return (
+              <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                <div onClick={()=>toggleGroup(code)}
+                  style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none"}}>
+                  <span style={{fontSize:12,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
+                  <span style={{color:T.blue,fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{code}</span>
+                  <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
+                  <span style={{flex:1}}/>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(grpBudget)}</b></span>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("ต้องสั่งเพิ่ม","To order")} <b style={{color:grpToOrder<0?T.red:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>{grpToOrder<0?`(฿${fmt0(Math.abs(grpToOrder))})`:`฿${fmt0(grpToOrder)}`}</b></span>
+                  <span style={{color:T.textMuted,fontSize:12}}>{rows.length} PO</span>
+                  {lateCount>0 && <Badge text={`⚠️ ${lateCount} ${t("ล่าช้า","late")}`} clr={T.red} bg={T.redBg}/>}
+                </div>
+                {!isCollapsed && (
+                <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+                  <thead>
+                    <tr>
+                      {[["วันเปิด PO","Open date"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ","Delivery"],["แผนจ่ายเงิน","Payment plan"],["ติดตาม","Track"],["สถานะ","Status"],["",""]].map(([h,he])=>(
+                        <th key={h||"x"} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(({po:p,item},i) => {
+                      // แถวนี้แยกตาม Acc. Code → คิด/แสดงเฉพาะงวดของ item นี้ ไม่เอางวดของ code อื่นในใบเดียวกันมาปน
+                      const pItem = { ...p, items:[item] };
+                      const inc = incomingStatus(pItem), pay = paymentStatus(pItem);
+                      const splitAcrossCodes = poItems(p).length>1;
+                      const locked = !canEditPO(p, session);
+                      const receivedDates = poReceivedDates(pItem);
+                      const paidDate = poPaidDate(pItem);
+                      return (
+                        <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>onView?.(p)}
+                          style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
+                          onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
+                          onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
+                          <td style={{padding:"9px 16px",color:T.textMuted,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}>{p.date}</td>
+                          <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
+                          <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{poNumbersLabel(p)}</td>
+                          <td style={{padding:"9px 16px",textAlign:"right"}}>
+                            <div style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace",fontWeight:600}}>{fmt(item.amount)}</div>
+                            {usdLine(parseFloat(item.amount)||0, usdRate)}
+                            {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("รวม","total")} {fmt(poTotal(p))}</div>}
+                          </td>
+                          <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:receivedDates.length?T.textPrimary:T.textMuted}}>
+                            {receivedDates.length===0 ? "—" : receivedDates.length===1 ? receivedDates[0] : `${receivedDates[0]} (+${receivedDates.length-1})`}
+                          </td>
+                          <td style={{padding:"9px 16px",fontSize:13,fontFamily:"'JetBrains Mono',monospace",color:paidDate?T.green:T.textMuted,fontWeight:paidDate?600:450}}>
+                            {paidDate || "—"}
+                          </td>
+                          <td style={{padding:"9px 16px"}}><DeliveryList po={pItem}/></td>
+                          <td style={{padding:"9px 16px"}}>
+                            <DateCell value={poNextDueDate(pItem)} lateTint={false}/>
+                            {p.paymentType && (
+                              <div style={{marginTop:3}}>
+                                <Badge text={`${PAYMENT_TYPE_ICON[p.paymentType]} ${payTypeLabelT(p)}`} clr={PAYMENT_TYPE_CLR[p.paymentType]} bg={PAYMENT_TYPE_BG[p.paymentType]}/>
+                              </div>
+                            )}
+                          </td>
+                          <td style={{padding:"9px 16px"}}>
+                            <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"flex-start"}}>
+                              <Badge text={incLabel(inc)} clr={INCOMING_CLR[inc]} bg={INCOMING_BG[inc]}/>
+                              <Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/>
+                            </div>
+                          </td>
+                          <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
+                              {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
+                            </div>
+                            {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
+                          </td>
+                          <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+                            <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
+                              style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"2px 6px",borderRadius:6}}>✏️</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table></div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Accounting: ตารางรวมรายเดือน (ต้นทุน + Incoming/Received + Payment + PO) ────
+//  ต่อ Acc. Code: Tender Cost (งบ), Balance Pending PO (งบ − PO), Stock (มีใน
+//  store), Balance Cost (Balance Pending PO − Stock). ตามด้วย 2 กลุ่มเดือน —
+//  Incoming/Received (รับจริง=ดำ, ยังเป็นแผน=แดง) และ Payment Plan — แล้วปิดท้าย
+//  ด้วยสรุป PO: Total PO (ยอดผูกพัน) และ PO Balance (Total PO − รับจริง).
+//  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
+const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [], usdRate = 0 }) {
+  const accounts = exportAccountList(extraItems, hiddenAccounts);
+  const combined = buildCombinedBudget(tenderCosts, additions);
+  const [aSearch, setASearch] = useState("");                       // ค้นหา Acc. Code/ชื่อบัญชี
+  const [aSort, setASort] = useState({ key: "code", dir: "asc" });  // เรียงตามหัวคอลัมน์
+  const committedByCode = {}, stockByCode = {}, plannedByCode = {};
+  const payplan = {};
+  const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
+  const today = todayStr();
+  const lateOf = (r) => !!(r.planDate && r.planDate < today && !r.actualDate);
+  // แต่ละช่องเดือน (ต่อ code) เก็บแยก rec(รับแล้ว)/po(PO รอเข้า)/plan(แผน) + ธง late — สีเหมือนตารางจัดซื้อ
+  const mCell = {};
+  const mBucket = (code, mk) => { const c = (mCell[code] = mCell[code] || {}); return (c[mk] = c[mk] || { rec:0, po:0, poLate:false, plan:0, planLate:false }); };
+  // แผนของเข้า = อ็อบเจ็กต์รูปเดียวกับ PO → บัคเก็ตตามวันแผนรับของแต่ละงวด
+  // (ไม่มีวันแผนก็ใช้วันในฟอร์ม) รวมยอดที่วางแผนไว้ต่อ Acc code ต่อเดือน
+  // และเก็บยอดแผนรวมต่อ Acc code (plannedByCode) ใช้คำนวณ Balance Cost ให้ตรงกับ
+  // หน้า "แผนของเข้า" ของจัดซื้อ (งบ − Stock − PO − แผน)
+  (Array.isArray(incomingPlan) ? incomingPlan : []).forEach(pl => {
+    poItems(pl).forEach(it => {
+      plannedByCode[it.code] = (plannedByCode[it.code] || 0) + (parseFloat(it.amount) || 0);
+      (it.rounds || []).forEach(r => {
+        const amt = parseFloat(r.planAmount) || 0;
+        if (amt > 0) { const cc = mBucket(it.code, (r.planDate || pl.date || "").slice(0, 7)); cc.plan += amt; if (lateOf(r)) cc.planLate = true; }
+      });
+    });
+  });
+  poEntries.forEach(p => {
+    poItems(p).forEach(it => {
+      const code = it.code;
+      committedByCode[code] = (committedByCode[code] || 0) + (parseFloat(it.amount) || 0);
+      stockByCode[code] = (stockByCode[code] || 0) + (parseFloat(it.store) || 0);
+      (it.rounds || []).forEach(r => {
+        if (roundReceived(r)) {
+          const cc = mBucket(code, r.actualDate.slice(0, 7)); cc.rec += parseFloat(r.actualAmount) || 0; // รับแล้ว (เขียว)
+        } else {
+          // PO ที่สั่งแล้วแต่ยังไม่รับ = "PO รอเข้า" (ดำ) · ใช้ยอดจริงที่กรอกไว้ก่อน ไม่มีค่อยใช้แผน
+          const amt = parseFloat(r.actualAmount) || parseFloat(r.planAmount) || 0;
+          if (amt > 0) { const cc = mBucket(code, (r.actualDate || r.planDate || p.date || "").slice(0, 7)); cc.po += amt; if (lateOf(r)) cc.poLate = true; }
+        }
+      });
+    });
+    poPayLines(p).forEach(l => bump(payplan, l.code, l.month, l.amount || 0));
+  });
+  const monthsOf = (obj) => [...new Set(Object.values(obj).flatMap(m => Object.keys(m)))].sort();
+  const mgM = monthsOf(mCell);            // เดือนที่มีของเข้า (รับ/PO/แผน)
+  const payM = monthsOf(payplan);
+  const cellTot = (c) => c ? (c.rec + c.po + c.plan) : 0;
+  const lbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
+  const money = (n) => !n ? "-" : (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n));
+
+  const rows = accounts.map(a => {
+    const budget = parseFloat(combined[a.code]) || 0;
+    const committed = committedByCode[a.code] || 0;                     // Total PO (สั่งแล้ว)
+    const stock = stockByCode[a.code] || 0;
+    const planned = plannedByCode[a.code] || 0;                         // ยอดที่วางแผนจะเข้า (ยังไม่เป็น PO)
+    const balPO = budget - committed;                                   // Balance Pending PO (งบ − PO)
+    const balCost = budget - stock - committed - planned;               // Balance Cost = เหลือต้องสั่งจริง (งบ − Stock − PO − แผน) ตรงกับหน้าจัดซื้อ
+    const balPOout = budget - stock - committed;                        // PO Balance = งบ − Stock − PO ที่สั่งแล้ว (ยังไม่คิดแผน)
+    const mgRow = mgM.map(mk => mCell[a.code]?.[mk] || { rec:0, po:0, poLate:false, plan:0, planLate:false });
+    const pyRow = payM.map(mk => payplan[a.code]?.[mk] || 0);
+    const mgTot = mgRow.reduce((s, c) => s + cellTot(c), 0);
+    const pyTot = pyRow.reduce((s, x) => s + x, 0);
+    return { a, budget, committed, balPO, balPOout, stock, balCost, mgRow, pyRow, mgTot, pyTot };
+  }).filter(r => r.budget || r.committed || r.stock || r.mgTot || r.pyTot);
+
+  // ── ค้นหา + เรียงลำดับตามหัวคอลัมน์ ──────────────────────────────────────────
+  const aQ = aSearch.trim().toLowerCase();
+  const sortVal = (r, key) => {
+    switch (key) {
+      case "code":      return r.a.code;
+      case "name":      return r.a.name || "";
+      case "budget":    return r.budget;
+      case "balPO":     return r.balPO;
+      case "stock":     return r.stock;
+      case "balCost":   return r.balCost;
+      case "mgTot":     return r.mgTot;
+      case "committed": return r.committed;
+      case "balPOout":  return r.balPOout;
+      case "pyTot":     return r.pyTot;
+      default:
+        if (key.startsWith("im:")) return cellTot(r.mgRow[+key.slice(3)]);
+        if (key.startsWith("pm:")) return r.pyRow[+key.slice(3)] || 0;
+        return r.a.code;
+    }
+  };
+  const shownRows = rows
+    .filter(r => !aQ || r.a.code.toLowerCase().includes(aQ) || (r.a.name || "").toLowerCase().includes(aQ))
+    .sort((x, y) => {
+      const vx = sortVal(x, aSort.key), vy = sortVal(y, aSort.key);
+      const d = (typeof vx === "string" || typeof vy === "string") ? String(vx).localeCompare(String(vy), "th") : (vx - vy);
+      return aSort.dir === "asc" ? d : -d;
+    });
+  const toggleSort = (key) => setASort(s => s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: (key === "code" || key === "name") ? "asc" : "desc" });
+  const arrow = (key) => aSort.key === key ? (aSort.dir === "asc" ? " ▲" : " ▼") : "";
+  const mgColSum = (i) => shownRows.reduce((s, r) => s + cellTot(r.mgRow[i]), 0);
+  const pyColSum = (i) => shownRows.reduce((s, r) => s + (r.pyRow[i] || 0), 0);
+  const totOf = (pick) => shownRows.reduce((s, r) => s + pick(r), 0);
+
+  const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2", bPO = "#eaeef5";
+  const cell = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
+  const num  = { ...cell, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" };
+  const hCell = (bg) => ({ ...cell, background: bg, fontWeight: 650, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
+  // ── ตรึงคอลัมน์แรก 2 ช่อง (รหัส/ชื่อบัญชี) ให้ไม่เลื่อนหายตอนดูเดือนไกล ๆ ──────
+  const COL1_W = 86;
+  const stickyBody0 = { position: "sticky", left: 0, background: "#fff", zIndex: 1 };
+  const stickyBody1 = { position: "sticky", left: COL1_W, background: "#fff", zIndex: 1 };
+  const stickyHead0 = { left: 0, zIndex: 3 };
+  const stickyHead1 = { left: COL1_W, zIndex: 3 };
+  const numCell = (v, bg) => (
+    <td style={{ ...num, background: bg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 450 }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>
+  );
+  // ช่องเดือน: รับแล้ว=เขียว · PO รอเข้า=ดำ(⚠=ล่าช้า) · แผน=แดง มี * — เหมือนตารางจัดซื้อ
+  const mgCell = (c, bg) => {
+    const tot = cellTot(c);
+    return (
+      <td style={{ ...num, background: bg, color: tot ? T.textPrimary : T.textMuted, fontWeight: 600 }}>
+        {!tot ? "-" : (<>
+          {c.rec > 0 && <div style={{ color: T.green }}>{fmt(c.rec)}</div>}
+          {c.po > 0 && <div style={{ color: c.poLate ? T.amber : T.textPrimary }}>{fmt(c.po)}{c.poLate ? " ⚠" : ""}</div>}
+          {c.plan > 0 && <div style={{ color: c.planLate ? T.amber : T.red }}>{fmt(c.plan)} *{c.planLate ? "⚠" : ""}</div>}
+          {usdLine(tot, usdRate)}
+        </>)}
+      </td>
+    );
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize:12, color: T.textMuted, marginBottom: 8 }}>
+        {t("โชว์เฉพาะเดือนที่มีข้อมูล · Pending PO = งบ − Stock − PO − แผน (เหลือต้องสั่งจริง) · Balance Cost = งบ − Stock − PO (ตรงกับหน้าจัดซื้อ) · Incoming = รับแล้ว(เขียว) + PO รอเข้า(ดำ) + แผน(แดง) · Total PO = ยอดที่สั่งแล้ว","Only months with data · Pending PO = Budget − Stock − PO − Plan (real remaining to order) · Balance Cost = Budget − Stock − PO (matches Procurement) · Incoming = Received(green) + PO awaiting(black) + Plan(red) · Total PO = ordered")}
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
+          <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
+            <span style={{ width: 14, height: 14, borderRadius: 4, background: clr, display: "inline-block" }}/>{label}
+          </span>
+        ))}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        <SearchInput value={aSearch} onChange={setASearch} placeholder={t("🔍 ค้นหา Acc. Code / ชื่อบัญชี","🔍 Search Acc. Code / account name")} width={260} big/>
+        <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownRows.length}/{rows.length} {t("รายการ","items")}</span>
+      </div>
+      <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+        <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
+          <thead>
+            <tr>
+              <th colSpan={6} style={{ ...hCell("#eef2f7"), textAlign: "left" }}>{t("ต้นทุน / งบประมาณ","Cost / Budget")}</th>
+              <th colSpan={mgM.length + 1} style={hCell(bMg)}>📦 {t("ของเข้า (รับ/PO/แผน)","Incoming (Recv/PO/Plan)")}</th>
+              <th colSpan={payM.length + 1} style={hCell(bPy)}>💰 {t("แผนจ่ายเงิน","Payment plan")}</th>
+              <th colSpan={2} style={hCell(bPO)}>{t("สรุป PO","PO summary")}</th>
+            </tr>
+            <tr>
+              <th onClick={()=>toggleSort("code")}      style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
+              <th onClick={()=>toggleSort("name")}      style={{ ...hCell("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
+              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("budget")}</th>
+              <th onClick={()=>toggleSort("balPO")}     style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Pending PO{arrow("balPO")}</th>
+              <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
+              <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("balCost")}</th>
+              {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell(bMg), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("im:"+i)}</th>)}
+              <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("mgTot")}</th>
+              {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell(bPy), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("pm:"+i)}</th>)}
+              <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("pyTot")}</th>
+              <th onClick={()=>toggleSort("committed")} style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Total PO{arrow("committed")}</th>
+              <th onClick={()=>toggleSort("balPOout")}  style={{ ...hCell(bPO), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Cost{arrow("balPOout")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shownRows.map(r => (
+              <tr key={r.a.code}>
+                <td style={{ ...cell, ...stickyBody0, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{r.a.code}</td>
+                <td style={{ ...cell, ...stickyBody1 }}>{r.a.name}</td>
+                {numCell(r.budget, bCost)}
+                {numCell(r.balPO, bCost)}
+                {numCell(r.stock, bCost)}
+                {numCell(r.balCost, bCost)}
+                {r.mgRow.map((c, i) => <Fragment key={"m" + i}>{mgCell(c, bMg)}</Fragment>)}
+                <td style={{ ...num, background: bMg, fontWeight: 650, color: T.textPrimary }}>{money(r.mgTot)}{r.mgTot ? usdLine(r.mgTot, usdRate) : null}</td>
+                {r.pyRow.map((v, i) => <Fragment key={"p" + i}>{numCell(v, bPy)}</Fragment>)}
+                <td style={{ ...num, background: bPy, fontWeight: 650, color: r.pyTot < 0 ? T.red : T.textPrimary }}>{money(r.pyTot)}{r.pyTot ? usdLine(r.pyTot, usdRate) : null}</td>
+                {numCell(r.committed, bPO)}
+                {numCell(r.balPOout, bPO)}
+              </tr>
+            ))}
+            {shownRows.length === 0 && (
+              <tr><td style={{ ...cell, textAlign: "center", color: T.textMuted }} colSpan={mgM.length + payM.length + 10}>{rows.length === 0 ? t("— ยังไม่มีข้อมูล —","— No data —") : t("— ไม่พบรายการที่ตรงกับการค้นหา —","— No matches —")}</td></tr>
+            )}
+          </tbody>
+          {shownRows.length > 0 && (
+            <tfoot>
+              <tr>
+                <td style={{ ...cell, ...stickyBody0, fontWeight: 700, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
+                {(() => { const v = totOf(r => r.budget); return <td style={{ ...num, fontWeight: 700, background: "#eef2f7" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.balPO); return <td style={{ ...num, fontWeight: 700, background: "#eef2f7", color: v < 0 ? T.red : T.textPrimary }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.stock); return <td style={{ ...num, fontWeight: 700, background: "#eef2f7" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.balCost); return <td style={{ ...num, fontWeight: 700, background: "#eef2f7", color: v < 0 ? T.red : T.textPrimary }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>; })()}
+                {mgM.map((mk, i) => { const v = mgColSum(i); return <td key={"tm" + mk} style={{ ...num, fontWeight: 650, background: "#e6ede6" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })}
+                {(() => { const v = totOf(r => r.mgTot); return <td style={{ ...num, fontWeight: 700, background: "#e6ede6" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {payM.map((mk, i) => { const v = pyColSum(i); return <td key={"tp" + mk} style={{ ...num, fontWeight: 650, background: "#fbe9d4" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })}
+                {(() => { const v = totOf(r => r.pyTot); return <td style={{ ...num, fontWeight: 700, background: "#fbe9d4" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.committed); return <td style={{ ...num, fontWeight: 700, background: "#e2e8f2" }}>{money(v)}{v ? usdLine(v, usdRate) : null}</td>; })()}
+                {(() => { const v = totOf(r => r.balPOout); return <td style={{ ...num, fontWeight: 700, background: "#e2e8f2", color: v < 0 ? T.red : T.textPrimary }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>; })()}
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── Accounting View ──────────────────────────────────────────────────────────
+function AccountingView({ project, updateProject, tenderCosts, additions, poEntries, onBack, onHome, onDept, onExport, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], incomingPlan=[] }) {
+  // บัญชี = อ่านอย่างเดียว (RLS ไม่ให้เขียน tcs-projects) → ปุ่มสกุลเงินจึงเป็นค่า
+  // "ดูเฉพาะเครื่องนี้" ไม่บันทึกกลับไปที่โครงการร่วม กันไม่ให้บัญชีแก้ข้อมูลโครงการ
+  const [curOverride, setCurOverride] = useState({});
+  const curProject   = { ...project, ...curOverride };
+  const setCurrency  = (fields) => setCurOverride(o => ({ ...o, ...fields }));
+  const usdRate = effRate(curProject);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+  const [view, setView] = useState("dashboard");
+  const [viewHist, setViewHist] = useState([]);   // ประวัติแท็บที่ดูมาก่อน — ปุ่มกลับจะย้อนทีละหน้า
+  const goView = (v) => { if (v !== view) { setViewHist(h => [...h, view]); setView(v); } };
+  const backView = () => { if (viewHist.length) { const h = [...viewHist]; const prev = h.pop(); setViewHist(h); setView(prev); } else onBack(); };
+  const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
+  const [sortDir, setSortDir] = useState(1);
+  // ค้นหา + ตัวกรอง "เฉพาะที่มี PO" บนแท็บ Cash Flow
+  const [dateSearch, setDateSearch] = useState("");
+  const [planSearch, setPlanSearch] = useState("");   // ค้นหาในหน้าแผนจ่ายรายเดือน
+  const [onlyWithPO, setOnlyWithPO] = useState(false);
+  // Which Acc. Code groups are collapsed on the "วันที่ (Cash Flow)" tab.
+  const [dateCollapsed, setDateCollapsed] = useState(() => new Set());
+  const toggleDateGroup = (code) => setDateCollapsed(prev => {
+    const next = new Set(prev);
+    next.has(code) ? next.delete(code) : next.add(code);
+    return next;
+  });
+  // Which months are collapsed on the "แผนจ่าย" (payment plan) tab.
+  const [planCollapsed, setPlanCollapsed] = useState(() => new Set());
+  const togglePlanMonth = (mk) => setPlanCollapsed(prev => {
+    const next = new Set(prev);
+    next.has(mk) ? next.delete(mk) : next.add(mk);
+    return next;
+  });
+
+  // Budget = baseline Tender Cost + every monthly addition (ค่าธรรมดา + คอลัมน์
+  // ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตัวเลขตรงกัน
+  const combinedBudget = buildCombinedBudget(tenderCosts, additions);
+
+  // Sum only top-level codes — see note in ProcurementView. Object.values()
+  // over the whole combinedBudget double-counts sub-items (EX-xxxx rows),
+  // since their value is already folded into their parent account's total.
+  const topLevelCodes = [
+    ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)).map(a => a.code),
+    ...extraItems.filter(e => !e.parentCode).map(e => e.code),
+  ];
+  const tenderTotal   = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
+  const totalComm     = poEntries.reduce((s,p)=>s+poTotal(p),0);
+  // จ่ายแล้ว = ทุกงวดที่ถือว่าจ่ายแล้ว (สถานะ Paid = จ่ายทันที, หรือถึงกำหนดจ่าย)
+  // ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงกับหน้าจัดซื้อและไฟล์ Excel ทุกไฟล์
+  const totalPaid     = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0), 0);
+  const paidPOCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
+  const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
+  const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
+
+  // รวม "งานเพิ่ม" (standalone extra) เข้าไปในกราฟตามกลุ่มด้วย ไม่งั้นยอดในกราฟ
+  // จะไม่ตรงกับการ์ดสรุป (ที่นับ topLevelCodes รวม extra) — และเคารพบัญชีที่ซ่อนไว้
+  const chartGroups = [...new Set([...GROUPS, ...extraItems.filter(e=>!e.parentCode).map(e=>e.group||"อื่น ๆ")])];
+  const groupData = chartGroups.map((g,i)=>{
+    const codes=[
+      ...ACCOUNTS.filter(a=>a.group===g && !hiddenAccounts.includes(a.code)).map(a=>a.code),
+      ...extraItems.filter(e=>!e.parentCode && (e.group||"อื่น ๆ")===g).map(e=>e.code),
+    ];
+    const committed = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
+    return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed,color:GRP_COLORS[i%GRP_COLORS.length]};
+  }).filter(g=>g.budget>0||g.committed>0);
+
+  // รวมบัญชีมาตรฐาน + "งานเพิ่ม" (standalone extra ที่ไม่ใช่รายการย่อย) ให้ยอดรวม
+  // หน้าบัญชีตรงกับหน้า QS/ภาพรวม ที่นับ topLevelCodes เหมือนกัน
+  const acctRows = [
+    ...ACCOUNTS.filter(a=>!hiddenAccounts.includes(a.code)),
+    ...extraItems.filter(e=>!e.parentCode).map(e=>({ code:e.code, name:e.name, group:e.group||"อื่น ๆ" })),
+  ];
+  const accountData = acctRows.map(a=>{
+    const budget=parseFloat(combinedBudget[a.code])||0;
+    // Every PO line item booked to this Account Code, whether the PO is
+    // single-code or split across several — pos.length still counts POs (a
+    // PO with two lines on the same code only counts once).
+    const items = poEntries.flatMap(p=>poItems(p).filter(it=>it.code===a.code));
+    const poCount = new Set(poEntries.filter(p=>poItems(p).some(it=>it.code===a.code)).map(p=>p.id)).size;
+    const committed = items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
+    return {...a,budget,committed,pos:{length:poCount},over:committed>budget&&budget>0};
+  }).filter(a=>a.budget>0||a.pos.length>0);
+  const pctUsedOf = (a) => a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0 ? 999 : 0);
+
+  // ─── Cash-flow-by-date view ──────────────────────────────────────────────
+  // For each Acc. Code: budget vs. committed (+ variance / variance %), plus
+  // every PO booked to it with its three key dates — when the PO was opened,
+  // when goods are due in (plan → actual per delivery batch), and when
+  // payment is due — so accounting can see cash timing at a glance.
+  const dateGroups = accountData.map(a => {
+    const rows = poEntries
+      .filter(p => poItems(p).some(it => it.code === a.code))
+      .map(p => ({ po: p, item: poItems(p).find(it => it.code === a.code) }))
+      .sort((x, y) => (x.po.date || "").localeCompare(y.po.date || ""));
+    const variance = a.budget - a.committed;
+    const variancePct = a.budget > 0 ? (variance / a.budget) * 100 : (a.committed > 0 ? null : 0);
+    // จ่ายแล้ว (สถานะ Paid = จ่ายทันที, หรือถึงกำหนดจ่าย) และยอดที่ยังต้องเก็บเงินไว้รอจ่าย
+    // ของ Acc. Code นี้ — ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงทั้งแอปและ Excel
+    const paid = poEntries.reduce((s,p)=> s + poItems(p).filter(it=>it.code===a.code)
+      .reduce((ss,it)=> ss + (it.rounds||[]).filter(r=>roundPaid(p,r))
+        .reduce((s3,r)=> s3 + (parseFloat(r.actualAmount)||0), 0), 0), 0);
+    const toReserve = Math.max(a.committed - paid, 0);
+    return { ...a, rows, variance, variancePct, paid, toReserve };
+  }).sort((x, y) => x.code.localeCompare(y.code));
+  // ตัวกรองแท็บ Cash Flow: ค้นหา (วันที่/Acc.Code/ชื่อรายการ/เลข PO) + เฉพาะที่มี PO
+  const dq = dateSearch.trim().toLowerCase();
+  const shownDateGroups = dateGroups.filter(a => {
+    if (onlyWithPO && a.rows.length === 0) return false;
+    if (!dq) return true;
+    if (a.code.toLowerCase().includes(dq) || (a.name||"").toLowerCase().includes(dq)) return true;
+    return a.rows.some(({po}) =>
+      (poNumbersLabel(po)||"").toLowerCase().includes(dq) ||
+      (po.date||"").includes(dq) ||
+      (poNextDueDate(po)||"").includes(dq) ||
+      poRounds(po).some(r => (r.actualDate||"").includes(dq) || (r.planDate||"").includes(dq))
+    );
+  });
+  const withPOCount = dateGroups.filter(a => a.rows.length > 0).length;
+  const handleSort = (key) => {
+    if (sortKey === key) setSortDir(d => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+  const displayAccountData = (() => {
+    if (!sortKey) return accountData;
+    const arr = [...accountData];
+    arr.sort((a, b) => {
+      let av, bv;
+      if (sortKey === "code")           { av = a.code; bv = b.code; }
+      else if (sortKey === "group")     { av = GROUPS.indexOf(a.group); bv = GROUPS.indexOf(b.group); }
+      else if (sortKey === "name")      { av = a.name; bv = b.name; }
+      else if (sortKey === "budget")    { av = a.budget; bv = b.budget; }
+      else if (sortKey === "committed") { av = a.committed; bv = b.committed; }
+      else if (sortKey === "variance")  { av = a.budget-a.committed; bv = b.budget-b.committed; }
+      else                              { av = pctUsedOf(a); bv = pctUsedOf(b); }
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  })();
+
+  // ─── แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────────────────
+  // ใช้ตัวช่วย poPayLines() ตัวเดียวกับ Export เพื่อให้ตัวเลขตรงกัน และกันการนับ
+  // ซ้ำเมื่อ PO มีงวดส่งของซ้ำ (ยึดยอด item.amount เป็นหลัก).
+  const payToday = todayStr();
+  const payLines = poEntries.flatMap(poPayLines);
+  const payMonthKeys = [...new Set(payLines.map(l=>l.month||"9999-99"))].sort();
+  const payByMonth = payMonthKeys.map(mk => {
+    const lines  = payLines.filter(l=>(l.month||"9999-99")===mk).sort((a,b)=>(a.payDate||"9999").localeCompare(b.payDate||"9999"));
+    const cash   = lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0);
+    const credit = lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
+    const sum    = cash+credit;
+    const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รวมยอดจ่ายจริง (รองรับจ่ายบางส่วน)
+    return { mk, label: mk==="9999-99"?t("ยังไม่ระบุวันจ่าย","No pay date"):monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
+  });
+  // ค้นหาในหน้าแผนจ่าย: กรองงวดตาม Supplier/PO No./Acc/วิธีจ่าย/วันครบกำหนด แล้วคิดยอดใหม่ต่อเดือน
+  const pq = planSearch.trim().toLowerCase();
+  const shownPayByMonth = (!pq ? payByMonth : payByMonth.map(m => {
+    const lines = m.lines.filter(l => [l.supplier,l.poNo,l.code,l.accName,l.payDate,l.method,PAYMENT_LABEL[l.status]].join(" ").toLowerCase().includes(pq));
+    if (!lines.length) return null;
+    const cash=lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0), credit=lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
+    const sum=cash+credit, paidA=lines.reduce((s,l)=>s+(l.paidAmount||0),0);
+    return { ...m, lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
+  }).filter(Boolean));
+  const planTotal  = payLines.reduce((s,l)=>s+l.amount,0);
+  const planPaid   = payLines.reduce((s,l)=>s+(l.paidAmount||0),0);
+  const planRemain = Math.max(0, planTotal - planPaid);
+  const thisMonthKey = payToday.slice(0,7);
+  // "ครบกำหนดเดือนนี้" = คงเหลือของเดือนนี้ + ยอดที่เลยกำหนดจากเดือนก่อน ๆ ที่ยังไม่จ่าย
+  const dueThisMonth = payByMonth.filter(m=>m.mk!=="9999-99" && m.mk<=thisMonthKey).reduce((s,m)=>s+m.remain,0);
+  // เดือนถัดไป — สำหรับแจ้งเตือนให้บัญชีเตรียมเงินล่วงหน้า
+  const nextMonthKey = (() => { const [y,m]=thisMonthKey.split("-").map(Number); const ny=m===12?y+1:y, nm=m===12?1:m+1; return `${ny}-${String(nm).padStart(2,"0")}`; })();
+  const nextBucket   = payByMonth.find(m=>m.mk===nextMonthKey);
+  const dueNextMonth = nextBucket?.remain || 0;
+  const nextCash     = nextBucket?.cash || 0;
+  const nextCredit   = nextBucket?.credit || 0;
+  const nextCount    = nextBucket?.lines.length || 0;
+
+  const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+poTotal(p),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
+
+  const CT = ({active,payload}) => {
+    if (!active||!payload?.length) return null;
+    return (
+      <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"10px 14px",fontSize:12,boxShadow:"0 4px 16px rgba(0,0,0,0.1)"}}>
+        <div style={{color:T.textMuted,marginBottom:4,fontWeight:600}}>{payload[0]?.payload?.group}</div>
+        {payload.map(p=><div key={p.name} style={{color:p.fill||p.color,fontFamily:"'JetBrains Mono',monospace"}}>{p.name}: {fmt(p.value)}</div>)}
+      </div>
+    );
+  };
+
+  const DateCell = ({ value, lateTint }) => (
+    <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:value?(lateTint?T.red:T.textPrimary):T.textMuted,fontWeight:value&&lateTint?650:450}}>
+      {value || "—"}
+    </span>
+  );
+  const Badge = ({ text, clr, bg }) => (
+    <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{text}</span>
+  );
+  // Every delivery batch of a PO, one line per shipment: plan → actual date
+  // with its own on-time/late/received status, same as Procurement's view.
+  const DeliveryDates = ({ po }) => {
+    const deliveries = poDeliveries(po);
+    if (!deliveries.length) return <span style={{fontSize:12,color:T.textMuted}}>—</span>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {deliveries.map((d,i)=>{
+          const st = deliveryStatus(d);
+          return (
+            <div key={d.id||i} style={{display:"flex",alignItems:"center",gap:5}}>
+              {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:650,minWidth:14}}>#{i+1}</span>}
+              <DateCell value={d.plan} lateTint={st==="late"}/>
+              <span style={{color:T.textMuted,fontSize:11}}>→</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","Pending")}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  return (
+    <Shell role="accounting" color={T.green} project={project} onBack={backView} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+      <div style={{padding:"24px 28px"}}>
+        {/* Tabs + Export */}
+        <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
+          {[["dashboard",t("📊 ภาพรวมงบ","📊 Budget overview"),t("ภาพรวม: งบประมาณ vs ที่ผูกพันแล้ว (PO) ทั้งโครงการ","Overview: budget vs committed (PO) for the whole project")],["matrix",t("📄 ตารางรวมเดือน","📄 Monthly matrix"),t("ตารางรวม: ต้นทุน + Incoming Plan / Actual Received / Payment Plan รายเดือน (เฉพาะเดือนที่มีข้อมูล)","Matrix: cost + Incoming/Received/Payment per month (only months with data)")]].map(([v,l,tip])=>(
+            <button key={v} onClick={()=>goView(v)} title={tip}
+              style={{background:view===v?T.green:"transparent",border:`1.5px solid ${view===v?T.green:T.cardBorder}`,borderRadius:10,padding:"8px 20px",color:view===v?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:view===v?600:500,transition:"all 0.15s"}}>{l}</button>
+          ))}
+          <div style={{marginLeft:"auto"}}><CurrencyControl project={curProject} updateProject={setCurrency}/></div>
+          <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
+            ⬇️ Export Excel
+          </button>
+        </div>
+        {/* คำอธิบายสี (legend) */}
+        <div style={{display:"flex",flexWrap:"wrap",gap:16,marginBottom:20,fontSize:11,color:T.textMuted,alignItems:"center"}}>
+          <span style={{fontWeight:650,color:T.textSecondary}}>{t("คำอธิบายสี","Legend")}:</span>
+          {[[T.green,t("ปกติ · ใช้งบ <80% · จ่ายแล้ว","Normal · <80% used · paid")],[T.amber,t("เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย","Watch · 80–100% · awaiting")],[T.red,t("เกินงบ · เกินกำหนดจ่าย","Over · overdue")]].map(([c,t])=>(
+            <span key={t} style={{display:"inline-flex",alignItems:"center",gap:6}}>
+              <span style={{width:11,height:11,borderRadius:3,background:c,display:"inline-block"}}/>{t}
+            </span>
+          ))}
+        </div>
+
+        {/* 🔔 แจ้งเตือนยอดต้องจ่ายเดือนหน้า — เห็นทุกแท็บ กดแล้วไปหน้าแผนจ่าย */}
+        {(dueThisMonth>0 || dueNextMonth>0) && (
+          <div onClick={()=>goView("matrix")} title={t("ดูรายละเอียดในตารางรวมเดือน","See details in the monthly matrix")}
+            style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
+              background:"linear-gradient(90deg,#fffbeb,#fff)",border:`1px solid ${T.amber}`,borderLeft:`5px solid ${T.amber}`,
+              borderRadius:12,padding:"12px 16px",marginBottom:20}}>
+            <span style={{fontSize:22,lineHeight:1}}>🔔</span>
+            <span style={{fontSize:13,color:T.textSecondary,fontWeight:650}}>{t("เตรียมเงินจ่าย","Cash to prepare")}</span>
+            {/* เดือนนี้ */}
+            <div style={{background:T.redBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
+              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("ครบกำหนดเดือนนี้","Due this month")} · {monthShortLabel(thisMonthKey)}</div>
+              <div style={{fontSize:18,fontWeight:700,color:T.red,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueThisMonth)}</div>
+              {usdLine(dueThisMonth, usdRate)}
+            </div>
+            {/* เดือนหน้า */}
+            <div style={{background:T.amberBg,borderRadius:10,padding:"6px 12px",minWidth:150}}>
+              <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เตรียมเดือนหน้า","Next month")} · {monthShortLabel(nextMonthKey)}</div>
+              <div style={{fontSize:18,fontWeight:700,color:T.amber,fontFamily:"'JetBrains Mono',monospace"}}>฿{fmt0(dueNextMonth)}</div>
+              {usdLine(dueNextMonth, usdRate)}
+            </div>
+            <div style={{flex:1}}/>
+            <span style={{fontSize:12,color:T.amber,fontWeight:650,whiteSpace:"nowrap"}}>{t("ดูตารางรวมเดือน","Monthly matrix")} →</span>
+          </div>
+        )}
+
+        {view==="dashboard" ? (
+          <>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
+              <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t("เดิม + เพิ่มรายเดือนทุกเดือน","Baseline + all monthly additions")} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${pct.toFixed(1)}% ${t("ของงบ","of budget")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label={t("วางบิลแล้ว","Invoiced")} value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate} sub={t("รอจ่าย + จ่ายแล้ว","Awaiting + paid")} color={T.purple} icon="🧾" accent={T.purpleBg}/>
+              <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidPOCount} ${t("รายการ","items")}`} color={T.green} icon="✅" accent={T.greenBg}/>
+            </div>
+
+            {/* แถบเตือน "เกินงบ" (เรื่องเงินจ่ายย้ายไปรวมที่แถบ 🔔 ด้านบนแล้ว) */}
+            {(() => {
+              const overCount = accountData.filter(a=>a.over).length;
+              if (!overCount) return null;
+              return (
+                <div style={{display:"flex",flexWrap:"wrap",gap:12,marginBottom:20}}>
+                  <button onClick={()=>handleSort("variance")} title={t("เรียงตารางตามส่วนต่าง","Sort by variance")} style={{display:"flex",alignItems:"center",gap:8,background:T.redBg,color:T.red,border:`1px solid ${T.red}`,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:650,cursor:"pointer"}}>
+                    ⚠ {overCount} {t("หมวดเกินงบ","categories over budget")} <span style={{fontSize:11,fontWeight:500,opacity:0.85}}>· {t("กดเพื่อเรียงดู","tap to sort")}</span>
+                  </button>
+                </div>
+              );
+            })()}
+
+            {/* Progress */}
+            <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22,marginBottom:20}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontSize:13,color:T.textPrimary,fontWeight:600}}>{t("สัดส่วนการใช้งบ","Budget usage")}</span>
+                <span style={{fontSize:13,color:tenderTotal-totalComm<0?T.red:T.green,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>
+                  {tenderTotal-totalComm<0?t("เกินงบ","Over")+" ":t("คงเหลือ","Remaining")+" "}{fmt(Math.abs(tenderTotal-totalComm))}
+                </span>
+              </div>
+              <div style={{background:"#f1f5f9",borderRadius:99,height:10,overflow:"hidden"}}>
+                <div style={{width:`${Math.min(pct,100)}%`,background:pct>100?T.red:pct>80?T.amber:T.green,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:7,fontSize:11,color:T.textMuted,fontFamily:"'JetBrains Mono',monospace"}}>
+                <span>0</span><span style={{fontWeight:600,color:pct>100?T.red:T.textSecondary}}>{pct.toFixed(1)}%</span><span>{fmt(tenderTotal)}</span>
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+              <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22}}>
+                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>{t("Budget vs Committed ตาม Group","Budget vs Committed by Group")}</p>
+                {groupData.length===0
+                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("QS ยังไม่ได้ลง Tender Cost","QS has not entered Tender Cost")}</div>
+                  : <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={groupData} margin={{left:0,right:0,top:4,bottom:44}}>
+                        <XAxis dataKey="group" tick={{fill:T.textMuted,fontSize:10}} angle={-30} textAnchor="end" interval={0}/>
+                        <YAxis tick={{fill:T.textMuted,fontSize:10}} tickFormatter={fmtK} width={60}/>
+                        <Tooltip content={<CT/>}/>
+                        <Bar dataKey="budget" name="Budget" fill={T.blue} radius={[5,5,0,0]}/>
+                        <Bar dataKey="committed" name="Committed" fill={T.amber} radius={[5,5,0,0]}/>
+                      </BarChart>
+                    </ResponsiveContainer>
+                }
+              </div>
+              <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:22}}>
+                <p style={{margin:"0 0 16px",fontSize:13,color:T.textPrimary,fontWeight:600}}>{t("สถานะ PO","PO status")}</p>
+                {pieData.length===0
+                  ? <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ยังไม่มี PO","No PO yet")}</div>
+                  : <ResponsiveContainer width="100%" height={220}>
+                      <PieChart>
+                        <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={78} innerRadius={36}>
+                          {pieData.map((d,i)=><Cell key={i} fill={d.color}/>)}
+                        </Pie>
+                        <Tooltip formatter={v=>fmt(v)} contentStyle={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:11,boxShadow:"0 4px 16px rgba(0,0,0,0.08)"}}/>
+                        <Legend iconType="circle" wrapperStyle={{fontSize:11,color:T.textSecondary}}/>
+                      </PieChart>
+                    </ResponsiveContainer>
+                }
+              </div>
+            </div>
+            <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginTop:20}}>
+            <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr style={{background:"#f8fafc"}}>
+                  {[
+                    {label:"Acc. Code", key:"code"},
+                    {label:"Account Name", key:"name"},
+                    {label:"Group", key:"group"},
+                    {label:"Budget (QS)", key:"budget"},
+                    {label:"Committed (PO)", key:"committed"},
+                    {label:t("ส่วนต่าง","Variance"), key:"variance"},
+                  ].map(({label,key})=>(
+                    <th key={label||"__actions"}
+                      style={{padding:"11px 16px",textAlign:["budget","committed","variance"].includes(key)?"right":"left",color:sortKey===key?T.green:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
+                      <span onClick={()=>key&&handleSort(key)} style={{cursor:key?"pointer":"default",userSelect:"none"}}>{label}{key && sortKey===key ? (sortDir===1?" ▲":" ▼") : ""}</span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {displayAccountData.map((a,i)=>{
+                  const variance = a.budget - a.committed;
+                  return (
+                    <tr key={a.code} style={{background:a.over?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
+                      <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:500}}>{a.code}</td>
+                      <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
+                      <td style={{padding:"10px 16px"}}>
+                        <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                      </td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.budget<=0&&a.committed>0?T.textMuted:variance<0?T.red:T.textSecondary,fontWeight:a.budget<=0&&a.committed>0?500:variance<0?650:500}}>
+                        {a.budget<=0&&a.committed>0 ? t("ไม่มีงบ","No budget") : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
+                        {(a.budget>0||a.committed>0)&&!(a.budget<=0&&a.committed>0)&&usdLine(Math.abs(variance), usdRate)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+                  <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{accountData.length} {t("รายการ","items")}</td>
+                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:650,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}{usdLine(accountData.reduce((s,a)=>s+a.budget,0), usdRate)}</td>
+                  <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.amber,fontWeight:650,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}{usdLine(accountData.reduce((s,a)=>s+a.committed,0), usdRate)}</td>
+                  {(() => {
+                    const totalVariance = accountData.reduce((s,a)=>s+(a.budget-a.committed),0);
+                    return (
+                      <td style={{padding:"12px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:totalVariance<0?T.red:T.textSecondary,fontWeight:650,fontSize:14}}>
+                        {totalVariance<0?"-":""}{fmt(Math.abs(totalVariance))}
+                        {usdLine(Math.abs(totalVariance), usdRate)}
+                      </td>
+                    );
+                  })()}
+                </tr>
+              </tfoot>
+            </table></div>
+            </div>
+          </>
+        ) : view==="dates" ? (
+          <div>
+            {/* Grand totals across every Acc. Code that has a budget or a PO */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+              <StatCard label={t("งบประมาณรวม","Total budget")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} thb={dateGroups.reduce((s,a)=>s+a.budget,0)} rate={usdRate} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("PO รวม","Total PO")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} thb={dateGroups.reduce((s,a)=>s+a.committed,0)} rate={usdRate} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
+              <StatCard label={t("ส่วนต่างรวม","Total variance")} value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))} thb={Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0))} rate={usdRate}
+                sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?t("เกินงบ","Over"):t("คงเหลือ","Remaining")}
+                color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
+                icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
+                accent={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.redBg:T.greenBg}/>
+              <StatCard label={t("ต้องเก็บไว้จ่ายรวม","Total to reserve")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))} thb={dateGroups.reduce((s,a)=>s+a.toReserve,0)} rate={usdRate}
+                sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} ${t("PO รอจ่าย","PO awaiting pay")}`} color={T.red} icon="⏳" accent={T.redBg}/>
+            </div>
+
+            {/* ค้นหา + ตัวกรอง */}
+            <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
+              <input value={dateSearch} onChange={e=>setDateSearch(e.target.value)}
+                placeholder={t("🔍 ค้นหา: วันที่ / Acc. Code / ชื่อรายการ / เลข PO","🔍 Search: date / Acc. Code / name / PO no.")}
+                style={{flex:1,minWidth:240,maxWidth:420,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
+              <button onClick={()=>setOnlyWithPO(v=>!v)} title={t("แสดงเฉพาะ Acc. Code ที่มี PO","Show only Acc. Codes with PO")}
+                style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",
+                  border:`1.5px solid ${onlyWithPO?T.green:T.cardBorder}`,background:onlyWithPO?T.green:"transparent",color:onlyWithPO?"#fff":T.textSecondary}}>
+                <span style={{fontSize:14}}>{onlyWithPO?"☑":"☐"}</span> {t("เฉพาะที่มี PO","With PO only")} ({withPOCount})
+              </button>
+              <span style={{fontSize:12,color:T.textMuted}}>{t("แสดง","Showing")} {shownDateGroups.length} / {dateGroups.length} {t("หมวด","categories")}</span>
+            </div>
+
+            {dateGroups.length===0 ? (
+              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+                <div style={{fontSize:32,marginBottom:12}}>📅</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>{t("ยังไม่มีงบหรือ PO ให้แสดง","No budget or PO to show")}</div>
+              </div>
+            ) : shownDateGroups.length===0 ? (
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>
+                {t("ไม่พบหมวดที่ตรงกับเงื่อนไข","No matching categories")} {dateSearch.trim() && <>"{dateSearch}"</>} {onlyWithPO && ("· "+t("(กรองเฉพาะที่มี PO)","(with PO only)"))}
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {shownDateGroups.map(a => {
+                  const isCollapsed = dateCollapsed.has(a.code);
+                  // แถบ = ความคืบหน้าการจ่ายของ PO ที่ผูกพันแล้ว (จ่ายแล้ว vs ต้องเก็บไว้จ่าย)
+                  const paidPct   = a.committed>0 ? (a.paid/a.committed*100) : 0;
+                  const barPct    = a.committed>0 ? Math.min(paidPct,100) : 0;
+                  const statusClr = a.over?T.red:a.committed>0?T.green:T.textMuted;
+                  const statusBg  = a.over?T.redBg:a.committed>0?T.greenBg:"#eef1f5";
+                  const statusTxt = a.over?t("⚠ เกินงบ","⚠ Over"):a.committed>0?"✅ OK":a.budget>0?t("ยังไม่ PO","No PO"):"—";
+                  const varClr    = a.variancePct===null ? T.textMuted : a.variance<0 ? T.red : T.green;
+                  return (
+                    <div key={a.code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderLeft:`4px solid ${statusClr}`,borderRadius:14,overflow:"hidden"}}>
+                      <div onClick={()=>toggleDateGroup(a.code)}
+                        style={{padding:"14px 18px",background:a.over?"#fff8f8":"#fbfcfe",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,cursor:"pointer",userSelect:"none"}}>
+                        {/* บรรทัด 1: ชื่อ + สถานะ */}
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                          <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12,flexShrink:0}}>▼</span>
+                          <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,background:T.blueLight,padding:"2px 8px",borderRadius:6,flexShrink:0}}>{a.code}</span>
+                          <span style={{color:T.textPrimary,fontSize:14,fontWeight:600,flex:1,minWidth:0}}>{a.name}</span>
+                          <span style={{background:statusBg,color:statusClr,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:650,whiteSpace:"nowrap",flexShrink:0}}>{statusTxt}</span>
+                        </div>
+                        {/* บรรทัด 2: แถบความคืบหน้าการจ่าย + ยอดที่ต้องเก็บเงินไว้รอจ่าย */}
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}} title={`${t("จ่ายแล้ว","Paid")} ${a.committed>0?paidPct.toFixed(0):0}% ${t("ของ PO","of PO")}`}>
+                            <div style={{width:`${barPct}%`,background:T.green,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
+                          </div>
+                          <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:a.toReserve>0?T.amber:a.committed>0?T.green:T.textMuted,textAlign:"right",whiteSpace:"nowrap"}}>
+                            {a.committed>0 ? (a.toReserve>0 ? `${t("เก็บไว้จ่าย","Reserve")} ฿${fmt0(a.toReserve)}` : t("จ่ายครบแล้ว","Fully paid")) : t("ยังไม่มี PO","No PO yet")}
+                          </span>
+                        </div>
+                        {/* บรรทัด 3: ตัวเลขสรุป 3 ช่อง — มูลค่า PO · จ่ายแล้ว · ต้องเก็บไว้จ่าย */}
+                        <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("มูลค่า PO","PO value")}</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
+                            {a.committed>0&&usdLine(a.committed, usdRate)}
+                          </div>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("จ่ายแล้ว","Paid")}</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.green}}>{a.paid>0?fmt(a.paid):"—"}</div>
+                            {a.paid>0&&usdLine(a.paid, usdRate)}
+                          </div>
+                          <div style={{minWidth:96}}>
+                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("ต้องเก็บไว้จ่าย","To reserve")}</div>
+                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:a.toReserve>0?T.amber:T.green}}>{a.committed>0?fmt(a.toReserve):"—"}</div>
+                            {a.committed>0&&usdLine(a.toReserve, usdRate)}
+                          </div>
+                        </div>
+                        {/* งบประมาณ / ส่วนต่าง (ข้อมูลงบ ไว้ท้ายสุด) */}
+                        <div style={{display:"flex",gap:24,flexWrap:"wrap",marginTop:8,paddingTop:8,borderTop:`1px dashed ${T.cardBorder}`}}>
+                          <div style={{fontSize:11,color:T.textMuted}}>{t("งบประมาณ","Budget")}: <b style={{color:T.blue,fontFamily:"'JetBrains Mono',monospace"}}>{a.budget>0?fmt(a.budget):"—"}</b></div>
+                          <div style={{fontSize:11,color:T.textMuted}}>{a.variance<0?t("เกินงบ","Over"):t("งบคงเหลือ","Remaining")}: <b style={{color:varClr,fontFamily:"'JetBrains Mono',monospace"}}>{a.variancePct===null ? t("ไม่มีงบ","No budget") : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}</b></div>
+                        </div>
+                      </div>
+                      {!isCollapsed && (
+                        a.rows.length===0 ? (
+                          <div style={{padding:"14px 18px",fontSize:12,color:T.textMuted}}>{t("ยังไม่มี PO ผูกกับ Acc. Code นี้","No PO linked to this Acc. Code")}</div>
+                        ) : (
+                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+                          <thead>
+                            <tr>
+                              {[["วันเปิด PO (แพลน)","PO date (plan)"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["ของเข้า (แผน→จริง)","Incoming (plan→actual)"],["ต้องจ่ายเงินวันไหน","Due date"],["สถานะจ่าย","Pay status"]].map(([h,he])=>(
+                                <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {a.rows.map(({po:p,item},i)=>{
+                              // แยกตาม Acc. Code → คิด/แสดงเฉพาะงวดของ item นี้ ไม่ปนงวดของ code อื่นในใบเดียวกัน
+                              const pItem = { ...p, items:[item] };
+                              const pay = paymentStatus(pItem);
+                              return (
+                                <tr key={p.id+"-"+(item.id||item.code)}
+                                  style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
+                                  <td style={{padding:"9px 16px"}}><DateCell value={p.date}/></td>
+                                  <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
+                                  <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{poNumbersLabel(p)}</td>
+                                  <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}{usdLine(parseFloat(item.amount)||0, usdRate)}</td>
+                                  <td style={{padding:"9px 16px"}}><DeliveryDates po={pItem}/></td>
+                                  <td style={{padding:"9px 16px"}}><DateCell value={poNextDueDate(pItem)} lateTint={false}/></td>
+                                  <td style={{padding:"9px 16px"}}><Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table></div>
+                        )
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : view==="matrix" ? (
+          <AccountingMatrixTab tenderCosts={tenderCosts} additions={additions} poEntries={poEntries} extraItems={extraItems} hiddenAccounts={hiddenAccounts} incomingPlan={incomingPlan} usdRate={usdRate} />
+        ) : (
+          <div>
+            {/* สรุปยอดที่ต้องเตรียมจ่าย */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+              <StatCard label={t("ต้องจ่ายทั้งหมด","Total to pay")} value={"฿"+fmt0(planTotal)} thb={planTotal} rate={usdRate} sub={`${payLines.length} ${t("งวด","rounds")}`} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("จ่ายแล้ว","Paid")} value={"฿"+fmt0(planPaid)} thb={planPaid} rate={usdRate} sub={t("ครบกำหนด + ตัดจ่ายแล้ว","Due + paid")} color={T.green} icon="✅" accent={T.greenBg}/>
+              <StatCard label={t("คงเหลือต้องจ่าย","Remaining to pay")} value={"฿"+fmt0(planRemain)} thb={planRemain} rate={usdRate} sub={t("ยอดที่ยังไม่จ่าย","Unpaid amount")} color={T.amber} icon="⏳" accent={T.amberBg}/>
+              <StatCard label={`${t("ครบกำหนดเดือนนี้","Due this month")} (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} thb={dueThisMonth} rate={usdRate} sub={t("เตรียมเงินเดือนนี้","Prepare this month")} color={T.red} icon="💰" accent={T.redBg}/>
+              <StatCard label={`${t("ครบกำหนดเดือนหน้า","Due next month")} (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} thb={dueNextMonth} rate={usdRate} sub={dueNextMonth>0?`${nextCount} ${t("งวด · เตรียมล่วงหน้า","rounds · prepare ahead")}`:t("ยังไม่มีที่ครบกำหนด","Nothing due")} color={T.amber} icon="🔔" accent={T.amberBg}/>
+            </div>
+
+            {/* ค้นหา: Supplier / PO No. / Acc. Code / วิธีจ่าย / วันครบกำหนด */}
+            {payByMonth.length>0 && (
+              <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
+                <SearchInput value={planSearch} onChange={setPlanSearch} placeholder={t("🔍 ค้นหา Supplier / PO No. / Acc. Code / วิธีจ่าย / วันจ่าย","🔍 Search Supplier / PO No. / Acc. Code / method / date")} width={340}/>
+                <span style={{fontSize:12,color:T.textMuted}}>{t("แสดง","Showing")} {shownPayByMonth.length} / {payByMonth.length} {t("เดือน","months")} · {shownPayByMonth.reduce((s,m)=>s+m.lines.length,0)} {t("งวด","rounds")}</span>
+              </div>
+            )}
+            {payByMonth.length===0 ? (
+              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
+                <div style={{fontSize:32,marginBottom:12}}>💰</div>
+                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>{t("ยังไม่มีงวดจ่ายให้แสดง","No payment rounds to show")}</div>
+                <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>{t("วันครบกำหนดจ่ายมาจากวันรับของ (แผน/จริง) + เทอมเครดิตของ PO","Due date = arrival date (plan/actual) + PO credit term")}</div>
+              </div>
+            ) : shownPayByMonth.length===0 ? (
+              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบงวดที่ตรงกับ","No rounds match")} "{planSearch}"</div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                {shownPayByMonth.map(m => {
+                  const isCollapsed = planCollapsed.has(m.mk);
+                  const isThis = m.mk===thisMonthKey;
+                  return (
+                    <div key={m.mk} style={{background:T.card,border:`1px solid ${isThis?T.amber:T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                      <div onClick={()=>togglePlanMonth(m.mk)}
+                        style={{padding:"12px 18px",background:isThis?T.amberBg:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:16,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
+                        <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
+                        <div style={{minWidth:150}}>
+                          <span style={{color:T.textPrimary,fontSize:14,fontWeight:650}}>{m.label}</span>
+                          {isThis && <span style={{marginLeft:8,background:T.amber,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{t("เดือนนี้","This month")}</span>}
+                          <span style={{marginLeft:8,color:T.textMuted,fontSize:12}}>{m.lines.length} {t("งวด","rounds")}</span>
+                        </div>
+                        <div style={{flex:1}}/>
+                        <div style={{textAlign:"right",minWidth:88}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เงินสด","Cash")}</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.green}}>{m.cash>0?fmt(m.cash):"—"}</div>
+                          {m.cash>0&&usdLine(m.cash, usdRate)}
+                        </div>
+                        <div style={{textAlign:"right",minWidth:88}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เครดิต","Credit")}</div>
+                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{m.credit>0?fmt(m.credit):"—"}</div>
+                          {m.credit>0&&usdLine(m.credit, usdRate)}
+                        </div>
+                        <div style={{textAlign:"right",minWidth:100}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("รวมต้องจ่าย","Total due")}</div>
+                          <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.textPrimary}}>{fmt(m.sum)}</div>
+                          {usdLine(m.sum, usdRate)}
+                        </div>
+                        <div style={{textAlign:"right",minWidth:100}}>
+                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("คงเหลือ","Remaining")}</div>
+                          <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:m.remain>0?T.amber:T.green}}>{fmt(m.remain)}</div>
+                          {usdLine(m.remain, usdRate)}
+                        </div>
+                      </div>
+                      {!isCollapsed && (
+                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
+                          <thead>
+                            <tr>
+                              {[["ครบกำหนดจ่าย","Due date"],["Supplier","Supplier"],["PO No.","PO No."],["Acc. Code","Acc. Code"],["วิธีจ่าย","Method"],["วันรับของ","Received"],["ยอดต้องจ่าย (THB)","Amount due (THB)"],["สถานะ","Status"]].map(([h,he])=>(
+                                <th key={h} style={{padding:"9px 16px",textAlign:h==="ยอดต้องจ่าย (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>{t(h,he)}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {m.lines.map((l,i)=>(
+                              <tr key={i} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
+                                <td style={{padding:"9px 16px"}}><DateCell value={l.payDate} lateTint={l.status==="late"}/></td>
+                                <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{l.supplier}</td>
+                                <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{l.poNo}</td>
+                                <td style={{padding:"9px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{l.code||"—"}</td>
+                                <td style={{padding:"9px 16px"}}>
+                                  <span style={{background:l.isCash?T.greenBg:T.blueLight,color:l.isCash?T.green:T.blue,fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{l.method}</span>
+                                </td>
+                                <td style={{padding:"9px 16px",whiteSpace:"nowrap"}}>
+                                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:T.textSecondary}}>{l.incoming||"—"}</span>
+                                  {l.incomingType && <span style={{marginLeft:5,fontSize:12,color:T.textMuted}}>({l.incomingType})</span>}
+                                </td>
+                                <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(l.amount)}{usdLine(l.amount, usdRate)}</td>
+                                <td style={{padding:"9px 16px"}}><Badge text={payLabel(l.status)} clr={PAYMENT_CLR[l.status]} bg={PAYMENT_BG[l.status]}/></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table></div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Shell>
+  );
 }
