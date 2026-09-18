@@ -2057,25 +2057,41 @@ export default function App() {
     fetchProjectData(activeId).catch(e => { console.warn("โหลดข้อมูลโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลโครงการไม่สำเร็จ — ลองเปิดใหม่อีกครั้ง"); });
   }, [activeId, fetchProjectData, session]);
 
+  // ── กัน "กรอกแล้วหาย/เด้งกลับ" ตอนเปิดหลายเครื่อง (ไอดีเดียว โครงการเดียวกัน) ──
+  // realtime ของ Supabase ส่ง event การเขียน "กลับมาหาเครื่องที่เขียนเองด้วย" ถ้าเครื่อง
+  // นั้นรีบดึงข้อมูลกลับมาทับทันที บางจังหวะจะอ่านได้ค่าเก่า (ก่อน merge ลงเสร็จ) แล้ว
+  // setState ทับของที่เพิ่งกรอก → แถวที่เพิ่งบันทึก "เด้งหาย". เปิด 2 เครื่องยิ่งหนักเพราะ
+  // event วิ่งชนกันถี่ขึ้น. แก้ 2 ชั้น: (1) ข้าม echo ของการเขียนจากเครื่องตัวเองภายในไม่กี่
+  // วินาที (2) ถ้ากำลังกรอก/แก้ค้างอยู่ ให้เลื่อน refetch ไปทำหลังบันทึก ไม่ทับกลางคัน
+  const lastWriteRef   = useRef({});    // key -> เวลาเขียนล่าสุดจากเครื่องนี้
+  const pendingSyncRef = useRef(false); // มี refetch ค้างรอตอนเลิกแก้ไข
+  const SELF_ECHO_MS   = 6000;
+  const runProjectSync = useCallback(async (key) => {
+    if (Date.now() - (lastWriteRef.current[key] || 0) < SELF_ECHO_MS) return; // echo ของเราเอง — ข้าม
+    const isProjKey = activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}` || key === `tcs-inplan-${activeId}`);
+    if (!(key === "tcs-projects" || key === "tcs-accounts" || isProjKey)) return;
+    if (UnsavedGuard.dirty || editModeRef.current) { pendingSyncRef.current = true; return; } // กำลังกรอก — อย่าทับ
+    setSyncing(true);
+    try {
+      if (key === "tcs-projects") await fetchProjects();
+      else if (key === "tcs-accounts") { await fetchAccounts(); if (activeId) await fetchProjectData(activeId); }
+      else if (isProjKey) await fetchProjectData(activeId);
+      setSyncedAt(new Date());
+    } catch (e) {
+      console.warn("sync realtime ล้มเหลว:", e);
+    } finally {
+      setSyncing(false); // กันสปินเนอร์ค้างเมื่อ fetch ล้มเหลว
+    }
+  }, [activeId, fetchProjects, fetchAccounts, fetchProjectData]);
+
   useEffect(() => {
     if (!session) return; // subscribe realtime หลังล็อกอิน เพื่อให้ RLS ยอมส่ง event
     const channel = supabase.channel("kv_changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, async (payload) => {
-        const key = payload.new?.key || payload.old?.key || "";
-        setSyncing(true);
-        try {
-          if (key === "tcs-projects") await fetchProjects();
-          else if (key === "tcs-accounts") { await fetchAccounts(); if (activeId) await fetchProjectData(activeId); }
-          else if (activeId && (key === `tcs-tenders-${activeId}` || key === `tcs-po-${activeId}` || key === `tcs-additions-${activeId}` || key === `tcs-extra-${activeId}` || key === `tcs-hidden-${activeId}` || key === `tcs-inplan-${activeId}`)) await fetchProjectData(activeId);
-          setSyncedAt(new Date());
-        } catch (e) {
-          console.warn("sync realtime ล้มเหลว:", e);
-        } finally {
-          setSyncing(false); // กันสปินเนอร์ค้างเมื่อ fetch ล้มเหลว
-        }
+      .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
+        runProjectSync(payload.new?.key || payload.old?.key || "");
       }).subscribe();
     return () => supabase.removeChannel(channel);
-  }, [activeId, fetchProjects, fetchAccounts, fetchProjectData, session]);
+  }, [session, runProjectSync]);
 
   // ─── Undo / Redo ───────────────────────────────────────────────────────────
   // ทุกการบันทึกวิ่งผ่าน commit() ซึ่งจดค่าเดิมไว้ก่อนเขียนทับ → กด Ctrl+Z หรือ
@@ -2087,6 +2103,12 @@ export default function App() {
   const [undoInfo, setUndoInfo] = useState({ u: 0, r: 0, label: "" });
   const [editMode, setEditMode] = useState(false); // true เมื่ออยู่ในโหมดแก้ไข — undo/Ctrl+Z ใช้ได้เฉพาะตอนนี้
   const editModeRef = useRef(false); editModeRef.current = editMode;
+  // เลิกโหมดแก้ไขแล้ว → ถ้ามี refetch ค้างไว้ระหว่างที่กำลังกรอก ค่อยดึงข้อมูลล่าสุดมาแสดง
+  useEffect(() => {
+    if (editMode || !pendingSyncRef.current) return;
+    pendingSyncRef.current = false;
+    if (activeId) fetchProjectData(activeId).then(() => setSyncedAt(new Date())).catch(() => {});
+  }, [editMode, activeId, fetchProjectData]);
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
   const [copied, setCopied]     = useState(false); // สถานะ "คัดลอกแล้ว"
@@ -2110,11 +2132,15 @@ export default function App() {
   // แจ้งเตือน (กันเซฟหลุดเพราะ blip เล็ก ๆ). ถ้าส่ง prev มาด้วย จะใช้ ssMerge เพื่อ
   // "รวม" การแก้ของเราลงบนของล่าสุดบนเซิร์ฟเวอร์ (กันทับงานคนอื่นที่แก้พร้อมกัน).
   const persist = (key, value, prev) => {
-    const attempt = () => (prev !== undefined ? ssMerge(key, prev, value) : ss(key, value));
+    // จำเวลาที่เครื่องนี้เขียน key นี้ ทั้งก่อนยิงและหลังสำเร็จ — เพื่อให้ echo ของ realtime
+    // ที่วิ่งกลับมา (ซึ่งมาหลังเขียนเสร็จ) ยังอยู่ในกรอบเวลา แล้วถูกข้าม ไม่ดึงมาทับตัวเอง
+    const mark = () => { lastWriteRef.current[key] = Date.now(); };
+    mark();
+    const attempt = () => { mark(); return (prev !== undefined ? ssMerge(key, prev, value) : ss(key, value)); };
     return attempt()
-      .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+      .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
       .catch(() => new Promise(res => setTimeout(res, 900)).then(attempt)
-        .then(() => { setSyncedAt(new Date()); setSyncError(""); })
+        .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
         .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); }));
   };
   const commit = useCallback((key, next, prev, setState, label) => {
@@ -2333,8 +2359,9 @@ export default function App() {
     // ใช้ ssMerge (merge by id) แทน ss ธรรมดา — ตัดเฉพาะโครงการที่ลบออก โดยไม่ทับ
     // โครงการที่คนอื่นเพิ่งเพิ่มพร้อมกัน และแจ้ง error ถ้าบันทึกไม่สำเร็จ
     setProjects(next);
+    lastWriteRef.current["tcs-projects"] = Date.now();
     ssMerge("tcs-projects", projects, next)
-      .then(()=>setSyncedAt(new Date()))
+      .then(()=>{ lastWriteRef.current["tcs-projects"] = Date.now(); setSyncedAt(new Date()); })
       .catch(e=>{ console.warn("ลบโครงการไม่สำเร็จ:", e); setSyncError("⚠ ลบโครงการไม่สำเร็จ — ตรวจเน็ตแล้วลองใหม่"); });
     await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`); await sd(`tcs-inplan-${id}`);
   };
