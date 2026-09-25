@@ -91,6 +91,17 @@ function applyAccountList(list) {
   ACCOUNTS.splice(0, ACCOUNTS.length, ...clean);
   GROUPS.splice(0, GROUPS.length, ...[...new Set(ACCOUNTS.map(a => a.group))]);
 }
+// รายการ "งานเพิ่ม" ของโครงการที่เปิดอยู่ (App อัปเดตทุกครั้งที่ render) — ให้ตัวช่วยระดับโมดูล
+// เช่น poPayLines / ป๊อปอัพ PO / หน้าติดตาม หาชื่อของรหัสงานเพิ่มได้ ไม่ขึ้น "—"
+let _EXTRA_ITEMS = [];
+const setExtraRegistry = (items) => { _EXTRA_ITEMS = Array.isArray(items) ? items : []; };
+const accountOf = (code) => {
+  if (!code) return null;
+  const a = ACCOUNTS.find(x => x.code === code);
+  if (a) return a;
+  const e = _EXTRA_ITEMS.find(x => x.code === code);
+  return e ? { code: e.code, name: e.name || "", group: e.group || "Other", isExtra: true } : null;
+};
 // ย้ายข้อมูลเมื่อเปลี่ยนรหัสบัญชี (ข้ามทุกโครงการ) — renameMap = { oldCode: newCode }
 async function migrateAccountCodes(renameMap) {
   const map = Object.fromEntries(Object.entries(renameMap || {}).filter(([o, n]) => o && n && o !== n));
@@ -142,7 +153,7 @@ const todayStr = () => {
 // หน้าจอที่แก้แบบ draft (QS ราคาเดิม/รายเดือน) จะตั้งค่า .dirty ระหว่างพิมพ์ค้าง
 // แล้วปุ่มออกจากหน้า/สลับโครงการ/ล็อกเอาต์/รีเฟรชเบราว์เซอร์ จะถามยืนยันก่อนทิ้ง
 const UnsavedGuard = { dirty: false };
-const confirmLeaveIfDirty = () => !UnsavedGuard.dirty || window.confirm("มีการแก้ไขที่ยังไม่บันทึก — ออกจากหน้านี้โดยไม่บันทึกหรือไม่?");
+const confirmLeaveIfDirty = () => !UnsavedGuard.dirty || window.confirm(t("มีการแก้ไขที่ยังไม่บันทึก — ออกจากหน้านี้โดยไม่บันทึกหรือไม่?","You have unsaved changes — leave this page without saving?"));
 // "2026-07-02" + 30 -> "2026-08-01" — คำนวณด้วย UTC ล้วนทั้งไปและกลับ กัน bug timezone
 // (ของเดิม parse เป็น local แต่อ่านกลับเป็น UTC ทำให้ในไทยคลาดไป 1 วันและตกเดือนผิด)
 const addDays = (dateStr, days) => {
@@ -282,7 +293,8 @@ const relativeTime = (iso) => {
   if (day < 30) return `${day} ${t("วันที่แล้ว","days ago")}`;
   return new Date(iso).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{day:"numeric",month:"short",year:"2-digit"});
 };
-const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString("th-TH",{day:"numeric",month:"short",year:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
+const uiLocale = () => (_LANG === "en" ? "en-US" : "th-TH");   // วันที่/เวลาบนหน้าจอให้ตามภาษาที่เลือก
+const formatDateTime = (iso) => iso ? new Date(iso).toLocaleString(uiLocale(),{day:"numeric",month:"short",year:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
 
 // ─── Actual received / paid dates ──────────────────────────────────────────
 // Every round already carries its own "received" date; a PO's overall
@@ -360,9 +372,9 @@ const poPayLines = (p) => {
   });
   const today = todayStr();
   return out.map(l => ({
-    ...l, isCash, method,
+    ...l, isCash, method, term,
     supplier: poSupplierName(P), poNo: poNumbersLabel(P),
-    accName: (ACCOUNTS.find(a=>a.code===l.code)?.name)||"",
+    accName: accountOf(l.code)?.name || "",
     month: l.payDate ? l.payDate.slice(0,7) : "",
     // "เกินกำหนดจ่าย" เฉพาะของที่รับแล้วแต่ยังไม่จ่ายและเลยกำหนด; ของที่ยังไม่รับ = "รอจ่าย"
     status: l.paid ? "paid" : (l.received && l.payDate && l.payDate < today ? "late" : "pending"),
@@ -441,11 +453,13 @@ const payTypeLabelT = (p) => { const P = migratePO(p); if (P.paymentType==="cash
 const fmt  = n => new Intl.NumberFormat("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 // บาทเต็ม (ไม่มีทศนิยม) — ใช้กับตัวเลขพาดหัวการ์ด/ยอดรวม ให้กวาดตาอ่านง่าย
 const fmt0 = n => new Intl.NumberFormat("th-TH",{maximumFractionDigits:0}).format(Math.round(n||0));
-const fmtK = n => n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(0)}K`:Math.round(n).toString();
+// รองรับค่าติดลบ (งานลด) — เดิม -12,000 แสดงเป็น "-12000" แทน "-12K"
+const fmtK = n => { const a = Math.abs(n||0), sg = (n||0) < 0 ? "-" : ""; return sg + (a>=1e6?`${(a/1e6).toFixed(1)}M`:a>=1e3?`${(a/1e3).toFixed(0)}K`:Math.round(a).toString()); };
 // "2026-08" -> "ส.ค. 69" (TH, Buddhist year) or "Aug 25" (EN, Gregorian) — used
 // wherever a month key needs a short label (QS Monthly tab's chips/headers, chart
 // X-axis, and sub-item "เพิ่มเมื่อ ..." badges). Follows the current UI language.
-const monthShortLabel = (m) => new Date(m+"-01").toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{month:"short",year:"2-digit"});
+// สร้างวันที่แบบเวลาท้องถิ่น (เดิม new Date("2026-08-01") = เที่ยงคืน UTC → ผู้ใช้ที่อยู่ฝั่งตะวันตกของ UTC เห็นเป็นเดือนก่อนหน้า)
+const monthShortLabel = (m) => { const [y, mo] = String(m).split("-").map(Number); return new Date(y, (mo||1)-1, 1).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{month:"short",year:"2-digit"}); };
 const uid  = () => Math.random().toString(36).slice(2,10);
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
@@ -1365,7 +1379,7 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
       const pay = paymentStatus(pItem);
       const _rd = poRounds(pItem);
       const deliveryStr = _rd.map((r,i) => `${_rd.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
-      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      const acc = accountOf(it.code);
       const amount = parseFloat(it.amount) || 0;
       rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay], p.notes||""]);
       rowGroups1.push(acc?.group || "-");
@@ -1412,7 +1426,7 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
         .forEach(p => {
           const pay = paymentStatus(p);
           poItems(p).forEach(it => {
-            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            const acc = accountOf(it.code);
             const amount = parseFloat(it.amount) || 0;
             rows.push([it.code, acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, ...(U?[toUsd(amount,rate)]:[]), p.status, PAYMENT_LABEL[pay]]);
             rowGroups.push(acc?.group||"-");
@@ -1512,7 +1526,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const pay = paymentStatus(pItem);
       const _rd2 = poRounds(pItem);
       const deliveryStr = _rd2.map((r,i) => `${_rd2.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
-      const acc = ACCOUNTS.find(a=>a.code===it.code);
+      const acc = accountOf(it.code);
       const amount = parseFloat(it.amount) || 0;
       rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay]]);
       rowGroups2.push(acc?.group || "-");
@@ -1685,10 +1699,10 @@ class ErrorBoundary extends Component {
       return (
         <div style={{minHeight:"60vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,padding:24,textAlign:"center"}}>
           <div style={{fontSize:40}}>😵</div>
-          <div style={{fontSize:16,fontWeight:650,color:"#0f172a"}}>เกิดข้อผิดพลาดในการแสดงผลหน้านี้</div>
-          <div style={{fontSize:13,color:"#64748b",maxWidth:460}}>ข้อมูลของคุณยังปลอดภัย ลองกดปุ่มด้านล่างเพื่อโหลดใหม่ ถ้ายังเป็นอยู่ให้แจ้งผู้ดูแลระบบ</div>
+          <div style={{fontSize:16,fontWeight:650,color:"#0f172a"}}>{t("เกิดข้อผิดพลาดในการแสดงผลหน้านี้","Something went wrong displaying this page")}</div>
+          <div style={{fontSize:13,color:"#64748b",maxWidth:460}}>{t("ข้อมูลของคุณยังปลอดภัย ลองกดปุ่มด้านล่างเพื่อโหลดใหม่ ถ้ายังเป็นอยู่ให้แจ้งผู้ดูแลระบบ","Your data is safe. Press the button below to reload; if it keeps happening, contact your admin")}</div>
           <button onClick={()=>{ this.setState({err:null}); if(typeof window!=="undefined") window.location.reload(); }}
-            style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:14,fontWeight:600,cursor:"pointer"}}>โหลดหน้าใหม่</button>
+            style={{background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:14,fontWeight:600,cursor:"pointer"}}>{t("โหลดหน้าใหม่","Reload page")}</button>
         </div>
       );
     }
@@ -1714,6 +1728,7 @@ export default function App() {
   const [hiddenAccounts, setHiddenAccounts] = useState([]); // codes of fixed Acc. Codes QS has removed for this project
   const [incomingPlan, setIncomingPlan] = useState([]); // แผนของเข้าทั้งโปรเจค (จัดซื้อวางแผนก่อนออก PO): [{ id, date, items:[{id,code,amount}] }]
   const [poEntries,   setPO]    = useState([]);
+  setExtraRegistry(extraItems);   // ให้ตัวช่วยระดับโมดูลหา "ชื่อ" ของรหัสงานเพิ่มของโครงการนี้ได้
   const [loaded,   setLoaded]   = useState(false);
   const [newProjModal, setNewProjModal] = useState(false);
   const [syncedAt,    setSyncedAt]    = useState(null);
@@ -1721,9 +1736,9 @@ export default function App() {
   const [syncError,   setSyncError]   = useState("");   // ข้อความเตือนเมื่อบันทึก/โหลดพลาด
   const [exportMsg,   setExportMsg]   = useState("");   // สถานะตอนกด Export (กำลังสร้าง/เสร็จ/พลาด)
   const runExport = async (fn) => {
-    setExportMsg("⏳ กำลังสร้างไฟล์ Excel…");
-    try { await fn(); setExportMsg("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด"); setTimeout(()=>setExportMsg(""), 3500); }
-    catch (e) { console.warn("export failed:", e); setExportMsg("⚠ สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง"); setTimeout(()=>setExportMsg(""), 4500); }
+    setExportMsg(t("⏳ กำลังสร้างไฟล์ Excel…","⏳ Building Excel file…"));
+    try { await fn(); setExportMsg(t("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด","✓ File created — check your Downloads folder")); setTimeout(()=>setExportMsg(""), 3500); }
+    catch (e) { console.warn("export failed:", e); setExportMsg(t("⚠ สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง","⚠ Couldn't create the file — please try again")); setTimeout(()=>setExportMsg(""), 4500); }
   };
 
   const handleLogin = (user) => { setSession(user); setSessionState(user); };
@@ -1801,7 +1816,7 @@ export default function App() {
     setLoaded(false);   // ล็อกอินใหม่ → แสดง "กำลังโหลด" จนได้รายการโครงการ (ไม่โชว์ "ยังไม่มีโครงการ" หลอก ๆ)
     (async () => {
       try { await fetchAccounts(); await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
-      catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า"); }
+      catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError(t("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า","Couldn't load data — check your connection and refresh")); }
       finally { setLoaded(true); }   // กันจอโหลดค้างเสมอ แม้ดึงข้อมูลพลาด
     })();
   }, [fetchProjects, fetchAccounts, session]);
@@ -1917,7 +1932,7 @@ export default function App() {
       .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
       .catch(() => new Promise(res => setTimeout(res, 900)).then(attempt)
         .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
-        .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต"); }));
+        .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError(t("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต","⚠ Save failed — your latest change may not be saved. Please retry / check your connection")); }));
   };
   const commit = useCallback((key, next, prev, setState, label) => {
     undoRef.current.push({ key, value: prev, setState, label });
@@ -2101,13 +2116,13 @@ export default function App() {
     };
   }, []);
 
-  const saveProjects = useCallback((list) => commit("tcs-projects", list, projects, setProjects, "รายชื่อโครงการ"), [commit, projects]);
-  const saveTenders  = useCallback((t)    => commit(`tcs-tenders-${activeId}`, t, tenderCosts, setTCosts, "ราคาเดิม (Baseline)"), [commit, activeId, tenderCosts]);
-  const saveAdditions= useCallback((a)    => commit(`tcs-additions-${activeId}`, a, additions, setAdditions, "ยอดเพิ่มรายเดือน"), [commit, activeId, additions]);
-  const saveExtraItems=useCallback((ex)   => commit(`tcs-extra-${activeId}`, ex, extraItems, setExtraItems, "รายการ/แถว"), [commit, activeId, extraItems]);
-  const saveHiddenAccounts=useCallback((h)=> commit(`tcs-hidden-${activeId}`, h, hiddenAccounts, setHiddenAccounts, "การซ่อนหมวด"), [commit, activeId, hiddenAccounts]);
-  const saveIncomingPlan=useCallback((v)=> commit(`tcs-inplan-${activeId}`, v, incomingPlan, setIncomingPlan, "แผนของเข้า"), [commit, activeId, incomingPlan]);
-  const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, "PO / จัดซื้อ"), [commit, activeId, poEntries]);
+  const saveProjects = useCallback((list) => commit("tcs-projects", list, projects, setProjects, t("รายชื่อโครงการ","Project list")), [commit, projects]);
+  const saveTenders  = useCallback((tc)   => commit(`tcs-tenders-${activeId}`, tc, tenderCosts, setTCosts, t("ราคาเดิม (Baseline)","Baseline")), [commit, activeId, tenderCosts]);
+  const saveAdditions= useCallback((a)    => commit(`tcs-additions-${activeId}`, a, additions, setAdditions, t("ยอดเพิ่มรายเดือน","Monthly additions")), [commit, activeId, additions]);
+  const saveExtraItems=useCallback((ex)   => commit(`tcs-extra-${activeId}`, ex, extraItems, setExtraItems, t("รายการ/แถว","Items/rows")), [commit, activeId, extraItems]);
+  const saveHiddenAccounts=useCallback((h)=> commit(`tcs-hidden-${activeId}`, h, hiddenAccounts, setHiddenAccounts, t("การซ่อนหมวด","Hidden categories")), [commit, activeId, hiddenAccounts]);
+  const saveIncomingPlan=useCallback((v)=> commit(`tcs-inplan-${activeId}`, v, incomingPlan, setIncomingPlan, t("แผนของเข้า","Incoming plan")), [commit, activeId, incomingPlan]);
+  const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, t("PO / จัดซื้อ","PO / Procurement")), [commit, activeId, poEntries]);
 
   const openProject = (id) => {
     if (!confirmLeaveIfDirty()) return;
@@ -2117,6 +2132,8 @@ export default function App() {
     else { setRole(session?.role); setScreen("app"); }
   };
   const deleteProject = async (id) => {
+    // ลบทั้งโครงการ = ลบข้อมูลของทุกแผนก → เฉพาะ Admin (กันทั้งปุ่มและในฟังก์ชัน)
+    if (session?.role !== "admin") { alert(t("ลบโครงการได้เฉพาะ Admin","Only Admin can delete projects")); return; }
     const proj = projects.find(p => p.id === id);
     const name = (proj?.name || "").trim();
     // ยืนยันแบบ "พิมพ์ชื่อโครงการให้ตรง" — กันเผลอลบ เพราะลบแล้วข้อมูลย่อยหายด้วย
@@ -2228,11 +2245,11 @@ export default function App() {
           {(() => {
             const selRate = effRate(activeProject);   // อัตราแลกเปลี่ยน (0 = ปิด/ไม่โชว์ $)
             const segs = [
-              {label:"ผลรวม", raw:selStats.sum, clr:"#34d399", money:true},
-              {label:"เฉลี่ย", raw:selStats.avg, clr:"#93c5fd", money:true},
-              {label:"นับ",   text:String(selStats.count), clr:"#fcd34d", money:false},
-              {label:"ต่ำสุด", raw:selStats.min, clr:"#cbd5e1", money:true},
-              {label:"สูงสุด", raw:selStats.max, clr:"#cbd5e1", money:true},
+              {label:t("ผลรวม","Sum"), raw:selStats.sum, clr:"#34d399", money:true},
+              {label:t("เฉลี่ย","Avg"), raw:selStats.avg, clr:"#93c5fd", money:true},
+              {label:t("นับ","Count"),   text:String(selStats.count), clr:"#fcd34d", money:false},
+              {label:t("ต่ำสุด","Min"), raw:selStats.min, clr:"#cbd5e1", money:true},
+              {label:t("สูงสุด","Max"), raw:selStats.max, clr:"#cbd5e1", money:true},
             ];
             return segs.map((s,i)=>(
               <span key={s.label} style={{display:"flex",alignItems:"center",gap:6,padding:"0 12px",borderLeft:i?"1px solid #334155":"none"}}>
@@ -2245,29 +2262,29 @@ export default function App() {
             ));
           })()}
           <button onClick={()=>{ const tsv=buildTSV(selCellsRef.current); if(tsv&&navigator.clipboard?.writeText){ navigator.clipboard.writeText(tsv).then(()=>{setCopied(true); setTimeout(()=>setCopied(false),1300);}); } }}
-            title="คัดลอกค่าที่เลือก (Ctrl+C)"
+            title={t("คัดลอกค่าที่เลือก (Ctrl+C)","Copy selected values (Ctrl+C)")}
             style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",borderRadius:8,padding:"6px 12px",
               fontFamily:"system-ui,sans-serif",fontSize:12,fontWeight:600,background:copied?"#065f46":"#334155",color:"#fff"}}>
-            {copied ? "✓ คัดลอกแล้ว" : "⧉ คัดลอก"}
+            {copied ? t("✓ คัดลอกแล้ว","✓ Copied") : t("⧉ คัดลอก","⧉ Copy")}
           </button>
         </div>
       )}
       {editMode && (undoInfo.u > 0 || undoInfo.r > 0) && (
         <div style={{position:"fixed",left:20,bottom:20,zIndex:95,display:"flex",gap:6,alignItems:"center",
           background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"7px 9px",boxShadow:"0 8px 28px rgba(15,23,42,0.16)"}}>
-          <button onClick={undo} disabled={!undoInfo.u} title="ย้อนกลับ (Ctrl+Z)"
+          <button onClick={undo} disabled={!undoInfo.u} title={t("ย้อนกลับ (Ctrl+Z)","Undo (Ctrl+Z)")}
             style={{display:"flex",alignItems:"center",gap:6,background:undoInfo.u?T.blue:"#e2e8f0",color:undoInfo.u?"#fff":"#94a3b8",
               border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:undoInfo.u?"pointer":"default"}}>
-            ↩︎ ย้อนกลับ
+            ↩︎ {t("ย้อนกลับ","Undo")}
           </button>
-          <button onClick={redo} disabled={!undoInfo.r} title="ทำซ้ำ (Ctrl+Shift+Z)"
+          <button onClick={redo} disabled={!undoInfo.r} title={t("ทำซ้ำ (Ctrl+Shift+Z)","Redo (Ctrl+Shift+Z)")}
             style={{background:undoInfo.r?T.blueLight:"transparent",color:undoInfo.r?T.blue:"#cbd5e1",
               border:`1px solid ${undoInfo.r?T.blue:T.cardBorder}`,borderRadius:8,padding:"7px 10px",fontSize:13,fontWeight:600,cursor:undoInfo.r?"pointer":"default"}}>
             ↪︎
           </button>
           {undoInfo.label && (
             <span style={{fontSize:11,color:T.textMuted,maxWidth:170,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",paddingRight:2}}>
-              ล่าสุด: {undoInfo.label}
+              {t("ล่าสุด","Last")}: {undoInfo.label}
             </span>
           )}
         </div>
@@ -2347,7 +2364,8 @@ function LoginScreen({ onLogin }) {
 
   return (
     <div style={{minHeight:"100vh",background:T.headerGrad,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <form onSubmit={submit} style={{background:T.card,borderRadius:20,padding:36,width:400,maxWidth:"92vw",boxShadow:"0 24px 60px rgba(0,0,0,0.25)"}}>
+      <form onSubmit={submit} style={{background:T.card,borderRadius:20,padding:36,width:400,maxWidth:"92vw",boxShadow:"0 24px 60px rgba(0,0,0,0.25)",position:"relative"}}>
+        <div style={{position:"absolute",top:14,right:14}}><LangToggle dark={false}/></div>
         <div style={{textAlign:"center",marginBottom:28}}>
           <div style={{fontSize:34,marginBottom:8}}>🏗</div>
           <div style={{fontSize:11,letterSpacing:3,color:T.textMuted,textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
@@ -2401,7 +2419,7 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
             <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>{t("รีเซ็ตรหัส","Reset password")}</button>
             {/* ห้ามระงับบัญชีตัวเอง (แอดมินคนสุดท้ายจะล็อกทุกคนออก) · ระงับคนอื่นถามยืนยันก่อน */}
             {!(isSelf && u.active) && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>{ if (u.active && !confirm(t(`ระงับผู้ใช้ "${u.username}"? ผู้ใช้นี้จะล็อกอินไม่ได้จนกว่าจะเปิดใช้อีกครั้ง`,`Suspend "${u.username}"? They won't be able to sign in until re-enabled`))) return; onToggle(u.id); }}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>}
-            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`))) onDelete(u.id);}}>ลบ</button>}
+            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`))) onDelete(u.id);}}>{t("ลบ","Delete")}</button>}
           </div>
         )}
       </td>
@@ -2475,7 +2493,7 @@ function AdminRestoreTab() {
     if (r.taken_at > g.taken_at) g.taken_at = r.taken_at;
   });
   const rounds = Object.values(roundMap).sort((a,b) => b.taken_at.localeCompare(a.taken_at));
-  const roundDateLabel = (r) => new Date(r.taken_at).toLocaleDateString("th-TH",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+  const roundDateLabel = (r) => new Date(r.taken_at).toLocaleDateString(uiLocale(),{weekday:"short",day:"numeric",month:"short",year:"numeric"});
   const deptLabelOf = (id) => (DEPTS.find(([d])=>d===id)||[])[1] || t("ข้อมูล","Data");
 
   // กู้คืนทั้งชุดของแผนกที่เลือก กลับไปยังรอบเวลาที่กด — ย้อนทุกไฟล์พร้อมกัน
@@ -2501,7 +2519,7 @@ function AdminRestoreTab() {
   if (!snaps.length) return (
     <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:24,fontSize:13,color:T.textSecondary,lineHeight:1.7}}>
       {t("ยังไม่มีสแนปช็อต","No snapshots yet")}<br/>
-      <span style={{color:T.textMuted}}>{t("ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์","Auto snapshots run twice a day (12:00 and 18:00) after running")} <b>kv-snapshots.sql</b> ใน Supabase</span>
+      <span style={{color:T.textMuted}}>{t("ระบบจะถ่ายสแนปช็อตอัตโนมัติวันละ 2 รอบ (12:00 และ 18:00) หลังจากรันไฟล์","Auto snapshots run twice a day (12:00 and 18:00) after running")} <b>kv-snapshots.sql</b> {t("ใน Supabase","in Supabase")}</span>
     </div>
   );
 
@@ -2587,7 +2605,7 @@ function AdminAccountsTab() {
     if (clean.some(r => !r.code)) { setMsg(t("⚠ มีรหัสว่าง — กรอกรหัสให้ครบ","⚠ Some codes are empty — fill them in")); return; }
     if (clean.some(r => !r.name)) { setMsg(t("⚠ มีชื่อว่าง — กรอกชื่อให้ครบ","⚠ Some names are empty — fill them in")); return; }
     const codes = clean.map(r => r.code);
-    if (new Set(codes).size !== codes.length) { setMsg("⚠ มีรหัสซ้ำกัน — Acc code ห้ามซ้ำ"); return; }
+    if (new Set(codes).size !== codes.length) { setMsg(t("⚠ มีรหัสซ้ำกัน — Acc code ห้ามซ้ำ","⚠ Duplicate codes — each Acc. Code must be unique")); return; }
     const renameMap = {}; clean.forEach(r => { if (r.orig && r.orig !== r.code) renameMap[r.orig] = r.code; });
     const nRen = Object.keys(renameMap).length;
     if (!window.confirm((t(`บันทึกรายการบัญชี ${clean.length} รายการ?`,`Save ${clean.length} account codes?`)) + (nRen ? t(`\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ`,`\n\n${nRen} codes changed — existing data (Tender Cost / PO / monthly / plan) for all projects will be migrated automatically`) : "") + t(`\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`,`\n\nThe page will refresh when done`))) return;
@@ -2697,12 +2715,13 @@ function AdminPanel({ onBack, onLogout, session }) {
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
-        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
         <div>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>Admin Panel</div>
         </div>
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
+          <LangToggle/>
           <span style={{fontSize:12,color:"rgba(255,255,255,0.8)"}}>👤 {session.name} ({ROLE_LABELS[session.role]})</span>
           <button onClick={onLogout} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>{t("ออกจากระบบ","Logout")}</button>
         </div>
@@ -2792,7 +2811,7 @@ function AdminPanel({ onBack, onLogout, session }) {
                   <tr><td colSpan={4} style={{padding:"30px",textAlign:"center",color:T.textMuted}}>{t("ยังไม่มีข้อมูล","No data")}</td></tr>
                 ) : logs.map(l => (
                   <tr key={l.id} style={{borderBottom:"1px solid #f1f5f9"}}>
-                    <td style={{padding:"9px 14px",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{new Date(l.time).toLocaleString("th-TH")}</td>
+                    <td style={{padding:"9px 14px",fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:T.textSecondary}}>{new Date(l.time).toLocaleString(uiLocale())}</td>
                     <td style={{padding:"9px 14px",color:T.textPrimary,fontWeight:500}}>{l.username}</td>
                     <td style={{padding:"9px 14px",color:T.textSecondary}}>{ROLE_LABELS[l.role]||l.role}</td>
                     <td style={{padding:"9px 14px"}}>
@@ -2829,7 +2848,7 @@ function SyncBadge({ syncing, syncedAt }) {
   return (
     <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(255,255,255,0.15)",backdropFilter:"blur(8px)",borderRadius:8,padding:"5px 12px",fontSize:11,color:"rgba(255,255,255,0.85)"}}>
       <span style={{width:6,height:6,borderRadius:"50%",background:syncing?"#fbbf24":"#34d399",display:"inline-block",boxShadow:syncing?"0 0 6px #fbbf24":"0 0 6px #34d399",animation:syncing?"pulse 0.8s ease-in-out infinite":"none"}}/>
-      {syncing ? t("กำลัง sync...","Syncing...") : syncedAt ? `sync ${syncedAt.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}` : ""}
+      {syncing ? t("กำลัง sync...","Syncing...") : syncedAt ? `sync ${syncedAt.toLocaleTimeString(uiLocale(),{hour:"2-digit",minute:"2-digit",second:"2-digit"})}` : ""}
     </div>
   );
 }
@@ -2964,7 +2983,7 @@ function CurrencyControl({ project, updateProject }) {
   };
   return (
     <div style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",border:`1px solid ${T.cardBorder}`,borderRadius:10,background:T.card}}>
-      <button onClick={()=>updateProject({ showUsd: !on })} title="เปิด/ปิดการแสดงเป็นดอลลาร์ ($)"
+      <button onClick={()=>updateProject({ showUsd: !on })} title={t("เปิด/ปิดการแสดงเป็นดอลลาร์ ($)","Show/hide US dollar ($)")}
         style={{display:"flex",alignItems:"center",gap:6,border:"none",background:"transparent",cursor:"pointer",padding:0}}>
         <span style={{width:34,height:18,borderRadius:99,background:on?T.green:"#cbd5e1",position:"relative",transition:"all .15s",display:"inline-block",flexShrink:0}}>
           <span style={{position:"absolute",top:2,left:on?18:2,width:14,height:14,borderRadius:99,background:"#fff",transition:"all .15s"}}/>
@@ -3009,6 +3028,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
             <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · {t("จัดซื้อ · บัญชี","Procurement · Accounting")} — Real-time sync</div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <LangToggle/>
             <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
             {session?.role === "admin" && (
               <button className="btn-primary" onClick={onOpenAdmin}
@@ -3053,7 +3073,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
             <div style={{fontSize:52,marginBottom:14}}>🏗</div>
             <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>{t("ยังไม่มีโครงการ","No projects yet")}</div>
             <div style={{fontSize:13,marginBottom:20}}>{t('กด "โครงการใหม่" เพื่อเริ่มต้น','Press "New project" to start')}</div>
-            <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ {t("สร้างโครงการแรก","Create first project")}</button>
+            {session?.role !== "accounting" && <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ {t("สร้างโครงการแรก","Create first project")}</button>}
           </div>
         ) : (
           <>
@@ -3068,7 +3088,7 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
               <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบโครงการที่ตรงกับ","No projects match")} "{projSearch}"</div>
             ) : (
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
-                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={session?.role==="accounting" ? null : ()=>deleteProject(p.id)} />)}
+                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={session?.role==="admin" ? ()=>deleteProject(p.id) : null} />)}
               </div>
             )}
           </>
@@ -3156,7 +3176,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16}}>
-        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← กลับ</button>
+        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
         <div>
           <div style={{fontSize:10,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>{project.name}</div>
@@ -3168,6 +3188,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
             ))}
           </div>
         )}
+        <div style={{marginLeft:project.area?8:"auto"}}><LangToggle/></div>
       </div>
 
       <div style={{padding:"32px"}}>
@@ -3183,7 +3204,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
               ))}
             </div>
             <div style={{display:"flex",gap:10,marginTop:16}}>
-              <button className="btn-primary" onClick={()=>{updateProject(draft);setEditing(false);}}>บันทึก</button>
+              <button className="btn-primary" onClick={()=>{updateProject(draft);setEditing(false);}}>{t("บันทึก","Save")}</button>
               <button className="btn-ghost" onClick={()=>setEditing(false)}>{t("ยกเลิก","Cancel")}</button>
             </div>
           </div>
@@ -4226,7 +4247,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         if (kidsAsOf(row.code, month).length > 0) return; // parent roll-up row — no direct input
         cells.forEach((cellRaw, ci) => {
           if (String(cellRaw).trim() === "") return; // don't overwrite with blanks
-          const val = evalMoney(cellRaw);
+          const val = evalMoney(cellRaw, true);   // ยอดเพิ่มรายเดือนติดลบได้ (งานลด) · "(12,000)" = -12,000
           if (val === "") return;
           if (isMultiCol) {
             const col = columns[startColIdx + ci];
@@ -4480,7 +4501,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
                 <div style={{fontSize:15,fontWeight:750,color:active?"#fff":T.textPrimary,marginBottom:3,letterSpacing:0.2}}>{monthShortLabel(m)}</div>
                 <div style={{fontSize:15,fontWeight:650,color:active?"#dbeafe":T.textSecondary,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(cumulativeLive(m))}</div>
-                <div style={{fontSize:13,fontWeight:700,color:active?"#fff":(add>0?T.amber:T.textMuted),marginTop:3}}>{add>0?"+":""}{fmtK(add)} {t("เดือนนี้","this mo.")}</div>
+                <div style={{fontSize:13,fontWeight:700,color:active?(add<0?"#fecaca":"#fff"):(add>0?T.amber:add<0?T.red:T.textMuted),marginTop:3}}>{add>0?"+":""}{fmtK(add)} {t("เดือนนี้","this mo.")}</div>
                 {exists && (
                   <button onClick={(e)=>{e.stopPropagation(); handleDeleteMonth(m);}} title={t("ลบเดือนนี้ (มีเตือนก่อนลบ)","Delete this month (asks first)")}
                     style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:6,border:"none",lineHeight:1,
@@ -4582,8 +4603,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           <button onClick={()=>applyCellFmt({bg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีพื้น","Remove fill")}>⛔ {t("ล้างพื้น","No fill")}</button>
           <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
           <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🎨 {t("สีตัวอักษร","Text")}:</span>
-          {[["#DC2626","แดง"],["#059669","เขียว"],["#2563EB","น้ำเงิน"],["#0F172A","ดำ"]].map(([fg,nm])=>(
-            <button key={fg} onClick={()=>applyCellFmt({fg})} title={t(`สีตัวอักษร ${nm}`,"Text color")}
+          {[["#DC2626","แดง","red"],["#059669","เขียว","green"],["#2563EB","น้ำเงิน","blue"],["#0F172A","ดำ","black"]].map(([fg,nm,en])=>(
+            <button key={fg} onClick={()=>applyCellFmt({fg})} title={t(`สีตัวอักษร ${nm}`,`Text color ${en}`)}
               style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",color:fg,cursor:"pointer",padding:0,fontWeight:800,fontSize:13,lineHeight:1}}>A</button>
           ))}
           <button onClick={()=>applyCellFmt({fg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีตัวอักษร","Reset text color")}>↺ {t("สีปกติ","Default")}</button>
@@ -4746,7 +4767,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         </button>
                       )}
                     </td>
-                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace", ...qsFrz(3,rowBg)}} title="ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน">{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace", ...qsFrz(3,rowBg)}} title={t("ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน","Baseline + additions of all previous months")}>{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                     {isMultiCol ? (
                       hasKids ? (
@@ -4767,7 +4788,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             onMouseEnter={()=>onCellEnter(i,ci)}
                             style={{padding:"8px 10px",textAlign:"right",...(on?{background:"#dbeafe",boxShadow:`inset 0 0 0 1.5px ${T.blue}`}:{})}}>
                             {editingUnlocked ? (
-                              <MoneyInput value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
+                              <MoneyInput allowNegative value={draftAdd[ck]??""} onChange={v=>setDraftAdd(d=>({...d,[ck]:v}))}
                                 onPaste={raw=>handleGridPaste(i,ci,raw)}
                                 style={{width:104,fontSize:13,background:cv!==0?T.amberBg:(on?"transparent":T.bg),...hl}}/>
                             ) : (
@@ -4787,7 +4808,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             {usdLine(thisVal, usdRate)}
                           </div>
                         ) : editingUnlocked ? (
-                          <MoneyInput value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
+                          <MoneyInput allowNegative value={draftAdd[r.code]??""} onChange={v=>setDraftAdd(d=>({...d,[r.code]:v}))}
                             onPaste={raw=>handleGridPaste(i,0,raw)}
                             style={{width:130,background:thisVal!==0?T.amberBg:(inSel(i,0)?"transparent":T.bg),...cellFmtStyle(r.code)}}/>
                         ) : (
@@ -4838,7 +4859,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                         <td style={{padding:"7px 16px",textAlign:"right"}}>
                           {editingUnlocked ? (
-                            <MoneyInput value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
+                            <MoneyInput allowNegative value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
                               style={{width:130,fontSize:13,background:kThisVal!==0?T.greenBg:T.bg}}/>
                           ) : (
                             <div style={{width:130,marginLeft:"auto",padding:"7px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(kThisVal!==0?{background:T.greenBg,color:T.green,fontWeight:700,borderRadius:8}:{color:T.textMuted})}}>{fmt(kThisVal)}{usdLine(kThisVal, usdRate)}</div>
@@ -4922,22 +4943,26 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 // ช่องกรอกยอดเงินที่ (1) โชว์ , คั่นหลักพันให้อ่านง่าย และ (2) พิมพ์บวก/ลบได้
 // เช่น "20000+10000" แล้วกด Enter → รวมเป็น 30,000 ให้อัตโนมัติ
 // เก็บค่าเป็นตัวเลขล้วน (string ไม่มี ,) ไว้เบื้องหลัง โค้ดส่วนอื่นใช้ parseFloat ได้ตามเดิม
-const evalMoney = (expr) => {
-  const cleaned = String(expr ?? "").replace(/[,\s]/g, "");
+// allowNegative: ช่องที่ติดลบได้ (งานลด/ตัดงานในยอดเพิ่มรายเดือน) — ช่องอื่น (งบ/ยอด PO/ยอดรับ) ติดลบไม่ได้
+const evalMoney = (expr, allowNegative = false) => {
+  let cleaned = String(expr ?? "").replace(/[,\s]/g, "").replace(/−/g, "-");   // − (ลบแบบ Unicode จาก Excel) → -
   if (!cleaned) return "";
+  // รูปแบบบัญชี "(12,000)" = -12,000 (เดิมอ่านเป็น +12,000)
+  let sign = 1;
+  const paren = cleaned.match(/^\((.*)\)$/);
+  if (paren) { sign = -1; cleaned = paren[1]; }
   const terms = cleaned.match(/[+-]?\d*\.?\d+/g);
   if (!terms) return "";
-  const sum = terms.reduce((s, t) => s + (parseFloat(t) || 0), 0);
+  const sum = sign * terms.reduce((s, t) => s + (parseFloat(t) || 0), 0);
   if (isNaN(sum)) return "";
-  // เงินติดลบไม่มีความหมาย (งบ/ยอด PO/ยอดรับ) — ยังพิมพ์สูตรลบได้ (เช่น 100-20=80)
-  // แต่ถ้าผลรวมออกมาติดลบ ให้เป็น 0 กันข้อมูลเสียหาย
-  return String(Math.max(0, sum));
+  // ช่องที่ติดลบไม่ได้: ยังพิมพ์สูตรลบได้ (เช่น 100-20=80) แต่ถ้าผลรวมติดลบ ให้เป็น 0 กันข้อมูลเสียหาย
+  return String(allowNegative ? Math.round(sum * 100) / 100 : Math.max(0, sum));
 };
 const fmtMoneyInput = (v) => {
   if (v === "" || v == null || isNaN(Number(v))) return "";
   return Number(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
 };
-function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style, onPaste }) {
+function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style, onPaste, allowNegative = false }) {
   const [focused, setFocused] = useState(false);
   const [text, setText] = useState("");
   const focusedRef = useRef(false);
@@ -4946,7 +4971,7 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
     if (!focusedRef.current) return;
     focusedRef.current = false;
     setFocused(false);
-    const v = evalMoney(text);
+    const v = evalMoney(text, allowNegative);
     const cur = (value === "" || value == null) ? "" : String(parseFloat(value));
     if (v !== cur) onChange(v);
   };
@@ -4957,11 +4982,11 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
       className={className}
       disabled={disabled}
       placeholder={placeholder}
-      style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", ...(style || {}) }}
+      style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", ...(!focused && parseFloat(value) < 0 ? { color: T.red } : {}), ...(style || {}) }}
       value={focused ? text : fmtMoneyInput(value)}
       onFocus={() => { focusedRef.current = true; setFocused(true); setText(value != null && value !== "" ? String(value) : ""); }}
       onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s]/g, ""))}
+      onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s()\u2212]/g, ""))}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); e.currentTarget.blur(); } }}
       onBlur={commit}
       onPaste={(e) => {
@@ -4971,7 +4996,7 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
         const isGrid = /[\t\n\r]/.test(raw.replace(/\s+$/, ""));
         if (!onPaste) {
           // ช่องที่วางทั้งบล็อกไม่ได้: ใช้แค่ค่าแรก (กันตัวเลขหลายช่องต่อกันเป็นเลขเดียว เช่น 1,000⏎2,000 → 10,002,000)
-          if (isGrid) { e.preventDefault(); setText(raw.split(/[\t\n\r]/)[0].replace(/[^0-9.+\-,\s]/g, "")); }
+          if (isGrid) { e.preventDefault(); setText(raw.split(/[\t\n\r]/)[0].replace(/[^0-9.+\-,\s()\u2212]/g, "")); }
           return;
         }
         if (isGrid) {
@@ -4999,7 +5024,7 @@ function AccountPicker({ value, onChange, options }) {
   const listRef = useRef(null);
   const btnRef = useRef(null);
   // รหัสที่เลือกไว้แต่ไม่อยู่ในรายการ (เช่นถูกซ่อน) ยังแสดงชื่อได้
-  const sel = options.find(a => a.code === value) || (value ? { code: value, name: ACCOUNTS.find(a => a.code === value)?.name || "" } : null);
+  const sel = options.find(a => a.code === value) || (value ? { code: value, name: accountOf(value)?.name || "" } : null);
   const ql = q.trim().toLowerCase();
   const list = ql ? options.filter(a => (`${a.code} ${a.name}`).toLowerCase().includes(ql)) : options;
   useEffect(() => { setHi(0); }, [q, open]);
@@ -5112,7 +5137,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     const otherReceived = (it.rounds||[]).filter(r=>r.id!==roundId).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
     if (ordered>0 && Math.round((otherReceived + newVal)*100) > Math.round(ordered*100)) {
       const maxAllow = Math.max(ordered - otherReceived, 0);
-      setCapWarn(`⚠ ${it.code||"รายการนี้"}: ยอดของเข้ารวมห้ามเกินยอดสั่ง ${fmt(ordered)} — งวดนี้กรอกได้ไม่เกิน ${fmt(maxAllow)} (ระบบไม่บันทึกค่าที่เกิน)`);
+      setCapWarn(t(`⚠ ${it.code||"รายการนี้"}: ยอดของเข้ารวมห้ามเกินยอดสั่ง ${fmt(ordered)} — งวดนี้กรอกได้ไม่เกิน ${fmt(maxAllow)} (ระบบไม่บันทึกค่าที่เกิน)`, `⚠ ${it.code||"This item"}: total received can't exceed the order ${fmt(ordered)} — this round allows at most ${fmt(maxAllow)} (the excess was not saved)`));
       return; // บล็อก: ไม่บันทึกค่าที่เกินยอดสั่ง
     }
     setCapWarn("");
@@ -5137,7 +5162,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     setItemRounds(itemId, it.rounds.filter(r => r.id !== roundId));
   };
   const roundBadge = (r) => {
-    if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return ["รอของเข้า", PAYMENT_BG.pending, PAYMENT_CLR.pending];
+    if (!r.actualDate || !(parseFloat(r.actualAmount)||0)) return [t("รอของเข้า","Awaiting goods"), PAYMENT_BG.pending, PAYMENT_CLR.pending];
     // ถ้าวันของเข้าจริงยังมาไม่ถึง (วันในอนาคต) = ยังไม่ถือว่ารับของ แสดงเป็น "นัดรับ"
     if (r.actualDate > todayStr()) return [t(`นัดรับ ${r.actualDate} (ยังไม่ถึงวัน)`,`Due ${r.actualDate} (not yet)`), INCOMING_BG.pending, INCOMING_CLR.pending];
     return roundPaid(po,r) ? [t("ถึงกำหนดจ่ายแล้ว","Payment due"), PAYMENT_BG.paid, PAYMENT_CLR.paid]
@@ -5204,7 +5229,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
         <div style={{marginTop:12}}>
           <div style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>📦 {t("ของเข้า / จ่ายเงิน (แบ่งงวดได้)","Incoming / payment (by rounds)")}</div>
           {items.map((it,ii)=>{
-            const acc = ACCOUNTS.find(a=>a.code===it.code);
+            const acc = accountOf(it.code);
             const ordered = itemOrdered(it), recv = itemReceived(it), remain = itemRemaining(it);
             const planned = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0); // ยอดรวมที่วางแผนไว้ทุกงวด
             const planRemain = Math.max(ordered - planned, 0);   // ยอดที่ยัง "ไม่ถูกวางแผน" (ไว้แบ่งงวดเพิ่ม)
@@ -5217,7 +5242,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                     <span style={{fontSize:11,color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:650}}>{it.code||"—"}</span>
                     <span style={{fontSize:12,color:T.textSecondary,marginLeft:8}}>{acc?.name||"—"}</span>
                   </div>
-                  <span style={{fontSize:12,color:T.textMuted}}>สั่ง <b style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b></span>
+                  <span style={{fontSize:12,color:T.textMuted}}>{t("สั่ง","Ordered")} <b style={{color:T.textPrimary,fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b></span>
                 </div>
 
                 {(it.rounds||[]).map((r,ri)=>{
@@ -5227,7 +5252,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                   return (
                     <div key={r.id||ri} style={{border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:10,marginBottom:6,background:T.card}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:8}}>
-                        <span style={{fontSize:11,fontWeight:650,color:T.textSecondary}}>งวดที่ {ri+1}{(parseFloat(r.planAmount)||0)>0 ? ` · แผน ${fmt(r.planAmount)}` : ""}</span>
+                        <span style={{fontSize:11,fontWeight:650,color:T.textSecondary}}>{t("งวดที่","Round")} {ri+1}{(parseFloat(r.planAmount)||0)>0 ? ` · ${t("แผน","plan")} ${fmt(r.planAmount)}` : ""}</span>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
                           {!locked && it.rounds.length>1 && (
@@ -5267,7 +5292,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                 </div>
                 {Math.round(overPlanned*100)>0 && (
                   <div style={{marginTop:8,fontSize:11,color:T.red,background:T.redBg,borderRadius:8,padding:"7px 10px",lineHeight:1.4}}>
-                    ⚠ {t("ยอดรวมทุกงวด","Total all rounds")} <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> เกินยอดสั่ง <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> อยู่ {fmt(overPlanned)} — กด 🗑 ลบงวดที่เกินออก
+                    ⚠ {t("ยอดรวมทุกงวด","Total all rounds")} <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(planned)}</b> {t("เกินยอดสั่ง","exceeds the order")} <b style={{fontFamily:"'JetBrains Mono',monospace"}}>{fmt(ordered)}</b> {t("อยู่","by")} {fmt(overPlanned)} — {t("กด 🗑 ลบงวดที่เกินออก","press 🗑 to remove the extra round")}
                   </div>
                 )}
                 {!locked && ordered>0 && remain>0.001 ? (
@@ -5317,7 +5342,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
 
         {(capWarn || overCapItem) && (
           <div style={{marginTop:14,fontSize:12,color:T.red,background:T.redBg,border:`1px solid ${T.red}`,borderRadius:10,padding:"9px 12px",lineHeight:1.5}}>
-            {capWarn || `⚠ ${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง ${fmt(itemOrdered(overCapItem))} — แก้ให้ไม่เกินก่อน จึงจะกดบันทึกได้ (ปุ่มบันทึกถูกปิดไว้)`}
+            {capWarn || t(`⚠ ${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง ${fmt(itemOrdered(overCapItem))} — แก้ให้ไม่เกินก่อน จึงจะกดบันทึกได้ (ปุ่มบันทึกถูกปิดไว้)`, `⚠ ${overCapItem.code||"Item"}: all rounds together exceed the order ${fmt(itemOrdered(overCapItem))} — fix it before saving (Save is disabled)`)}
           </div>
         )}
         <div style={{display:"flex",gap:10,marginTop:16,flexWrap:"wrap",alignItems:"center"}}>
@@ -5325,7 +5350,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             onClick={()=>{
               // ตรวจอีกครั้งก่อนปิด: ยอดของเข้าจริงรวมของทุกรายการห้ามเกินยอดสั่ง
               const bad = po.items.find(it => { const o=itemOrdered(it); const rc=(it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0); return o>0 && Math.round(rc*100) > Math.round(o*100); });
-              if (bad) { setCapWarn(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`); return; }
+              if (bad) { setCapWarn(t(`⚠ ${bad.code||"รายการ"}: ยอดของเข้ารวมเกินยอดสั่ง ${fmt(itemOrdered(bad))} — แก้ให้ไม่เกินก่อนบันทึก`, `⚠ ${bad.code||"Item"}: total received exceeds the order ${fmt(itemOrdered(bad))} — fix it before saving`)); return; }
               setCapWarn(""); onClose();
             }}
             disabled={!!overCapItem} className="btn-primary"
@@ -5371,7 +5396,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const pos = Array.isArray(poEntries) ? poEntries : [];
   const acctList = exportAccountList(extraItems, hiddenAccounts);
   const nameOf = (code) => acctList.find(a => a.code === code)?.name || ACCOUNTS.find(a => a.code === code)?.name || "";
-  const lbl = (d) => d ? new Date(d).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "2-digit" }) : "—";
+  const lbl = (d) => d ? new Date(d).toLocaleDateString(uiLocale(), { day: "numeric", month: "short", year: "2-digit" }) : "—";
   const planDates = (pl) => poRounds(pl).map(r => r.planDate).filter(Boolean).sort();
   const sorted = [...list].sort((a, b) => ((planDates(a)[0] || a.date || "")).localeCompare(planDates(b)[0] || b.date || ""));
   const monthLbl = (mk) => monthShortLabel(mk); // เดือนไทย + ปี พ.ศ. (เช่น "ส.ค. 69") ให้ตรงกับการ์ดแผน/Excel
@@ -5574,8 +5599,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                     <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 650, color: T.textPrimary }}>฿{fmt(total)}</span>
                     {total ? usdLine(total, usdRate) : null}
                   </span>
-                  <button onClick={() => onConvert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ ทำเป็น PO จริง</button>
-                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ แก้ไข</button>
+                  <button onClick={() => onConvert(pl)} className="btn-primary" style={{ background: T.green, fontSize: 12, padding: "6px 12px" }}>→ {t("ทำเป็น PO จริง","Make real PO")}</button>
+                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}>✏️ {t("แก้ไข","Edit")}</button>
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {items.map(it => (
@@ -5636,6 +5661,8 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // Object.values(combinedBudget) wholesale would double-count them.
   // ไม่ซ่อน Acc.Code ที่ยังมี PO อยู่ (กันงบของ code นั้นหายจากยอดรวม ทั้งที่ committed ยังนับ)
   const effHidden = hiddenSafeForPO(hiddenAccounts, poEntries);
+  // ตัวเลือกในช่อง Account Code ของฟอร์ม PO = รหัสมาตรฐาน (ไม่รวมที่ QS ซ่อน) + "งานเพิ่ม" ของโครงการ
+  const pickerOptions = exportAccountList(extraItems, effHidden);
   const topLevelCodes = [
     ...ACCOUNTS.filter(a => !effHidden.includes(a.code)).map(a => a.code),
     ...extraItems.filter(e => !e.parentCode).map(e => e.code),
@@ -5833,7 +5860,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const po = poEntries.find(x=>x.id===id);
     if (po && !canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin","This PO is fully received & paid — Admin only can delete")); return; }
     // ถามยืนยันก่อนลบ (ลบแล้วย้อนกลับไม่ได้) — ถ้า confirmed=true แปลว่ายืนยันในแอปมาแล้ว
-    const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ${fmt(poTotal(po))} บาท` : "";
+    const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ฿${fmt(poTotal(po))}` : "";
     if (!confirmed && !window.confirm(t(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`,`Confirm deleting this PO?\n\n${label}\n\n⚠ This cannot be undone`))) return;
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
     if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
@@ -5856,7 +5883,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   }, [view]);
 
   const filtered = poEntries.filter(p=>{
-    const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
+    const itemsText = poItems(p).map(it=>{ const acc=accountOf(it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
     return (filter==="All"||p.status===filter)&&
       (search===""||[itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(search.toLowerCase()));
   });
@@ -5985,7 +6012,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   return (
                   <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
                     <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:12}}>
-                      <AccountPicker value={it.code} onChange={code=>updateItemRow(it.id,"code",code)} options={ACCOUNTS} />
+                      <AccountPicker value={it.code} onChange={code=>updateItemRow(it.id,"code",code)} options={pickerOptions} />
                       <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
                         style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
                     </div>
@@ -6123,7 +6150,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 {sortedGroupCodes.map(code => {
-                  const acc  = ACCOUNTS.find(a=>a.code===code);
+                  const acc  = accountOf(code);
                   const rows = groupedFiltered[code].slice().sort((a,b)=> (b.po.date||"").localeCompare(a.po.date||""));
                   const isCollapsed = !!collapsed[code];
                   const groupTotal = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
@@ -6255,7 +6282,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 
   const q = search.toLowerCase();
   const passesFilter = (p) => {
-    const itemsText = poItems(p).map(it=>{ const acc=ACCOUNTS.find(a=>a.code===it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
+    const itemsText = poItems(p).map(it=>{ const acc=accountOf(it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
     const matchesSearch = q==="" || [itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(q);
     const hasIssue = incomingStatus(p)==="late" || paymentStatus(p)==="late";
     return matchesSearch && (!onlyIssues || hasIssue) && matchesStatus(p);
@@ -6337,7 +6364,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
     const locked = !canEditPO(p, session);
     const receivedDates = poReceivedDates(pItem);
     const paidDate = poPaidDate(pItem);
-    const acc = ACCOUNTS.find(a=>a.code===item.code);
+    const acc = accountOf(item.code);
     return (
       <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>onView?.(p)}
         style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:onView?"pointer":"default"}}
@@ -6479,7 +6506,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
       ) : (
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           {sortedCodes.map(code => {
-            const acc = ACCOUNTS.find(a=>a.code===code);
+            const acc = accountOf(code);
             const rows = groups[code];
             const lateCount = rows.filter(({po:p})=>incomingStatus(p)==="late"||paymentStatus(p)==="late").length;
             const isCollapsed = collapsed.has(code);
@@ -6810,6 +6837,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const backView = () => { if (viewHist.length) { const h = [...viewHist]; const prev = h.pop(); setViewHist(h); setView(prev); } else onBack(); };
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
+  const [payListOpen, setPayListOpen] = useState(false);   // เปิดรายการ "ต้องจ่ายใคร" ใต้แถบ 🔔
 
   // Budget = baseline Tender Cost + every monthly addition (ค่าธรรมดา + คอลัมน์
   // ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตัวเลขตรงกัน
@@ -6835,11 +6863,11 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
 
   // รวม "งานเพิ่ม" (standalone extra) เข้าไปในกราฟตามกลุ่มด้วย ไม่งั้นยอดในกราฟ
   // จะไม่ตรงกับการ์ดสรุป (ที่นับ topLevelCodes รวม extra) — และเคารพบัญชีที่ซ่อนไว้
-  const chartGroups = [...new Set([...GROUPS, ...extraItems.filter(e=>!e.parentCode).map(e=>e.group||"อื่น ๆ")])];
+  const chartGroups = [...new Set([...GROUPS, ...extraItems.filter(e=>!e.parentCode).map(e=>e.group||"Other")])];
   const groupData = chartGroups.map((g,i)=>{
     const codes=[
       ...ACCOUNTS.filter(a=>a.group===g && !effHidden.includes(a.code)).map(a=>a.code),
-      ...extraItems.filter(e=>!e.parentCode && (e.group||"อื่น ๆ")===g).map(e=>e.code),
+      ...extraItems.filter(e=>!e.parentCode && (e.group||"Other")===g).map(e=>e.code),
     ];
     const committed = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>codes.includes(it.code)).reduce((s2,it)=>s2+(parseFloat(it.amount)||0),0),0);
     return {group:g,budget:codes.reduce((s,c)=>s+(parseFloat(combinedBudget[c])||0),0),committed,color:GRP_COLORS[i%GRP_COLORS.length]};
@@ -6849,7 +6877,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   // หน้าบัญชีตรงกับหน้า QS/ภาพรวม ที่นับ topLevelCodes เหมือนกัน
   const acctRows = [
     ...ACCOUNTS.filter(a=>!effHidden.includes(a.code)),
-    ...extraItems.filter(e=>!e.parentCode).map(e=>({ code:e.code, name:e.name, group:e.group||"อื่น ๆ" })),
+    ...extraItems.filter(e=>!e.parentCode).map(e=>({ code:e.code, name:e.name, group:e.group||"Other" })),
   ];
   const accountData = acctRows.map(a=>{
     const budget=parseFloat(combinedBudget[a.code])||0;
@@ -6937,19 +6965,19 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
         {/* คำอธิบายสี (legend) */}
         <div style={{display:"flex",flexWrap:"wrap",gap:16,marginBottom:20,fontSize:11,color:T.textMuted,alignItems:"center"}}>
           <span style={{fontWeight:650,color:T.textSecondary}}>{t("คำอธิบายสี","Legend")}:</span>
-          {[[T.green,t("ปกติ · ใช้งบ <80% · จ่ายแล้ว","Normal · <80% used · paid")],[T.amber,t("เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย","Watch · 80–100% · awaiting")],[T.red,t("เกินงบ · เกินกำหนดจ่าย","Over · overdue")]].map(([c,t])=>(
-            <span key={t} style={{display:"inline-flex",alignItems:"center",gap:6}}>
-              <span style={{width:11,height:11,borderRadius:3,background:c,display:"inline-block"}}/>{t}
+          {[[T.green,t("ปกติ · ใช้งบ <80% · จ่ายแล้ว","Normal · <80% used · paid")],[T.amber,t("เฝ้าระวัง · ใช้งบ 80–100% · รอจ่าย","Watch · 80–100% · awaiting")],[T.red,t("เกินงบ · เกินกำหนดจ่าย","Over · overdue")]].map(([c,lbl])=>(
+            <span key={lbl} style={{display:"inline-flex",alignItems:"center",gap:6}}>
+              <span style={{width:11,height:11,borderRadius:3,background:c,display:"inline-block"}}/>{lbl}
             </span>
           ))}
         </div>
 
         {/* 🔔 แจ้งเตือนยอดต้องจ่ายเดือนหน้า — เห็นทุกแท็บ กดแล้วไปหน้าแผนจ่าย */}
         {(dueThisMonth>0 || dueNextMonth>0) && (
-          <div onClick={()=>goView("matrix")} title={t("ดูรายละเอียดในตารางรวมเดือน","See details in the monthly matrix")}
+          <div onClick={()=>setPayListOpen(o=>!o)} title={t("กดเพื่อดูว่าต้องจ่ายใครบ้าง","Click to see who to pay")}
             style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",cursor:"pointer",userSelect:"none",
               background:"linear-gradient(90deg,#fffbeb,#fff)",border:`1px solid ${T.amber}`,borderLeft:`5px solid ${T.amber}`,
-              borderRadius:12,padding:"12px 16px",marginBottom:20}}>
+              borderRadius:payListOpen?"12px 12px 0 0":12,padding:"12px 16px",marginBottom:payListOpen?0:20}}>
             <span style={{fontSize:22,lineHeight:1}}>🔔</span>
             <span style={{fontSize:13,color:T.textSecondary,fontWeight:650}}>{t("เตรียมเงินจ่าย","Cash to prepare")}</span>
             {/* เดือนนี้ */}
@@ -6965,9 +6993,80 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               {usdLine(dueNextMonth, usdRate)}
             </div>
             <div style={{flex:1}}/>
-            <span style={{fontSize:12,color:T.amber,fontWeight:650,whiteSpace:"nowrap"}}>{t("ดูตารางรวมเดือน","Monthly matrix")} →</span>
+            <span style={{fontSize:12,color:T.amber,fontWeight:700,whiteSpace:"nowrap"}}>📋 {payListOpen ? t("ซ่อนรายการ","Hide list") : t("ดูว่าต้องจ่ายใคร","Who to pay")} {payListOpen?"▴":"▾"}</span>
+            <button onClick={(e)=>{e.stopPropagation(); goView("matrix");}} className="btn-ghost"
+              style={{fontSize:12,padding:"5px 10px",color:T.amber,borderColor:T.amber,whiteSpace:"nowrap"}}>{t("ตารางรวมเดือน","Monthly matrix")} →</button>
           </div>
         )}
+        {/* 📋 ต้องจ่ายใคร — แตกยอดในแถบ 🔔 เป็นรายงวดต่อ Supplier (ใช้ payLines ชุดเดียวกัน ยอดรวมจึงตรงกับแถบ) */}
+        {payListOpen && (dueThisMonth>0 || dueNextMonth>0) && (() => {
+          const remainOf = (l) => Math.max(0, (l.amount||0) - (l.paidAmount||0));
+          const open = payLines.filter(l => l.month && remainOf(l) > 0.005);
+          const sections = [
+            { key:"now",  title: t(`ครบกำหนดเดือนนี้ + ค้างจ่าย (ถึง ${monthShortLabel(thisMonthKey)})`, `Due this month + overdue (to ${monthShortLabel(thisMonthKey)})`),
+              lines: open.filter(l => l.month <= thisMonthKey), clr: T.red, bg: T.redBg },
+            { key:"next", title: t(`เดือนหน้า (${monthShortLabel(nextMonthKey)})`, `Next month (${monthShortLabel(nextMonthKey)})`),
+              lines: open.filter(l => l.month === nextMonthKey), clr: T.amber, bg: T.amberBg },
+          ];
+          const methodOf = (l) => l.isCash ? t("เงินสด","Cash") : t(`เครดิต ${l.term} วัน`, `Credit ${l.term}d`);
+          const statusOf = (l) => !l.received
+            ? [t("ของยังไม่เข้า (ตามแผน)","Goods not in yet (plan)"), T.textMuted, "#f1f5f9"]
+            : (l.payDate && l.payDate < payToday ? [t("เลยกำหนด","Overdue"), T.red, T.redBg] : [t("รอจ่าย","To pay"), T.amber, T.amberBg]);
+          const th = { padding:"8px 12px", fontSize:11, color:T.textMuted, fontWeight:600, textAlign:"left", borderBottom:`1px solid ${T.cardBorder}`, whiteSpace:"nowrap" };
+          const td = { padding:"7px 12px", fontSize:13, borderBottom:"1px solid #f1f5f9", whiteSpace:"nowrap" };
+          return (
+            <div onClick={e=>e.stopPropagation()} style={{border:`1px solid ${T.amber}`,borderTop:"none",borderLeft:`5px solid ${T.amber}`,borderRadius:"0 0 12px 12px",background:T.card,padding:"8px 16px 16px",marginBottom:20}}>
+              {sections.map(sec => {
+                const bySup = {};
+                sec.lines.forEach(l => { const k = l.supplier || "—"; (bySup[k] = bySup[k] || []).push(l); });
+                const groups = Object.entries(bySup)
+                  .map(([sup, ls]) => ({ sup, ls: ls.sort((a,b)=>(a.payDate||"").localeCompare(b.payDate||"")), total: ls.reduce((s,l)=>s+remainOf(l),0) }))
+                  .sort((a,b) => (a.ls[0].payDate||"").localeCompare(b.ls[0].payDate||""));
+                const secTotal = groups.reduce((s,g)=>s+g.total,0);
+                return (
+                  <div key={sec.key} style={{marginTop:12}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:6}}>
+                      <span style={{fontSize:13,fontWeight:700,color:sec.clr}}>{sec.title}</span>
+                      <span style={{fontSize:12,color:T.textMuted}}>{groups.length} {t("ราย","suppliers")} · {sec.lines.length} {t("งวด","rounds")}</span>
+                      <span style={{marginLeft:"auto",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:sec.clr}}>฿{fmt(secTotal)}</span>
+                    </div>
+                    {groups.length === 0 ? (
+                      <div style={{fontSize:12,color:T.textMuted,padding:"6px 0"}}>{t("ไม่มียอดที่ต้องจ่าย","Nothing to pay")}</div>
+                    ) : (
+                      <div className="hscroll"><table style={{width:"100%",borderCollapse:"collapse"}}>
+                        <thead><tr>
+                          {[["ครบกำหนด","Due"],["PO No.","PO No."],["Acc. Code","Acc. Code"],["วิธีจ่าย","Method"],["สถานะ","Status"],["ยอดต้องจ่าย (THB)","To pay (THB)"]].map(([h,he],i)=>(
+                            <th key={h} style={{...th, textAlign: i===5?"right":"left"}}>{t(h,he)}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>
+                          {groups.map(g => (
+                            <Fragment key={g.sup}>
+                              <tr style={{background:sec.bg}}>
+                                <td colSpan={5} style={{...td,fontWeight:700,color:T.textPrimary}}>🏢 {g.sup} <span style={{fontWeight:500,color:T.textMuted,fontSize:12}}>· {g.ls.length} {t("งวด","rounds")}</span></td>
+                                <td style={{...td,textAlign:"right",fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:sec.clr}}>{fmt(g.total)}</td>
+                              </tr>
+                              {g.ls.map((l,i) => { const [st, sc, sb] = statusOf(l); return (
+                                <tr key={i}>
+                                  <td style={{...td,fontFamily:"'JetBrains Mono',monospace",color:l.payDate<payToday?T.red:T.textPrimary}}>{l.payDate||"—"}</td>
+                                  <td style={td}>{l.poNo}</td>
+                                  <td style={td}><span style={{fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:600}}>{l.code}</span> <span style={{color:T.textMuted,fontSize:12}}>{l.accName}</span></td>
+                                  <td style={td}>{methodOf(l)}</td>
+                                  <td style={td}><span style={{background:sb,color:sc,fontSize:11,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{st}</span></td>
+                                  <td style={{...td,textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}>{fmt(remainOf(l))}{usdLine(remainOf(l), usdRate)}</td>
+                                </tr>
+                              ); })}
+                            </Fragment>
+                          ))}
+                        </tbody>
+                      </table></div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {view==="dashboard" ? (
           <>
