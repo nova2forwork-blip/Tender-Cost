@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, ss, sgOrThrow, ssOrThrow, ssMerge, sd, loadKvHistory, restoreKvVersion, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
+import { supabase, sg, ss, sgOrThrow, ssOrThrow, ssMerge, sd, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -219,7 +219,6 @@ const poSupplierName   = (p) => poSupplier(p).name || "—";
 const poSupplierText   = (p) => poSupplier(p).name || "";
 const poSupplierLabel  = (p) => poSupplier(p).name || "—";
 const poNumbersLabel   = (p) => poSupplier(p).poNumber || "—";
-const itemSupplier     = (p) => poSupplier(p);
 const itemSupplierName = (p) => poSupplierName(p);
 // Back-compat: some views still map over a suppliers[] array. There's now
 // always exactly one supplier, so return it as a single-element list.
@@ -234,7 +233,6 @@ const poRounds = (p) => migratePO(p).items.flatMap(it =>
     itemId: it.id, code: it.code,
   })));
 const poDeliveries = poRounds;
-const poRoundsAmount = (p) => poRounds(p).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0);
 
 // ─── Auto-pay: a round is paid once its due date has arrived ────────────────
 // Cash pays on the received date; credit adds the PO's credit term (in days).
@@ -428,13 +426,11 @@ const PAYMENT_CLR    = { paid:"#10b981", late:"#ef4444", pending:"#f59e0b", unse
 const PAYMENT_BG     = { paid:"#f0fdf4", late:"#fef2f2", pending:"#fffbeb", unset:"#f1f5f9" };
 // Payment method — cash pays right away, credit gives suppliers a 30-day term,
 // so a credit PO's payment due date is auto-suggested as order date + 30 days.
-const PAYMENT_TYPE_LABEL = { cash:"เงินสด", credit:"เครดิต", credit30:"เครดิต 30 วัน" };
 const PAYMENT_TYPE_ICON  = { cash:"💵", credit:"💳", credit30:"💳" };
 const PAYMENT_TYPE_CLR   = { cash:"#10b981", credit:"#2563eb", credit30:"#2563eb" };
 const PAYMENT_TYPE_BG    = { cash:"#f0fdf4", credit:"#eff6ff", credit30:"#eff6ff" };
 // Label for a PO's payment method including its credit term, e.g. "เครดิต 45 วัน".
 const creditTermDays = (P) => { const cd = parseInt(P.creditDays,10); return isNaN(cd) ? DEFAULT_CREDIT_DAYS : cd; }; // เทอมเครดิตแบบสอดคล้องกันทุกที่ (นับ 0 เป็น 0, เฉพาะว่าง/NaN ใช้ค่าเริ่มต้น)
-const paymentTypeLabel = (p) => { const P = migratePO(p); if (P.paymentType==="cash") return "เงินสด"; if (P.paymentType==="credit") return `เครดิต ${creditTermDays(P)} วัน`; return "—"; };
 // Bilingual runtime labels for the on-screen UI (the *_LABEL maps above stay Thai
 // for Excel exports). These call t() at render time so they follow the toggle.
 const INCOMING_LABEL_EN = { received:"Received", partial:"Partial", late:"Late", pending:"Awaiting", unset:"Unset" };
@@ -587,6 +583,21 @@ const buildCombinedBudget = (tenderCosts, additions) => {
   });
   return combined;
 };
+// ยอดเพิ่มของ Acc. Code ในเดือน m แยกตามคอลัมน์ของเดือนนั้น สำหรับชีตรายเดือนใน Excel
+// ยอดรวมยึด "ค่าหลัก" (roll-up ที่บันทึกไว้ = ตัวเดียวกับชีตสรุป/งบของทุกฝ่าย) — ส่วนที่ไม่อยู่ใน
+// คอลัมน์ใด (เช่นแถวที่มีรายการย่อย ซึ่งรายการย่อยกรอกเป็นช่องเดียว) แยกไว้ใน other
+// (เดิมอ่านเฉพาะ code:colId ทำให้แถวที่มีรายการย่อยได้ 0 แล้วหายจากชีต และ TOTAL ต่ำกว่าสรุป)
+const monthRowBreakdown = (additions, m, code, cols) => {
+  const obj = (additions && additions[m]) || {};
+  const plainRaw = parseFloat(obj[code]);
+  if (!cols.length) { const total = isNaN(plainRaw) ? 0 : plainRaw; return { vals: [total], other: 0, total }; }
+  const vals = cols.map(c => parseFloat(obj[`${code}:${c.id}`]) || 0);
+  const sumCols = vals.reduce((s, v) => s + v, 0);
+  const total = isNaN(plainRaw) ? sumCols : plainRaw;
+  const other = Math.round((total - sumCols) * 100) / 100;
+  return { vals, other, total };
+};
+const OTHER_COL_LABEL = "อื่น ๆ / รายการย่อย";
 const exportAccountList = (extraItems=[], hiddenAccounts=[]) => [
   ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)),
   ...extraItems.filter(e => !e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group||"Other" })),
@@ -604,12 +615,12 @@ const hiddenSafeForPO = (hiddenAccounts=[], poEntries=[]) => { const withPO = po
 // bold total row — everything an aoa_to_sheet grid needs to read like a
 // real report instead of a raw data dump.
 const BORDER_THIN = (rgb) => ({ style:"thin", color:{rgb} });
-const BORDER_MED  = (rgb) => ({ style:"medium", color:{rgb} });
 // สีพิลล์ตามสถานะ (เขียว=เสร็จ/จ่ายแล้ว, เหลือง=กำลังทำ/รอ, แดง=ค้าง/เกินกำหนด)
 // ใช้คีย์เวิร์ดจับ ครอบคลุมทั้งไทย/อังกฤษ สถานะอื่นเป็นพิลล์เทากลาง ๆ
 const STATUS_PILL = [
   [/(completed|complete|เสร็จ|จ่ายแล้ว|รับของแล้ว|รับครบ|ปิดงาน|ปิด|อนุมัติ|approved|done|paid)/i, { bg:"D1FAE5", fg:"065F46" }],
   [/(in\s*progress|progress|กำลัง|ระหว่าง|บางส่วน|partial|สั่งซื้อ|สั่ง|รอรับ|รอจ่าย|pending|รอ)/i,        { bg:"FEF3C7", fg:"92400E" }],
+  [/(ยังไม่กำหนด|unset|ไม่ระบุ)/i,                                                                  { bg:"E5E7EB", fg:"374151" }], // ยังไม่ตั้งค่า = เทา (ไม่ใช่แดงแบบเกินกำหนด)
   [/(to\s*do|todo|ร่าง|ยังไม่|ค้างจ่าย|ค้าง|เกินกำหนด|overdue|ยกเลิก|cancel|reject)/i,               { bg:"FEE2E2", fg:"991B1B" }],
 ];
 function statusPill(val) {
@@ -754,7 +765,6 @@ function styleSheet(ws, { numCols, titleRow=0, subRows=[], headerRow, dataStart,
   ws["!cols"] = cols.map(w => ({ wch: Math.min(55, Math.max(8, w + 2)) }));
 }
 
-// จัดความกว้างคอลัมน์ให้พอดีข้อความ สำหรับตาราง ExcelJS (จากหัว + แถวข้อมูล)
 // ── ตัวช่วย USD สำหรับ Export ── ให้ไฟล์ Excel มีข้อมูลสอดคล้องกับหน้าจอ (บาท + ดอลลาร์)
 // exportRate: อัตราแลกเปลี่ยนของโปรเจกต์ (0 = ปิด USD → export เป็นบาทล้วนตามเดิม)
 function exportRate(project){ return (project?.showUsd !== false) ? (parseFloat(project?.usdRate)||0) : 0; }
@@ -786,59 +796,6 @@ function xBackLink(ws, r, c, backSheet){
   const ref = XLSX.utils.encode_cell({ r, c });
   ws[ref].l = { Target:`#'${backSheet}'!A1`, Tooltip:`กลับไปชีต ${backSheet}` };
   ws[ref].s = { font:{ color:{rgb:"1D4ED8"}, underline:true, bold:true, name:"Tahoma", sz:10 }, alignment:{ horizontal:"right", vertical:"center" } };
-}
-
-function fitExcelCols(ws, header, dataRows, { min=8, max=55 } = {}) {
-  header.forEach((h, c) => {
-    let m = String(h == null ? "" : h).length;
-    dataRows.forEach(row => {
-      const v = row[c];
-      const s = (typeof v === "number") ? Math.round(v).toLocaleString("en-US") : String(v == null ? "" : v);
-      if (s.length > m) m = s.length;
-    });
-    ws.getColumn(c+1).width = Math.min(max, Math.max(min, m + 2));
-  });
-}
-
-// กราฟแท่งแนวตั้งที่ "วาดด้วยเซลล์" — ไลบรารีนี้ฝังกราฟจริง/รูปไม่ได้ จึงระบายสี
-// เซลล์ไล่จากล่างขึ้นบนตามค่าให้ออกมาเป็นกราฟแท่งในชีต Excel
-function addBarChartSheet(wb, sheetName, title, theme, items) {
-  items = (items || []).filter(Boolean);
-  if (!items.length) return;
-  const H = 12;
-  const max = Math.max(...items.map(i => i.value || 0), 1);
-  const n = items.length;
-  const LEFT = 1;                     // เว้นคอลัมน์แรกเป็นแกน
-  const totalCols = LEFT + n;
-  const valueRow = 2, chartTop = 3, labelRow = chartTop + H;
-  const aoa = [[title], []];
-  for (let r = 0; r < H + 2; r++) aoa.push(new Array(totalCols).fill(""));
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!merges"] = [{ s:{r:0,c:0}, e:{r:0,c:totalCols-1} }];
-  ws["!cols"] = [{ wch:4 }, ...items.map(()=>({ wch:11 }))];
-  ws["!rows"] = [];
-  ws["!rows"][0] = { hpx:26 };
-  for (let r = chartTop; r < chartTop + H; r++) ws["!rows"][r] = { hpx:15 };
-  ws["!rows"][labelRow] = { hpx:24 };
-  const setS = (r, c, s, v) => {
-    const ref = XLSX.utils.encode_cell({ r, c });
-    if (v != null) ws[ref] = { t: typeof v === "number" ? "n" : "s", v };
-    else if (!ws[ref]) ws[ref] = { t:"s", v:"" };
-    ws[ref].s = s;
-  };
-  setS(0, 0, { font:{bold:true,sz:13,color:{rgb:"FFFFFF"},name:"Tahoma"}, fill:{fgColor:{rgb:theme.main}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
-  const barOn = theme.main, barOff = "F3F4F6";
-  items.forEach((it, i) => {
-    const c = LEFT + i;
-    const filled = Math.max(0, Math.round(((it.value||0) / max) * H));
-    setS(valueRow, c, { font:{bold:true,sz:9,color:{rgb:theme.dark},name:"Tahoma"}, alignment:{horizontal:"center"}, numFmt:"#,##0" }, it.value||0);
-    for (let k = 0; k < H; k++) {
-      const r = chartTop + (H - 1 - k); // k=0 = ล่างสุด
-      setS(r, c, { fill:{fgColor:{rgb: k < filled ? barOn : barOff }} });
-    }
-    setS(labelRow, c, { font:{bold:true,sz:9,color:{rgb:"374151"},name:"Tahoma"}, alignment:{horizontal:"center",wrapText:true} }, it.label);
-  });
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
 }
 
 // หน้า "สรุป (Dashboard)" — การ์ดตัวเลข + กราฟแท่งรายเดือน อยู่ในหน้าเดียวกัน
@@ -939,125 +896,6 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
   return { ws, nextRow: nRows };   // คืน worksheet + แถวว่างถัดไป เผื่ออยากต่อตารางใต้ dashboard
 }
 
-// ── กราฟจริง (pie + bar) ในไฟล์ Excel: โหลด ExcelJS จาก CDN ตอนใช้งาน แล้ววาด
-//    กราฟเป็นรูป PNG ฝังลงไฟล์ — ไม่ต้องเพิ่ม dependency / ไม่กระทบ build ──────────
-function loadExcelJS() {
-  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
-  return new Promise((res, rej) => {
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js";
-    s.onload = () => res(window.ExcelJS);
-    s.onerror = () => rej(new Error("โหลด ExcelJS ไม่ได้"));
-    document.head.appendChild(s);
-  });
-}
-
-function chartPiePNG(items) {
-  const W=520,H=300,dpr=2,cv=document.createElement("canvas"); cv.width=W*dpr; cv.height=H*dpr;
-  const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
-  const cx=150,cy=155,r=115,tot=items.reduce((s,i)=>s+i.value,0)||1; let a=-Math.PI/2;
-  items.forEach(it=>{ const f=it.value/tot,a2=a+f*Math.PI*2; x.beginPath(); x.moveTo(cx,cy); x.arc(cx,cy,r,a,a2); x.closePath(); x.fillStyle="#"+it.color; x.fill();
-    if(f>0.04){ const m=(a+a2)/2; x.fillStyle="#fff"; x.font="bold 12px Tahoma"; x.textAlign="center"; x.fillText((f*100).toFixed(1)+"%",cx+Math.cos(m)*r*0.62,cy+Math.sin(m)*r*0.62+4);} a=a2; });
-  x.beginPath(); x.arc(cx,cy,r*0.52,0,Math.PI*2); x.fillStyle="#fff"; x.fill();
-  let ly=30; x.textAlign="left"; items.forEach(it=>{ x.fillStyle="#"+it.color; x.fillRect(300,ly,12,12); x.fillStyle="#334155"; x.font="12px Tahoma"; x.fillText(`${it.label} (${(it.value/tot*100).toFixed(1)}%)`,318,ly+11); ly+=23; });
-  return cv.toDataURL("image/png").split(",")[1];
-}
-function chartBarPNG(items, color) {
-  const W=520,H=300,dpr=2,pad=44,cv=document.createElement("canvas"); cv.width=W*dpr; cv.height=H*dpr;
-  const x=cv.getContext("2d"); x.scale(dpr,dpr); x.fillStyle="#fff"; x.fillRect(0,0,W,H);
-  const max=Math.max(...items.map(i=>i.value),1),n=items.length||1,pw=W-pad*2,ph=H-pad*2;
-  x.strokeStyle="#e5e7eb"; x.beginPath(); x.moveTo(pad,H-pad); x.lineTo(W-pad,H-pad); x.stroke();
-  items.forEach((it,i)=>{ const bw=pw/n*0.6,bh=(it.value/max)*ph,bx=pad+(pw/n)*i+(pw/n-bw)/2,by=H-pad-bh;
-    x.fillStyle="#"+color; x.fillRect(bx,by,bw,bh);
-    x.fillStyle="#6b7280"; x.font="9px Tahoma"; x.textAlign="center"; x.save(); x.translate(bx+bw/2,H-pad+4); x.rotate(-Math.PI/4); x.fillText(it.label,0,4); x.restore();
-    if(it.value>0){ x.fillStyle="#334155"; x.font="bold 9px Tahoma"; x.textAlign="center"; x.fillText(fmtK(it.value),bx+bw/2,by-4);} });
-  return cv.toDataURL("image/png").split(",")[1];
-}
-async function exportQSRich(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
-  const ExcelJS = await loadExcelJS();
-  const F = "Tahoma";
-  const combined = buildCombinedBudget(tenderCosts, additions);
-  const accounts = exportAccountList(extraItems, hiddenAccounts);
-  const list = accounts.filter(a => { const bs=parseFloat(tenderCosts[a.code])||0, tt=parseFloat(combined[a.code])||0; return !(tt<=0 && bs<=0); });
-  const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
-  const M = months.length;
-  const base = list.reduce((s,a)=> s+(parseFloat(tenderCosts[a.code])||0),0);
-  const added = list.reduce((s,a)=> s + months.reduce((ss,m)=> ss+monthAddValue(additions, m, a.code),0), 0);
-  const HD = ["Acc. Code","Account Name","Group","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด"];
-  const NC = HD.length;
-  const soft = "FF"+lighten("2563EB",0.55), colL = c => XLSX.utils.encode_col(c);
-  const wb = new ExcelJS.Workbook();
-  const fillS = (a) => ({ type:"pattern", pattern:"solid", fgColor:{argb:a} });
-  const ws = wb.addWorksheet("รายงานงบประมาณ", { views:[{ showGridLines:false, state:"frozen", ySplit:7 }] });
-  ws.mergeCells(1,1,1,NC); const t=ws.getCell(1,1); t.value=`สรุปงบประมาณ — ${project.name}`; t.font={bold:true,size:15,color:{argb:"FF1D4ED8"},name:F}; t.fill=fillS(soft); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=30;
-  ws.mergeCells(2,1,2,NC); const stc=ws.getCell(2,1); stc.value=`พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`; stc.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; stc.alignment={indent:1};
-  const cards=[["ราคาเดิม (Baseline)","FFDBEAFE","FF1D4ED8",base],["เพิ่มรายเดือนรวม","FFD1FAE5","FF047857",added],["งบรวมทั้งหมด","FFFEF3C7","FF92400E",base+added],["จำนวนเดือน","FFEDE9FE","FF6D28D9",M]];
-  const span = Math.max(2, Math.floor(NC/4));
-  cards.forEach((cd,i)=>{ const c0=1+i*span, c1=Math.min(NC, c0+span-1);
-    ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
-    const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:10,color:{argb:cd[2]},name:F}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
-    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i<3) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
-  }); ws.getRow(4).height=18; ws.getRow(5).height=30;
-  const HR = 7;
-  HD.forEach((h,i)=>{ const c=ws.getCell(HR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"},name:F}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); ws.getRow(HR).height=24;
-  const drows = [];
-  list.forEach((a,ri)=>{ const R=HR+1+ri;
-    const mv = months.map(m=>monthAddValue(additions, m, a.code)), bs=parseFloat(tenderCosts[a.code])||0;
-    drows.push([a.code, a.name, a.group, bs, ...mv, bs+mv.reduce((s,v)=>s+v,0)]);
-    ws.getCell(R,1).value=a.code; ws.getCell(R,2).value=a.name; ws.getCell(R,3).value=a.group;
-    const bc=ws.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
-    mv.forEach((v,mi)=>{ const c=ws.getCell(R,5+mi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
-    const lastM=colL(3+M); const tc=ws.getCell(R,NC); tc.value = M ? { formula:`D${R}+SUM(E${R}:${lastM}${R})`, result: bs+mv.reduce((s,v)=>s+v,0) } : { formula:`D${R}`, result: bs }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
-    [1,2,3].forEach(c=>{ ws.getCell(R,c).font={name:F,size:9.5}; ws.getCell(R,c).alignment={vertical:"middle"}; });
-    if(ri%2) for(let c=1;c<=NC;c++){ const cell=ws.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
-  });
-  const tR = HR + 1 + list.length;
-  for(let c=1;c<=NC;c++){ const cell=ws.getCell(tR,c); cell.fill=fillS("FFC9D8FA"); cell.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; }
-  const tl=ws.getCell(tR,2); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF1D4ED8"},name:F};
-  [4, ...months.map((_,i)=>5+i), NC].forEach(col=>{ const c=ws.getCell(tR,col), L=colL(col-1); c.value = list.length ? { formula:`SUM(${L}${HR+1}:${L}${HR+list.length})` } : 0; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
-  ws.getCell(5,1).value = { formula:`D${tR}`, result: base };
-  ws.getCell(5,1+span).value = { formula:`${colL(NC-1)}${tR}-D${tR}`, result: added };
-  ws.getCell(5,1+span*2).value = { formula:`${colL(NC-1)}${tR}`, result: base+added };
-  ws.autoFilter = `A${HR}:${colL(NC-1)}${HR}`;
-  fitExcelCols(ws, HD, drows);
-
-  // ชีตแยกแต่ละเดือน — breakdown ตามคอลัมน์ (รายการย่อย) ของเดือนนั้น
-  const cleanNm = (s) => String(s).replace(/[\\/?*[\]:]/g,"-").slice(0,28);
-  const usedNm = {};
-  months.forEach(m => {
-    const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
-    const hasCols = cols.length > 0;
-    const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
-    const V = valLabels.length, nc = 5 + V, lastValL = colL(3 + V);
-    const HM = ["Acc. Code","Account Name","Group","ราคาเดิม", ...valLabels, "รวมเดือนนี้"];
-    let nm = cleanNm(monthShortLabel(m)); if (usedNm[nm]) { usedNm[nm]++; nm = cleanNm(`${nm} ${usedNm[nm]}`); } else usedNm[nm] = 1;
-    const wsm = wb.addWorksheet(nm, { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
-    wsm.mergeCells(1,1,1,nc); const mt=wsm.getCell(1,1); mt.value=`เพิ่มรายเดือน ${monthShortLabel(m)} — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF1D4ED8"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
-    wsm.mergeCells(2,1,2,nc); const ms=wsm.getCell(2,1); ms.value = hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์ · Export: ${new Date().toLocaleDateString("th-TH")}` : `Export: ${new Date().toLocaleDateString("th-TH")}`; ms.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; ms.alignment={indent:1};
-    HM.forEach((h,i)=>{ const c=wsm.getCell(4,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF1D4ED8"},name:F}; c.fill=fillS("FFDCE6FB"); c.alignment={horizontal:i>2?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FF2563EB"}}}; }); wsm.getRow(4).height=26;
-    const mrows = [];
-    list.forEach((a,ri)=>{ const R=5+ri;
-      const bs = parseFloat(tenderCosts[a.code])||0;
-      const cv = hasCols ? cols.map(c=>parseFloat((additions[m]||{})[`${a.code}:${c.id}`])||0) : [parseFloat((additions[m]||{})[a.code])||0];
-      mrows.push([a.code, a.name, a.group, bs, ...cv, cv.reduce((s,v)=>s+v,0)]);
-      wsm.getCell(R,1).value=a.code; wsm.getCell(R,2).value=a.name; wsm.getCell(R,3).value=a.group;
-      const bc=wsm.getCell(R,4); bc.value=bs; bc.numFmt="#,##0"; bc.alignment={horizontal:"right",vertical:"middle"}; bc.font={name:F,size:9.5};
-      cv.forEach((v,vi)=>{ const c=wsm.getCell(R,5+vi); c.value=v; c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; });
-      const tc=wsm.getCell(R,nc); tc.value = { formula:`SUM(E${R}:${lastValL}${R})`, result: cv.reduce((s,v)=>s+v,0) }; tc.numFmt="#,##0"; tc.font={bold:true,name:F,size:9.5}; tc.alignment={horizontal:"right",vertical:"middle"};
-      [1,2,3].forEach(c=>{ wsm.getCell(R,c).font={name:F,size:9.5}; wsm.getCell(R,c).alignment={vertical:"middle"}; });
-      if(ri%2) for(let c=1;c<=nc;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFF4F7FE"); }
-    });
-    const mtR = 5 + list.length;
-    for(let c=1;c<=nc;c++){ const cell=wsm.getCell(mtR,c); cell.fill=fillS("FFC9D8FA"); cell.border={top:{style:"medium",color:{argb:"FF2563EB"}}}; }
-    wsm.getCell(mtR,2).value="TOTAL"; wsm.getCell(mtR,2).font={bold:true,color:{argb:"FF1D4ED8"},name:F};
-    [4, ...valLabels.map((_,i)=>5+i), nc].forEach(col=>{ const c=wsm.getCell(mtR,col), L=colL(col-1); c.value = list.length ? { formula:`SUM(${L}5:${L}${4+list.length})` } : 0; c.numFmt="#,##0"; c.font={bold:true,color:{argb:"FF1D4ED8"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
-    wsm.autoFilter = `A4:${colL(nc-1)}4`;
-    fitExcelCols(wsm, HM, mrows);
-  });
-  const buf=await wb.xlsx.writeBuffer(); const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}); const url=URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url; a2.download=`QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`; document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
-}
-
-
 // ─── QS: budget / tender-cost export ───────────────────────────────────────
 function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAccounts=[]) {
   const wb = XLSX.utils.book_new();
@@ -1121,7 +959,9 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     rowGroups1.push(a.group);
   });
   const dataEnd1 = rows1.length-1;
-  rows1.push(["","TOTAL","",0,0,0, ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
+  // ใส่ยอดรวมจริงเป็นค่าของเซลล์ด้วย (นอกจากสูตร) — แอปพรีวิวที่ไม่คำนวณสูตร (มือถือ/อีเมล) จะไม่โชว์ ฿0
+  const colSum1 = (c) => rows1.slice(dataStart1, dataEnd1 + 1).reduce((s, r) => s + (Number(r[c]) || 0), 0);
+  rows1.push(["","TOTAL","",colSum1(3),colSum1(4),colSum1(5), ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
   // ลิงก์ด้วยสูตร: งบรวม = ราคาเดิม + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
@@ -1154,7 +994,8 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   });
   const dataEnd2 = rows2.length-1;
   const M = months.length, totColC = 3 + M;
-  rows2.push(["","TOTAL",0, ...months.map(()=>0), 0, ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
+  const colSum2 = (c) => rows2.slice(dataStart2, dataEnd2 + 1).reduce((s, r) => s + (Number(r[c]) || 0), 0);
+  rows2.push(["","TOTAL",colSum2(2), ...months.map((_,i)=>colSum2(3+i)), colSum2(totColC), ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
   const totalRow2 = rows2.length-1;
   const numCols2 = 4 + months.length + (U?1:0);
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
@@ -1182,7 +1023,9 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   months.forEach((m) => {
     const cols = (additions[m] && additions[m].$columns) || additions.$columns || [];
     const hasCols = cols.length > 0;
-    const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+    const brk = Object.fromEntries(accounts.map(a => [a.code, monthRowBreakdown(additions, m, a.code, cols)]));
+    const hasOther = hasCols && accounts.some(a => brk[a.code].other !== 0);
+    const valLabels = hasCols ? [...cols.map(c => c.name || "รายการ"), ...(hasOther ? [OTHER_COL_LABEL] : [])] : ["เพิ่มเดือนนี้"];
     const rows = [
       [`เพิ่มรายเดือน ${monthShortLabel(m)} — ${project.name}`],
       [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
@@ -1195,11 +1038,10 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     let grand = 0;
     const rowGroups = [];
     accounts.forEach(a => {
-      const vals = hasCols
-        ? cols.map(c => parseFloat((additions[m] || {})[`${a.code}:${c.id}`]) || 0)
-        : [parseFloat((additions[m] || {})[a.code]) || 0];
-      const rowTotal = vals.reduce((s, v) => s + v, 0);
-      if (rowTotal <= 0) return; // เอาเฉพาะรายการที่มียอดในเดือนนี้
+      const b = brk[a.code];
+      const vals = hasOther ? [...b.vals, b.other] : b.vals;
+      const rowTotal = b.total;
+      if (rowTotal === 0 && !vals.some(v => v !== 0)) return; // เอาเฉพาะรายการที่มียอดในเดือนนี้
       rows.push([a.code, a.name, a.group, ...vals, rowTotal, ...(U?[toUsd(rowTotal,rate)]:[])]);
       rowGroups.push(a.group);
       vals.forEach((v, i) => { colTotals[i] += v; });
@@ -1239,7 +1081,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     }
   }
 
-  const fname = `QS_Budget_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`;
+  const fname = `QS_Budget_${project.name.replace(/\s+/g,"_")}_${todayStr()}.xlsx`;
   XLSX.writeFile(wb, fname);
   return { wb, fname };
 }
@@ -1255,7 +1097,9 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
   const upto = allMonths.filter(m => m <= month);
   const cols = (additions[month] && additions[month].$columns) || additions.$columns || [];
   const hasCols = cols.length > 0;
-  const valLabels = hasCols ? cols.map(c => c.name || "รายการ") : ["เพิ่มเดือนนี้"];
+  const brk = Object.fromEntries(accounts.map(a => [a.code, monthRowBreakdown(additions, month, a.code, cols)]));
+  const hasOther = hasCols && accounts.some(a => brk[a.code].other !== 0);
+  const valLabels = hasCols ? [...cols.map(c => c.name || "รายการ"), ...(hasOther ? [OTHER_COL_LABEL] : [])] : ["เพิ่มเดือนนี้"];
 
   const rows = [
     [`เพิ่มรายเดือน ${monthShortLabel(month)} — ${project.name}`],
@@ -1270,12 +1114,11 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
   const rowGroups = [];
   accounts.forEach(a => {
     const baseline = parseFloat(tenderCosts[a.code]) || 0;
-    const vals = hasCols
-      ? cols.map(c => parseFloat((additions[month] || {})[`${a.code}:${c.id}`]) || 0)
-      : [parseFloat((additions[month] || {})[a.code]) || 0];
-    const monthTot = vals.reduce((s, v) => s + v, 0);
+    const b = brk[a.code];
+    const vals = hasOther ? [...b.vals, b.other] : b.vals;
+    const monthTot = b.total;   // = ค่าหลักที่บันทึกไว้ ตรงกับ "รวมสะสม" และชีตสรุป
     const cum = baseline + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
-    if (monthTot <= 0 && baseline <= 0 && cum <= 0) return;
+    if (monthTot === 0 && baseline === 0 && cum === 0) return;
     rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
     rowGroups.push(a.group);
     vals.forEach((v, i) => { colTotals[i] += v; });
@@ -1293,7 +1136,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     theme, rowGroups, groupDisplayCol: 2, codeCol: 0,
   });
   XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
-  XLSX.writeFile(wb, `QS_${clean(monthShortLabel(month)).replace(/[^\dA-Za-zก-๙]/g,"")}_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  XLSX.writeFile(wb, `QS_${clean(monthShortLabel(month)).replace(/[^\dA-Za-zก-๙]/g,"")}_${project.name.replace(/\s+/g,"_")}_${todayStr()}.xlsx`);
 }
 
 // ─── ชีตรวม: "ของเข้ารายเดือน (แผน + PO จริง)" ───────────────────────────────
@@ -1344,7 +1187,6 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
     if (c.plan>0) out.push(`แผน ${fmt(c.plan)} *${c.planLate?" ⚠":""}`);
     return out;
   };
-  const cellStr = (c) => { const l=cellLines(c); return l.length ? l.join("\n") : "-"; };
   // ถ้าช่องมีชนิดเดียวลงสีตามชนิด (จ่าย=เขียว/รับ,รอเข้า=ดำ/แผน=แดง/ล่าช้า=ส้ม); ถ้าปนกันใช้ดำ
   const cellColor = (c) => {
     if (!c) return null;
@@ -1451,7 +1293,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
     ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "Balance Cost"];
   const rows = [
     [`ตารางรวมเดือน — ${project.name}`],
-    [`Incoming: รับแล้ว=เขียว · แผน/PO รอเข้า=แดง · Pending PO = งบ − Stock − PO − แผน · Balance Cost = งบ − Stock − PO (ตรงกับหน้าจัดซื้อ) · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [`Incoming: รับครบ=เขียว · รับบางส่วน=เหลือง · แผน/PO รอเข้า=แดง · Pending PO = งบ − Stock − PO − แผน · Balance Cost = งบ − Stock − PO (ตรงกับหน้าจัดซื้อ) · Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
     header,
   ];
@@ -1600,115 +1442,8 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
     xLinkRow(dash.ws, navR+1, monthLinks);
   }
 
-  XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  XLSX.writeFile(wb, `Procurement_PO_${project.name.replace(/\s+/g,"_")}_${todayStr()}.xlsx`);
 }
-
-// จัดซื้อ (PO) แบบ rich: หน้า "สรุป" หน้าเดียว มีการ์ด + pie (สถานะ) + bar (รายเดือน)
-// + ตารางสรุปสถานะ และชีต "PO ทั้งหมด"
-async function exportPORich(project, poEntries) {
-  const ExcelJS = await loadExcelJS();
-  const F = "Tahoma";
-  const total = poEntries.reduce((s,p)=> s + poTotal(p), 0);
-  const paid  = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
-  const outstanding = Math.max(0, total - paid);
-  const HD = ["วันเปิด PO","Acc. Code","Account Name","Supplier","PO No.","มูลค่า (THB)","สถานะ PO","ของเข้า (แผน→จริง)","วันที่รับของ","วันครบกำหนดจ่าย","สถานะจ่ายเงิน","หมายเหตุ"];
-  const NC = HD.length;
-  const rows = [];
-  poEntries.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).forEach(p => {
-    const pay = PAYMENT_LABEL[paymentStatus(p)];
-    const delivery = poRounds(p).map(r => `${r.plan||"-"}→${r.actual||"รอ"}`).join(" | ") || "-";
-    const received = poRounds(p).map(r => r.actual).filter(Boolean).join(", ") || "-";
-    const due = poNextDueDate(p) || "-";
-    poItems(p).forEach(it => {
-      const acc = ACCOUNTS.find(a=>a.code===it.code);
-      rows.push([ p.date||"", it.code, acc?.name||"", poSupplierName(p), poNumbersLabel(p), parseFloat(it.amount)||0, p.status||"-", delivery, received, due, pay, p.notes||"" ]);
-    });
-  });
-  const soft = "FF"+lighten("F59E0B",0.55), colL = c => XLSX.utils.encode_col(c);
-  const wb = new ExcelJS.Workbook();
-  const fillS = (a) => ({ type:"pattern", pattern:"solid", fgColor:{argb:a} });
-  const ws = wb.addWorksheet("รายงานจัดซื้อ", { views:[{ showGridLines:false, state:"frozen", ySplit:7 }] });
-  ws.mergeCells(1,1,1,NC); const t=ws.getCell(1,1); t.value=`สรุปจัดซื้อ (PO) — ${project.name}`; t.font={bold:true,size:15,color:{argb:"FF92400E"},name:F}; t.fill=fillS(soft); t.alignment={vertical:"middle",indent:1}; ws.getRow(1).height=30;
-  ws.mergeCells(2,1,2,NC); const stc=ws.getCell(2,1); stc.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ทั้งหมด ${poEntries.length} PO`; stc.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; stc.alignment={indent:1};
-  const cards=[["มูลค่า PO รวม","FFFEF3C7","FF92400E",total],["จ่ายแล้ว","FFD1FAE5","FF047857",paid],["ค้างจ่าย","FFFEE2E2","FF991B1B",outstanding],["จำนวน PO","FFDBEAFE","FF1D4ED8",poEntries.length]];
-  const span = Math.max(2, Math.floor(NC/4));
-  cards.forEach((cd,i)=>{ const c0=1+i*span, c1=Math.min(NC, c0+span-1);
-    ws.mergeCells(4,c0,4,c1); ws.mergeCells(5,c0,5,c1);
-    const lc=ws.getCell(4,c0); lc.value=cd[0]; lc.font={bold:true,size:10,color:{argb:cd[2]},name:F}; lc.fill=fillS(cd[1]); lc.alignment={horizontal:"center",vertical:"middle"};
-    const vc=ws.getCell(5,c0); vc.value=cd[3]; if(i<3) vc.numFmt="#,##0"; vc.font={bold:true,size:15,color:{argb:cd[2]},name:F}; vc.fill=fillS(cd[1]); vc.alignment={horizontal:"center",vertical:"middle"};
-  }); ws.getRow(4).height=18; ws.getRow(5).height=30;
-  const HR = 7;
-  HD.forEach((h,i)=>{ const c=ws.getCell(HR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i===5?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); ws.getRow(HR).height=26;
-  const pillOf = (s) => { const p=statusPill(s); return p ? { fill:fillS("FF"+p.bg), font:{bold:true,size:9.5,color:{argb:"FF"+p.fg},name:F} } : null; };
-  rows.forEach((row,ri)=>{ const R=HR+1+ri;
-    row.forEach((val,ci)=>{ const c=ws.getCell(R,1+ci); c.value=val;
-      if(ci===5){ c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; c.font={name:F,size:9.5}; }
-      else if(ci===6 || ci===10){ const pl=pillOf(val); c.alignment={horizontal:"center",vertical:"middle"}; if(pl){c.fill=pl.fill;c.font=pl.font;} else c.font={name:F,size:9.5}; }
-      else { c.alignment={vertical:"middle"}; c.font={name:F,size:9.5}; }
-    });
-    if(ri%2) for(let c=1;c<=NC;c++){ const cell=ws.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
-  });
-  const tR = HR + 1 + rows.length;
-  for(let c=1;c<=NC;c++){ const cell=ws.getCell(tR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
-  const tl=ws.getCell(tR,5); tl.value="TOTAL"; tl.font={bold:true,color:{argb:"FF92400E"},name:F}; tl.alignment={horizontal:"right",vertical:"middle"};
-  const tvc=ws.getCell(tR,6); tvc.value = rows.length ? { formula:`SUM(F${HR+1}:F${HR+rows.length})`, result: total } : 0; tvc.numFmt="#,##0"; tvc.font={bold:true,color:{argb:"FF92400E"},name:F}; tvc.alignment={horizontal:"right",vertical:"middle"};
-  ws.getCell(5,1).value = { formula:`F${tR}`, result: total };
-  ws.autoFilter = `A${HR}:${colL(NC-1)}${HR}`;
-  fitExcelCols(ws, HD, rows);
-
-  // ─── ชีต "รายเดือน" — แจกแจงราย PO ตามเดือนที่เปิด PO (วันเปิด PO) ─────────
-  const moKeys = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
-  if (moKeys.length) {
-    const MH  = ["เดือน","วันเปิด PO","PO No.","Supplier","มูลค่า PO (THB)","จ่ายแล้ว (THB)","ค้างจ่าย (THB)","% จ่ายแล้ว"];
-    const MNC = MH.length;
-    const poPaid = (p) => poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0);
-    const wsm = wb.addWorksheet("รายเดือน", { views:[{ showGridLines:false, state:"frozen", ySplit:4 }] });
-    wsm.mergeCells(1,1,1,MNC); const mt=wsm.getCell(1,1); mt.value=`จัดซื้อรายเดือน (ตามวันเปิด PO) — ${project.name}`; mt.font={bold:true,size:14,color:{argb:"FF92400E"},name:F}; mt.fill=fillS(soft); mt.alignment={vertical:"middle",indent:1}; wsm.getRow(1).height=28;
-    wsm.mergeCells(2,1,2,MNC); const mst=wsm.getCell(2,1); mst.value=`Export: ${new Date().toLocaleDateString("th-TH")} · ${moKeys.length} เดือน · ${poEntries.length} PO`; mst.font={italic:true,size:10,color:{argb:"FF64748B"},name:F}; mst.alignment={indent:1};
-    const MHR = 4;
-    MH.forEach((h,i)=>{ const c=wsm.getCell(MHR,1+i); c.value=h; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.fill=fillS("FFFDEED3"); c.alignment={horizontal:i>=4?"right":"left",vertical:"middle",wrapText:true}; c.border={bottom:{style:"medium",color:{argb:"FFF59E0B"}}}; }); wsm.getRow(MHR).height=24;
-    // สร้างแถว: หนึ่งแถวต่อ PO จัดกลุ่มตามเดือน + แถว "รวมเดือน" ท้ายแต่ละกลุ่ม
-    const bodyRows = [];
-    moKeys.forEach(m => {
-      const list = poEntries.filter(p => (p.date||"").slice(0,7) === m).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-      let sT=0, sP=0;
-      list.forEach((p,idx) => {
-        const t=poTotal(p), pd=poPaid(p);
-        sT+=t; sP+=pd;
-        bodyRows.push({ type:"po", month: idx===0?monthShortLabel(m):"", date:p.date||"-", no:poNumbersLabel(p), sup:poSupplierName(p), total:t, paid:pd, out:Math.max(0,t-pd) });
-      });
-      bodyRows.push({ type:"sub", label:`รวม ${monthShortLabel(m)}`, total:sT, paid:sP, out:Math.max(0,sT-sP) });
-    });
-    let po_i = 0;
-    bodyRows.forEach((r,ri) => { const R = MHR+1+ri;
-      if (r.type === "sub") {
-        for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); cell.fill=fillS("FFFDEED3"); }
-        const lc=wsm.getCell(R,1); lc.value=r.label; lc.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; lc.alignment={vertical:"middle",indent:1};
-        [r.total, r.paid, r.out, r.total>0?r.paid/r.total:0].forEach((v,i)=>{ const c=wsm.getCell(R,5+i); c.value=v; c.numFmt = i===3 ? "0%" : "#,##0"; c.font={bold:true,size:9.5,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
-        return;
-      }
-      [r.month, r.date, r.no, r.sup, r.total, r.paid, r.out, r.total>0?r.paid/r.total:0].forEach((val,ci)=>{
-        const c=wsm.getCell(R,1+ci); c.value=val; c.font={name:F,size:9.5};
-        if(ci<=3){ c.alignment={vertical:"middle",indent:ci===0?1:0}; if(ci===0) c.font={name:F,size:9.5,bold:true,color:{argb:"FF92400E"}}; }
-        else if(ci===7){ c.numFmt="0%"; c.alignment={horizontal:"right",vertical:"middle"}; }
-        else { c.numFmt="#,##0"; c.alignment={horizontal:"right",vertical:"middle"}; }
-      });
-      if(po_i%2) for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(R,c); if(!cell.fill||!cell.fill.pattern) cell.fill=fillS("FFFFFAF3"); }
-      po_i++;
-    });
-    const mtR = MHR + 1 + bodyRows.length;
-    for(let c=1;c<=MNC;c++){ const cell=wsm.getCell(mtR,c); cell.fill=fillS("FFFDE7C2"); cell.border={top:{style:"medium",color:{argb:"FFF59E0B"}}}; }
-    const mtl=wsm.getCell(mtR,1); mtl.value="TOTAL"; mtl.font={bold:true,color:{argb:"FF92400E"},name:F}; mtl.alignment={vertical:"middle",indent:1};
-    const gT=poEntries.reduce((s,p)=>s+poTotal(p),0), gP=poEntries.reduce((s,p)=>s+poPaid(p),0);
-    [gT, gP, Math.max(0,gT-gP), gT>0?gP/gT:0].forEach((v,i)=>{ const c=wsm.getCell(mtR,5+i); c.value=v; c.numFmt = i===3 ? "0%" : "#,##0"; c.font={bold:true,color:{argb:"FF92400E"},name:F}; c.alignment={horizontal:"right",vertical:"middle"}; });
-    wsm.getColumn(1).width=14; wsm.getColumn(2).width=14; wsm.getColumn(3).width=16; wsm.getColumn(4).width=26;
-    for(let c=5;c<=MNC;c++) wsm.getColumn(c).width = c===MNC ? 12 : 16;
-    wsm.autoFilter = `A${MHR}:${colL(MNC-1)}${MHR}`;
-  }
-
-  const buf=await wb.xlsx.writeBuffer(); const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}); const url=URL.createObjectURL(blob); const a2=document.createElement("a"); a2.href=url; a2.download=`Procurement_PO_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`; document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
-}
-
 
 // ─── Accounting: full financial export ─────────────────────────────────────
 function exportAccountingExcel(project, tenderCosts, additions, poEntries, extraItems=[], hiddenAccounts=[], incomingPlan=[]) {
@@ -1858,7 +1593,6 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   const payLines = poEntries.flatMap(poPayLines);
   if (payLines.length) {
     const monthKey = (l) => l.month || "9999-99";
-    const payMonths = [...new Set(payLines.map(monthKey))].sort();
 
     // ── แผนจ่าย — รายละเอียดแต่ละงวด (เอาตารางสรุปรายเดือนด้านบนออกแล้ว) ──
     const rowsC = [
@@ -1922,7 +1656,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     xLinkRow(ws1, navR+1, acctLinks);
   }
 
-  XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  XLSX.writeFile(wb, `Accounting_${project.name.replace(/\s+/g,"_")}_${todayStr()}.xlsx`);
 }
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
@@ -1970,6 +1704,9 @@ export default function App() {
   const [projects, setProjects] = useState([]);
   const [accountsRev, setAccountsRev] = useState(0); // bump เมื่อรายการบัญชี (ACCOUNTS) ถูกแก้ → re-render ทั้งแอป
   const [activeId, setActiveId] = useState(null);
+  const activeIdRef = useRef(null); activeIdRef.current = activeId;   // ใช้กันผลโหลดของโครงการเก่ามาทับ
+  const [projReadyId, setProjReadyId] = useState(null);  // ข้อมูลใน state ตอนนี้เป็นของโครงการไหน (null = ยังไม่มี)
+  const [projLoadErr, setProjLoadErr] = useState("");    // โหลดข้อมูลโครงการไม่สำเร็จ
   const [role,     setRole]     = useState(null);
   const [tenderCosts, setTCosts]= useState({});
   const [additions,   setAdditions]  = useState({});
@@ -2023,18 +1760,19 @@ export default function App() {
   }, []);
 
   const fetchProjectData = useCallback(async (id) => {
-    const t  = await sg(`tcs-tenders-${id}`);
-    const po = await sg(`tcs-po-${id}`);
-    const ad = await sg(`tcs-additions-${id}`);
-    const ex = await sg(`tcs-extra-${id}`);
-    const hid = await sg(`tcs-hidden-${id}`);
-    const inp = await sg(`tcs-inplan-${id}`);
-    setTCosts(t || {});
+    // ดึง 6 ส่วนพร้อมกัน (เดิมทีละส่วน ช้ากว่า 6 เท่า)
+    const [tc, po, ad, ex, hid, inp] = await Promise.all(
+      ["tenders","po","additions","extra","hidden","inplan"].map(k => sg(`tcs-${k}-${id}`)));
+    // ผู้ใช้สลับไปโครงการอื่นระหว่างรอ → ทิ้งผลลัพธ์ของโครงการเก่า (กันข้อมูลโครงการ A ทับโครงการ B)
+    if (activeIdRef.current !== id) return;
+    setTCosts(tc || {});
     setPO(po || []);
     setAdditions(ad || {});
     setExtraItems(ex || []);
     setHiddenAccounts(hid || []);
     setIncomingPlan(Array.isArray(inp) ? inp : []);
+    setProjReadyId(id);
+    setProjLoadErr("");
   }, []);
 
   const fetchProjects = useCallback(async () => {
@@ -2051,7 +1789,16 @@ export default function App() {
   // Supabase แนบ token จะโดน DB ปฏิเสธแล้วขึ้น 0 โครงการ ทั้งที่มีสิทธิ์อ่าน
   // ผูกกับ session ไว้ พอล็อกอินเสร็จ (session มีค่า) จะดึงข้อมูลใหม่อัตโนมัติ
   useEffect(() => {
-    if (!session) { setLoaded(true); return; }
+    if (!session) {
+      // ออกจากระบบ (กดเอง หรือ token หมดอายุ) → ล้างหน้าจอ/ข้อมูลทั้งหมด ให้คนถัดไปที่ล็อกอินเริ่มที่หน้า
+      // รายการโครงการเสมอ (เดิมค้างหน้าเก่า เช่นหน้า Admin → จอว่าง, หรือเห็นรายการโครงการของคนก่อน)
+      UnsavedGuard.dirty = false;
+      setScreen("home"); setRole(null); setActiveId(null); setProjReadyId(null); setProjLoadErr("");
+      setProjects([]); setTCosts({}); setPO([]); setAdditions({}); setExtraItems([]); setHiddenAccounts([]); setIncomingPlan([]);
+      undoRef.current = []; redoRef.current = [];
+      setLoaded(true); return;
+    }
+    setLoaded(false);   // ล็อกอินใหม่ → แสดง "กำลังโหลด" จนได้รายการโครงการ (ไม่โชว์ "ยังไม่มีโครงการ" หลอก ๆ)
     (async () => {
       try { await fetchAccounts(); await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
       catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า"); }
@@ -2059,10 +1806,23 @@ export default function App() {
     })();
   }, [fetchProjects, fetchAccounts, session]);
 
+  // เปิดโครงการ: ล้างข้อมูลของโครงการก่อนหน้าทิ้งก่อน แล้วค่อยโหลด — ระหว่างโหลดหน้าแผนกแสดง "กำลังโหลด"
+  // (เดิมยังโชว์ตัวเลขโครงการเก่าใต้ชื่อโครงการใหม่ และถ้ากด Export ตอนนั้นจะได้ข้อมูลผิดโครงการ)
+  const loadProject = useCallback((id) => {
+    setProjLoadErr("");
+    return fetchProjectData(id).catch(e => {
+      console.warn("โหลดข้อมูลโครงการไม่สำเร็จ:", e);
+      if (activeIdRef.current === id) setProjLoadErr(t("โหลดข้อมูลโครงการไม่สำเร็จ — ตรวจเน็ตแล้วกดลองใหม่","Couldn't load project data — check your connection and retry"));
+    });
+  }, [fetchProjectData]);
   useEffect(() => {
     if (!activeId || !session) return;
-    fetchProjectData(activeId).catch(e => { console.warn("โหลดข้อมูลโครงการไม่สำเร็จ:", e); setSyncError("โหลดข้อมูลโครงการไม่สำเร็จ — ลองเปิดใหม่อีกครั้ง"); });
-  }, [activeId, fetchProjectData, session]);
+    if (projReadyId !== activeId) {
+      setProjReadyId(null);
+      setTCosts({}); setPO([]); setAdditions({}); setExtraItems([]); setHiddenAccounts([]); setIncomingPlan([]);
+    }
+    loadProject(activeId);
+  }, [activeId, loadProject, session]); // eslint-disable-line
 
   // ── กัน "กรอกแล้วหาย/เด้งกลับ" ตอนเปิดหลายเครื่อง (ไอดีเดียว โครงการเดียวกัน) ──
   // realtime ของ Supabase ส่ง event การเขียน "กลับมาหาเครื่องที่เขียนเองด้วย" ถ้าเครื่อง
@@ -2081,8 +1841,8 @@ export default function App() {
     setSyncing(true);
     try {
       if (key === "tcs-projects") await fetchProjects();
-      else if (key === "tcs-accounts") { await fetchAccounts(); if (activeId) await fetchProjectData(activeId); }
-      else if (isProjKey) await fetchProjectData(activeId);
+      else if (key === "tcs-accounts") { await fetchAccounts(); if (activeId) { await fetchProjectData(activeId); dropUndoFor(null); } }
+      else if (isProjKey) { await fetchProjectData(activeId); dropUndoFor(key); }
       setSyncedAt(new Date());
     } catch (e) {
       console.warn("sync realtime ล้มเหลว:", e);
@@ -2114,7 +1874,7 @@ export default function App() {
   useEffect(() => {
     if (editMode || !pendingSyncRef.current) return;
     pendingSyncRef.current = false;
-    if (activeId) fetchProjectData(activeId).then(() => setSyncedAt(new Date())).catch(() => {});
+    if (activeId) fetchProjectData(activeId).then(() => { dropUndoFor(null); setSyncedAt(new Date()); }).catch(() => {});
   }, [editMode, activeId, fetchProjectData]);
   const [selStats, setSelStats] = useState(null); // สรุปตัวเลขที่ลากเลือก (แบบ Excel)
   const [marquee, setMarquee]   = useState(null); // กรอบสี่เหลี่ยมขณะลากเลือก
@@ -2130,6 +1890,15 @@ export default function App() {
     [`tcs-extra-${activeId}`]: extraItems,
     [`tcs-hidden-${activeId}`]: hiddenAccounts,
     [`tcs-inplan-${activeId}`]: incomingPlan,
+  };
+  // มีข้อมูลของคนอื่นเข้ามาแทนที่ state ของ key นี้ (ดึงจากเซิร์ฟเวอร์) → ทิ้งขั้น undo/redo ของ key นั้น
+  // เพราะ undo = "ย้อนจากค่าปัจจุบันกลับเป็นค่าเก่า" ถ้าค่าปัจจุบันมีงานของคนอื่นปนอยู่ จะย้อนงานเขาทิ้งไปด้วย
+  // (key = null → ทิ้งทั้งหมด)
+  const dropUndoFor = (key) => {
+    const keep = (e) => key !== null && e.key !== key;
+    const u = undoRef.current.filter(keep), r = redoRef.current.filter(keep);
+    if (u.length === undoRef.current.length && r.length === redoRef.current.length) return;
+    undoRef.current = u; redoRef.current = r; syncUndo();
   };
   const syncUndo = () => setUndoInfo({
     u: undoRef.current.length, r: redoRef.current.length,
@@ -2351,15 +2120,20 @@ export default function App() {
     const proj = projects.find(p => p.id === id);
     const name = (proj?.name || "").trim();
     // ยืนยันแบบ "พิมพ์ชื่อโครงการให้ตรง" — กันเผลอลบ เพราะลบแล้วข้อมูลย่อยหายด้วย
-    const typed = window.prompt(
+    const typed = window.prompt(t(
       `⚠️ ลบโครงการ "${name}" ?\n\n` +
       `ข้อมูลทั้งหมดของโครงการนี้จะถูกลบด้วย:\n` +
       `• Tender Cost (ราคาเดิม)\n• PO / จัดซื้อ\n• ยอดเพิ่มรายเดือน · รายการเพิ่ม · หมวดที่ซ่อน\n\n` +
       `กู้คืนได้จาก Admin → กู้คืนข้อมูล (ได้ถึงสแนปช็อตล่าสุด 12:00/18:00)\n\n` +
-      `ถ้าแน่ใจ พิมพ์ชื่อโครงการให้ตรงเพื่อยืนยัน:\n${name}`
-    );
+      `ถ้าแน่ใจ พิมพ์ชื่อโครงการให้ตรงเพื่อยืนยัน:\n${name}`,
+      `⚠️ Delete project "${name}"?\n\n` +
+      `All of this project's data will be deleted too:\n` +
+      `• Tender Cost (baseline)\n• PO / procurement\n• Monthly additions · extra items · hidden categories\n\n` +
+      `Admin can restore it from Admin → Restore data (latest 12:00/18:00 snapshot)\n\n` +
+      `If you're sure, type the project name exactly to confirm:\n${name}`
+    ));
     if (typed == null) return;                                   // กดยกเลิก
-    if (typed.trim() !== name) { alert("ชื่อโครงการไม่ตรง — ยกเลิกการลบแล้ว"); return; }
+    if (typed.trim() !== name) { alert(t("ชื่อโครงการไม่ตรง — ยกเลิกการลบแล้ว","Name doesn't match — deletion cancelled")); return; }
     // ไม่เข้า quick-undo เพราะการลบโครงการลบคีย์ย่อยด้วย — กู้ทั้งโครงการทำผ่านหน้า
     // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
     const next = projects.filter(p => p.id !== id);
@@ -2367,10 +2141,28 @@ export default function App() {
     // โครงการที่คนอื่นเพิ่งเพิ่มพร้อมกัน และแจ้ง error ถ้าบันทึกไม่สำเร็จ
     setProjects(next);
     lastWriteRef.current["tcs-projects"] = Date.now();
-    ssMerge("tcs-projects", projects, next)
-      .then(()=>{ lastWriteRef.current["tcs-projects"] = Date.now(); setSyncedAt(new Date()); })
-      .catch(e=>{ console.warn("ลบโครงการไม่สำเร็จ:", e); setSyncError("⚠ ลบโครงการไม่สำเร็จ — ตรวจเน็ตแล้วลองใหม่"); });
-    await sd(`tcs-tenders-${id}`); await sd(`tcs-po-${id}`); await sd(`tcs-additions-${id}`); await sd(`tcs-extra-${id}`); await sd(`tcs-hidden-${id}`); await sd(`tcs-inplan-${id}`);
+    // 1) เอาออกจากรายชื่อโครงการให้สำเร็จ "ก่อน" — ถ้าไม่สำเร็จ ห้ามลบข้อมูลย่อย (เดิมลบข้อมูลไปก่อน
+    //    ถ้าเอาออกจากรายชื่อไม่ผ่าน โครงการจะกลับมาแบบข้อมูลว่างเปล่า)
+    try {
+      await ssMerge("tcs-projects", projects, next);
+      lastWriteRef.current["tcs-projects"] = Date.now();
+    } catch (e) {
+      console.warn("ลบโครงการไม่สำเร็จ:", e);
+      setProjects(projects);   // คืนรายการเดิม — ข้อมูลของโครงการยังอยู่ครบ
+      setSyncError(t("⚠ ลบโครงการไม่สำเร็จ — ข้อมูลยังอยู่ครบ ตรวจเน็ตแล้วลองใหม่","⚠ Couldn't delete the project — its data is intact. Check your connection and try again"));
+      return;
+    }
+    if (activeId === id) setActiveId(null);
+    // 2) ลบข้อมูลย่อยทุกส่วน — ส่วนไหนพลาดแจ้งเตือน (ไม่ปล่อยเงียบ) ข้อมูลเก่ากู้ได้ที่ Admin → กู้คืนข้อมูล
+    const keys = ["tenders","po","additions","extra","hidden","inplan"].map(k => `tcs-${k}-${id}`);
+    const results = await Promise.allSettled(keys.map(k => sd(k)));
+    const failed = keys.filter((_, i) => results[i].status === "rejected");
+    if (failed.length) {
+      console.warn("ลบข้อมูลย่อยของโครงการไม่ครบ:", failed);
+      setSyncError(t(`⚠ เอาโครงการออกแล้ว แต่ลบข้อมูลย่อยไม่ครบ ${failed.length} ส่วน — ไม่กระทบโครงการอื่น`,`⚠ Project removed, but ${failed.length} data part(s) could not be deleted — other projects are not affected`));
+    } else {
+      setSyncedAt(new Date()); setSyncError("");
+    }
   };
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
@@ -2494,19 +2286,37 @@ export default function App() {
         <RoleSelect project={activeProject} updateProject={updateProject}
           onSelect={r=>{ setRole(r); setScreen("app"); }} onBack={()=>setScreen("home")} />
       )}
-      {screen === "app" && effectiveRole === "qs"          && (
+      {screen === "app" && projReadyId !== activeId && (
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:T.bg}}>
+          <div style={{textAlign:"center",maxWidth:420,padding:24}}>
+            {projLoadErr ? (<>
+              <div style={{fontSize:32,marginBottom:10}}>⚠️</div>
+              <div style={{fontSize:14,color:T.textPrimary,fontWeight:600,marginBottom:14}}>{projLoadErr}</div>
+              <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+                <button className="btn-primary" onClick={()=>loadProject(activeId)}>{t("ลองใหม่","Retry")}</button>
+                <button className="btn-ghost" onClick={()=>setScreen("home")}>{t("กลับหน้าโครงการ","Back to projects")}</button>
+              </div>
+            </>) : (<>
+              <div style={{width:40,height:40,border:`3px solid ${T.blueMid}`,borderTopColor:T.blue,borderRadius:"50%",animation:"spin 0.7s linear infinite",margin:"0 auto 12px"}}/>
+              <div style={{fontSize:13,color:T.textSecondary}}>{t("กำลังโหลดข้อมูลโครงการ","Loading project data")} {activeProject.name}…</div>
+              <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            </>)}
+          </div>
+        </div>
+      )}
+      {screen === "app" && projReadyId === activeId && effectiveRole === "qs"          && (
         <QSView {...sharedProps} onExport={() => runExport(() =>
           // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
           Promise.resolve(exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts))
         )} />
       )}
-      {screen === "app" && effectiveRole === "procurement" && (
+      {screen === "app" && projReadyId === activeId && effectiveRole === "procurement" && (
         <ProcurementView {...sharedProps} onExport={() => runExport(() =>
           // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
           Promise.resolve(exportProcurementExcel(activeProject, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts))
         )} />
       )}
-      {screen === "app" && effectiveRole === "accounting"  && (
+      {screen === "app" && projReadyId === activeId && effectiveRole === "accounting"  && (
         <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan))} />
       )}
       </ErrorBoundary>
@@ -2583,13 +2393,14 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
         {resetting ? (
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
             <input className="input-base" type="password" autoComplete="new-password" placeholder={t("รหัสผ่านใหม่ (≥ 8 ตัว)","New password (≥ 8 chars)")} value={pw} onChange={e=>setPw(e.target.value)} style={{width:150,padding:"6px 10px"}} />
-            <button className="btn-primary" style={{padding:"6px 12px"}} onClick={()=>{ if(pw.trim().length<8){ alert("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร"); return; } onReset(u.id,pw); setPw(""); setResetting(false); }}>บันทึก</button>
+            <button className="btn-primary" style={{padding:"6px 12px"}} onClick={async ()=>{ if(pw.trim().length<8){ alert(t("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร","Password must be at least 8 characters")); return; } if (await onReset(u.id,pw)) { setPw(""); setResetting(false); } }}>{t("บันทึก","Save")}</button>
             <button className="btn-ghost" style={{padding:"6px 10px"}} onClick={()=>{setResetting(false);setPw("");}}>{t("ยกเลิก","Cancel")}</button>
           </div>
         ) : (
           <div style={{display:"flex",gap:8}}>
             <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>{t("รีเซ็ตรหัส","Reset password")}</button>
-            <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>onToggle(u.id)}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>
+            {/* ห้ามระงับบัญชีตัวเอง (แอดมินคนสุดท้ายจะล็อกทุกคนออก) · ระงับคนอื่นถามยืนยันก่อน */}
+            {!(isSelf && u.active) && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>{ if (u.active && !confirm(t(`ระงับผู้ใช้ "${u.username}"? ผู้ใช้นี้จะล็อกอินไม่ได้จนกว่าจะเปิดใช้อีกครั้ง`,`Suspend "${u.username}"? They won't be able to sign in until re-enabled`))) return; onToggle(u.id); }}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>}
             {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`))) onDelete(u.id);}}>ลบ</button>}
           </div>
         )}
@@ -2605,7 +2416,6 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
 function AdminRestoreTab() {
   const [snaps, setSnaps]     = useState([]);
   const [projMap, setProjMap] = useState({});
-  const [selKey, setSelKey]   = useState(null);
   const [dept, setDept]       = useState("all"); // กรองตามแผนก
   const [loading, setLoading] = useState(true);
   const [busy, setBusy]       = useState(false);
@@ -2613,9 +2423,17 @@ function AdminRestoreTab() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [s, projs] = await Promise.all([loadKvSnapshots(), sg("tcs-projects")]);
-    const map = {}; (projs || []).forEach(p => { map[p.id] = p.name; });
-    setProjMap(map); setSnaps(s); setLoading(false);
+    try {
+      const [s, projs] = await Promise.all([loadKvSnapshots(), sg("tcs-projects")]);
+      const map = {}; (projs || []).forEach(p => { map[p.id] = p.name; });
+      setProjMap(map); setSnaps(s || []);
+    } catch (e) {
+      // เดิมไม่มี catch → ค้างที่ "กำลังโหลด" ตลอด และหลังกู้คืนปุ่มค้างสถานะ busy
+      console.warn("โหลดสแนปช็อตไม่สำเร็จ:", e);
+      setMsg(t("⚠ โหลดรายการสแนปช็อตไม่สำเร็จ — ตรวจเน็ต/สิทธิ์ แล้วลองเปิดหน้านี้ใหม่","⚠ Couldn't load snapshots — check connection/permissions and reopen this tab"));
+    } finally {
+      setLoading(false);
+    }
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -2630,12 +2448,6 @@ function AdminRestoreTab() {
     if (key === "tcs-logs")  return t("Log (คีย์เก่า)","Log (legacy key)");
     return key;
   };
-  const preview = (v) => {
-    if (v == null) return t("(ว่าง)","(empty)");
-    const s = String(v);
-    return s.length > 90 ? s.slice(0, 90) + "…" : s;
-  };
-  const snapLabel = (r) => `${new Date(r.taken_at).toLocaleDateString("th-TH",{day:"numeric",month:"short"})} · ${r.slot}`;
 
   // จับคู่คีย์ข้อมูล → แผนกเจ้าของ
   const deptOf = (key) => {
@@ -2864,9 +2676,14 @@ function AdminPanel({ onBack, onLogout, session }) {
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleReset   = async (id, pw)  => setUsers(await resetPassword(users, id, pw));
-  const handleToggle  = async (id)      => setUsers(await toggleActive(users, id));
-  const handleDelete  = async (id)      => setUsers(await deleteUser(users, id));
+  // การกระทำกับผู้ใช้ — ถ้าล้มเหลว (เน็ต/สิทธิ์/Edge Function) แจ้งให้รู้ (เดิมเงียบ ดูเหมือนสำเร็จ)
+  const adminAct = async (fn, failMsg) => {
+    try { setUsers(await fn()); return true; }
+    catch (e) { console.warn(failMsg, e); alert(`${failMsg}\n\n${e?.message || ""}`.trim()); return false; }
+  };
+  const handleReset   = (id, pw) => adminAct(() => resetPassword(users, id, pw), t("⚠ รีเซ็ตรหัสผ่านไม่สำเร็จ","⚠ Password reset failed"));
+  const handleToggle  = (id)     => adminAct(() => toggleActive(users, id),      t("⚠ เปลี่ยนสถานะผู้ใช้ไม่สำเร็จ","⚠ Couldn't change user status"));
+  const handleDelete  = (id)     => adminAct(() => deleteUser(users, id),        t("⚠ ลบผู้ใช้ไม่สำเร็จ","⚠ Couldn't delete user"));
   const handleCreate  = async () => {
     setErr("");
     if (!draft.username.trim() || !draft.password) { setErr(t("กรอก Username และ Password","Enter Username and Password")); return; }
@@ -3220,7 +3037,6 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
         <div style={{display:"flex",gap:24,paddingBottom:20}}>
           {[
             {label:t("โครงการทั้งหมด","All projects"),value:projects.length,icon:"🏗"},
-            {label:"Active Projects",value:projects.length,icon:"📊"},
           ].map(s=>(
             <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.12)",borderRadius:10,padding:"8px 16px"}}>
               <span style={{fontSize:16}}>{s.icon}</span>
@@ -3400,7 +3216,6 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
 function LangToggle({ dark = true }) {
   useLang();
   const on  = dark ? "#fff" : T.textPrimary;
-  const off = dark ? "rgba(255,255,255,0.55)" : T.textMuted;
   const bg  = dark ? "rgba(255,255,255,0.15)" : "#fff";
   const bd  = dark ? "rgba(255,255,255,0.3)"  : T.cardBorder;
   // ปุ่มสลับภาษาแบบช่องเดียว — โชว์ภาษาที่ใช้อยู่ตอนนี้ (TH หรือ EN) กดแล้วสลับ ตัวหนังสือก็สลับตาม
@@ -3464,7 +3279,6 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
   const goTab   = (id) => { if (id !== tab) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setTabHist(h => [...h, tab]); setTab(id); } };
   const backTab = () => { if (tabHist.length) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); } else onBack(); };
-  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   // ปุ่ม "Export เดือนนี้" ของแท็บรายเดือน ถูกยกขึ้นมาไว้ข้างปุ่ม Export หลักด้านบน
   const monthlyExportRef = useRef(null);
   const registerMonthExport = useCallback(fn => { monthlyExportRef.current = fn; }, []);
@@ -3479,22 +3293,56 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   // `addedInMonth` (set only when created from the Monthly tab) records which
   // month it first appeared in, so the UI can show "เพิ่มเมื่อ ..." vs.
   // "ตั้งแต่เริ่มต้น" for ones that were already in the Baseline.
-  const handleAddExtraItem = ({ name, group, parentCode, code, addedInMonth }) => {
+  const handleAddExtraItem = ({ name, group, parentCode, code, addedInMonth, seedName }) => {
     if (!name.trim()) return;
     const item = parentCode
       ? { code:`EX-${uid()}`, name:name.trim(), parentCode, ...(addedInMonth ? { addedInMonth } : {}) }
       : { code: code || `EX-${uid()}`, name:name.trim(), group };
+    // รายการย่อย "แรก" ของแถวที่มียอดอยู่แล้ว: สร้างรายการย่อย "รายการเดิม" มารับยอดเดิมไว้ด้วย
+    // (บันทึกพร้อมกันในครั้งเดียว) — ไม่งั้นแถวแม่จะกลายเป็นผลรวมรายการย่อย = 0 แล้วยอดเดิมหาย
+    if (parentCode && seedName) {
+      const seed = { code:`EX-${uid()}`, name: seedName, parentCode, ...(addedInMonth ? { addedInMonth } : {}) };
+      saveExtraItems([...extraItems, seed, item]);
+      return { code: item.code, seedCode: seed.code };
+    }
     saveExtraItems([...extraItems, item]);
     return item.code;
   };
 
   const handleDeleteExtraItem = (code) => {
     if (!confirm(t("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย","Delete this item? All its amounts (baseline + every month) will be deleted too"))) return;
-    saveExtraItems(extraItems.filter(e => e.code !== code));
+    const item = extraItems.find(e => e.code === code);
+    const parent = item?.parentCode;
+    const remaining = extraItems.filter(e => e.code !== code);
+    saveExtraItems(remaining);
+    const kidsOf = (p) => remaining.filter(e => e.parentCode === p);
+    const isKeyOf = (k) => k === code || k.startsWith(code + ":");   // ค่าหลัก + ค่าคอลัมน์ย่อยของรายการนี้
+    // ราคาเดิม: ลบค่าของรายการนี้ + คำนวณยอดแถวแม่ใหม่ (เดิมยอดแม่ที่บันทึกไว้ยังรวมรายการที่ลบไป
+    // ฝ่ายจัดซื้อ/บัญชีจึงเห็นยอดเก่า จนกว่า QS จะกดบันทึกอีกรอบ)
     const nextTenders = { ...tenderCosts }; delete nextTenders[code];
+    if (parent && !item.addedInMonth) {
+      const v = kidsOf(parent).filter(k => !k.addedInMonth).reduce((s, k) => s + (parseFloat(nextTenders[k.code]) || 0), 0);
+      if (v > 0) nextTenders[parent] = v; else delete nextTenders[parent];
+    }
     saveTenders(nextTenders);
+    // รายเดือน: ลบค่า/คอลัมน์ย่อย/สีไฮไลต์ของรายการนี้ + คำนวณยอดแม่ของเดือนที่รายการนี้มีผลใหม่
+    // (คีย์ระดับโปรเจกต์ที่ขึ้นต้นด้วย $ เช่น $columns เดิมถูกแปลงจาก array เป็น object — คงไว้ตามเดิม)
     const nextAdd = {};
-    Object.entries(additions).forEach(([m, obj]) => { const o = {...obj}; delete o[code]; nextAdd[m] = o; });
+    Object.entries(additions).forEach(([m, obj]) => {
+      if (m.startsWith("$") || !obj || typeof obj !== "object" || Array.isArray(obj)) { nextAdd[m] = obj; return; }
+      const o = {};
+      Object.entries(obj).forEach(([k, v]) => { if (!isKeyOf(k)) o[k] = v; });
+      if (obj.$fmt) o.$fmt = Object.fromEntries(Object.entries(obj.$fmt).filter(([k]) => !isKeyOf(k)));
+      if (parent && (!item.addedInMonth || item.addedInMonth <= m)) {
+        const kids = kidsOf(parent).filter(k => !k.addedInMonth || k.addedInMonth <= m);
+        const cols = obj.$columns ?? additions.$columns ?? [];
+        const v = kids.length
+          ? kids.reduce((s, k) => s + (parseFloat(o[k.code]) || 0), 0)
+          : cols.reduce((s, c) => s + (parseFloat(o[`${parent}:${c.id}`]) || 0), 0);
+        if (v !== 0) o[parent] = v; else delete o[parent];
+      }
+      nextAdd[m] = o;
+    });
     saveAdditions(nextAdd);
   };
 
@@ -3584,7 +3432,13 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   const handleCancel = () => { setDraft({ ...tenderCosts }); setForceEdit(false); setAddOpen(false); setSubFor(null); };
   useEffect(() => {
     if (!editingUnlocked) return;
-    const onEsc = (e) => { if (e.key === "Escape" && canCancel) { e.preventDefault(); handleCancel(); } };
+    const onEsc = (e) => {
+      if (e.key !== "Escape" || e.defaultPrevented || !canCancel) return;
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return; // กำลังพิมพ์ — ไม่ทิ้งข้อมูล
+      if (UnsavedGuard.dirty && !window.confirm(t("ยกเลิกการแก้ไข? ค่าที่พิมพ์ไว้แต่ยังไม่บันทึกจะหายไป","Cancel editing? Unsaved values will be lost"))) return;
+      e.preventDefault(); handleCancel();
+    };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
   }, [editingUnlocked, canCancel, tenderCosts]);
@@ -3616,7 +3470,6 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
 
   const base  = allRows.reduce((s,r)=>s+effectiveValue(r),0);
   const adj3  = base * 0.03;
-  const total = base + adj3;
 
   const q = search.toLowerCase();
   const filtered = allRows.filter(a => {
@@ -3691,7 +3544,17 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
 
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode });
+    const parentVal = parseFloat(draft[parentCode]) || 0;
+    if (childrenOf(parentCode).length === 0 && parentVal !== 0) {
+      // รายการย่อยแรก: ย้ายราคาเดิมของแถวแม่ไปไว้ในรายการย่อย "รายการเดิม" (ยอดรวมเท่าเดิม)
+      const res = onAddExtra({ name:subName, parentCode, seedName: t("รายการเดิม","Original item") });
+      if (res?.seedCode) {
+        saveTenders({ ...tenderCosts, [res.seedCode]: parentVal }); // บันทึกทันที กันยกเลิกแล้วยอดแม่เป็น 0
+        setDraft(d => ({ ...d, [res.seedCode]: parentVal }));
+      }
+    } else {
+      onAddExtra({ name:subName, parentCode });
+    }
     setCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
@@ -3990,7 +3853,7 @@ const qsFrzSpan3 = (bg, z = 3) => ({
 const QSF_FOOT = { position: "sticky", bottom: 0, zIndex: 5, background: "#eef2f7" };
 function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAddExtra, onDeleteExtra, hiddenAccounts, setEditMode, project, registerMonthExport }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
-  const thisMonth = new Date().toISOString().slice(0,7);
+  const thisMonth = todayStr().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
   const [newMonth, setNewMonth] = useState("");
@@ -4067,10 +3930,21 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const handleCancel = () => { setDraftAdd({ ...(additions[month] || {}) }); setForceEdit(false); setMonthEditMode(false); setAddExtraOpen(false); setSubFor(null); setAddColOpen(false); };
   useEffect(() => {
     if (!editingUnlocked && !monthEditMode) return;
-    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); handleCancel(); } };
+    // Esc = ยกเลิกการแก้ไข — แต่ไม่ทิ้งข้อมูลโดยไม่ตั้งใจ:
+    //  • ถ้า Esc ถูกใช้ไปแล้ว (ยกเลิกการเลือกช่อง) หรือกำลังพิมพ์ในช่องกรอก → ไม่ทำอะไร
+    //  • เดือนที่ยังไม่เคยบันทึก (ไม่มีปุ่มยกเลิก) → ไม่ทำอะไร
+    //  • มีค่าที่พิมพ์ค้าง → ถามยืนยันก่อนทิ้ง
+    const onEsc = (e) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return;
+      if (!canCancel) return;
+      if (UnsavedGuard.dirty && !window.confirm(t("ยกเลิกการแก้ไขเดือนนี้? ค่าที่พิมพ์ไว้แต่ยังไม่บันทึกจะหายไป","Cancel editing this month? Unsaved values will be lost"))) return;
+      e.preventDefault(); handleCancel();
+    };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [editingUnlocked, monthEditMode, month, additions]);
+  }, [editingUnlocked, monthEditMode, month, additions, canCancel]);
 
   // All rows = original 70 account codes + standalone extra items.
   // Sub-items (parentCode set) can be added right here for a monthly
@@ -4175,8 +4049,17 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   })();
   const hiddenEmptyCount = hideEmpty ? filtered.length - filtered.filter(r => cumOf(r) !== 0).length : 0;
 
+  // สลับเดือน — ถ้ามีค่าที่พิมพ์ค้างยังไม่บันทึก ถามก่อน (เดิมสลับแล้วค่าหายเงียบ ๆ)
+  const goMonth = (m) => {
+    if (!m || m === month) return;
+    if (!confirmLeaveIfDirty()) return;
+    UnsavedGuard.dirty = false;
+    setMonth(m);
+  };
   const handleAddMonth = () => {
     if (!newMonth) return;
+    if (newMonth !== month && !confirmLeaveIfDirty()) return;
+    UnsavedGuard.dirty = false;
     if (months.includes(newMonth)) {
       // ห้ามซ้ำ — ถ้ามีเดือนนี้อยู่แล้ว แค่กระโดดไปที่เดือนนั้นแทนการสร้างซ้ำ
       alert(t(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`, `${monthShortLabel(newMonth)} already exists`));
@@ -4246,7 +4129,26 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   const handleAddSub = (parentCode) => {
     if (!subName.trim()) return;
-    onAddExtra({ name:subName, parentCode, addedInMonth: month });
+    // รายการย่อยแรกของแถวที่มียอดอยู่แล้ว: ย้ายยอดเดิม (เดือนนี้ + เดือนหลังจากนี้ที่ยังไม่มีรายการย่อย)
+    // ไปไว้ในรายการย่อย "รายการเดิม" — ยอดรวมทุกเดือนเท่าเดิม ไม่หายตอนบันทึก
+    const firstKid = kidsAsOf(parentCode, month).length === 0;
+    const draftVal = columns.length
+      ? columns.reduce((s,c)=>s+(parseFloat(draftAdd[`${parentCode}:${c.id}`])||0),0)
+      : (parseFloat(draftAdd[parentCode])||0);
+    const laterSaved = months.filter(m => m >= month && kidsAsOf(parentCode, m).length === 0 && monthAddValue(additions, m, parentCode) !== 0);
+    if (firstKid && (draftVal !== 0 || laterSaved.length)) {
+      const res = onAddExtra({ name:subName, parentCode, addedInMonth: month, seedName: t("รายการเดิม","Original item") });
+      if (res?.seedCode) {
+        if (laterSaved.length) {
+          const nextAdd = { ...additions };
+          laterSaved.forEach(m => { nextAdd[m] = { ...nextAdd[m], [res.seedCode]: monthAddValue(additions, m, parentCode) }; });
+          saveAdditions(nextAdd);
+        }
+        setDraftAdd(d => { const n = { ...d, [res.seedCode]: draftVal }; columns.forEach(c => { delete n[`${parentCode}:${c.id}`]; }); return n; });
+      }
+    } else {
+      onAddExtra({ name:subName, parentCode, addedInMonth: month });
+    }
     setRowCollapsed(c => ({...c, [parentCode]: false})); // reveal the newly-added sub-item
     setSubName(""); setSubFor(null);
   };
@@ -4274,8 +4176,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     } else {
       nextDraft.$columns = [...columns, newCol];
     }
+    // เป็นแค่ "ร่าง" เหมือนการลบคอลัมน์ — มีผลจริงเมื่อกด "บันทึก" (ซึ่งจะรวมยอดคอลัมน์ลงคีย์หลัก
+    // ให้ฝ่ายอื่นเห็นยอดถูก) · เดิมบันทึกทันทีแบบไม่รวมยอด ทำให้ยอดหายจากงบของฝ่ายอื่น/ยกเลิกไม่ได้
     setDraftAdd(nextDraft);
-    saveAdditions({ ...additions, [month]: { ...(additions[month] || {}), ...nextDraft } });
     setNewColName(""); setAddColOpen(false);
   };
 
@@ -4306,6 +4209,15 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       .split("\n")
       .map(line => line.split("\t"));
     if (!grid.length) return;
+    // วางหลายแถว = ลงตาม "ลำดับแถวที่เห็นบนจอ" — ถ้ากำลังกรอง/ค้นหา/เรียง/ซ่อนแถวว่าง ลำดับจะไม่ตรงกับ
+    // ชีต Excel ต้นทาง ค่าอาจลงผิด Acc. Code จึงถามก่อน และบอกว่าแถวแรก/สุดท้ายจะลงที่รหัสไหน
+    const viewChanged = filter.length > 0 || !!search.trim() || hideEmpty || !!sortKey;
+    if (grid.length > 1 && viewChanged) {
+      const first = displayRows[startRowIdx], last = displayRows[Math.min(startRowIdx + grid.length - 1, displayRows.length - 1)];
+      if (!window.confirm(t(
+        `ตอนนี้ตารางถูกกรอง/ค้นหา/เรียง/ซ่อนแถวว่างอยู่ — ค่า ${grid.length} แถวจะลงตามลำดับที่เห็นบนจอ\nแถวแรก → ${first?.code || "-"} · แถวสุดท้าย → ${last?.code || "-"}\n\nถ้าคัดลอกมาจากชีตที่เรียงตาม Acc. Code ให้ยกเลิก แล้วล้างตัวกรอง/การเรียงก่อนวาง\nวางต่อไหม?`,
+        `The table is filtered/searched/sorted or hiding empty rows — ${grid.length} rows will be pasted in on-screen order\nFirst row → ${first?.code || "-"} · last row → ${last?.code || "-"}\n\nIf you copied from a sheet in Acc. Code order, cancel and clear the filter/sort first.\nPaste anyway?`))) return;
+    }
     setDraftAdd(d => {
       const next = { ...d };
       grid.forEach((cells, ri) => {
@@ -4346,7 +4258,13 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const dragModeRef = useRef(null); // {mode:"replace"|"add", base:Set}
   const inSel = (ri, ci) => selSet.has(ri + ":" + ci);
   const selCount = selSet.size;
-  const cellKeyOf = (row, ci) => isMultiCol ? `${row.code}:${columns[ci].id}` : row.code;
+  // คืน null ถ้าคอลัมน์ไม่มีอยู่แล้ว (เช่นเลือกช่องค้างไว้แล้วลบคอลัมน์/สลับเดือน) — กันหน้าพัง
+  const cellKeyOf = (row, ci) => {
+    if (!row || ci < 0) return null;
+    if (!isMultiCol) return ci === 0 ? row.code : null;
+    const col = columns[ci];
+    return col ? `${row.code}:${col.id}` : null;
+  };
   const cellValStr = (row, ci) => {
     if (kidsAsOf(row.code, month).length > 0) return ""; // parent roll-up — no direct value
     const raw = draftAdd[cellKeyOf(row, ci)];
@@ -4403,6 +4321,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     setSelSet(s); anchorRef.current = { ri: 0, ci: 0 };
   };
   const deselectAll = () => { setSelSet(new Set()); anchorRef.current = null; };
+  // การเลือกช่องอ้างอิง "ตำแหน่งแถว/คอลัมน์บนจอ" — ถ้าเดือน/คอลัมน์/การเรียง/ตัวกรอง/ค้นหา/ซ่อนแถวว่างเปลี่ยน
+  // ตำแหน่งจะชี้ไปคนละ Acc. Code แล้ว จึงล้างการเลือกทิ้ง (กันกด Delete แล้วลบผิดแถว)
+  useEffect(() => { deselectAll(); }, [month, columns.length, sortKey, sortDir, filter, search, hideEmpty, displayRows.length]); // eslint-disable-line
   const buildSelTSV = () => {
     if (!selSet.size) return "";
     let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
@@ -4424,7 +4345,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         const [r, c] = k.split(":").map(Number);
         const row = displayRows[r]; if (!row) return;
         if (kidsAsOf(row.code, month).length > 0) return;
-        next[cellKeyOf(row, c)] = "";
+        const key = cellKeyOf(row, c); if (!key) return;
+        next[key] = "";
       });
       return next;
     });
@@ -4450,7 +4372,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // รายคีย์เซลล์ (leaf) ที่กำลังเลือกอยู่ — ใช้ร่วมกันทุกเครื่องมือจัดรูปแบบ
   const selectedCellKeys = () => {
     const keys = [];
-    selSet.forEach(k => { const [r,c]=k.split(":").map(Number); const row=displayRows[r]; if(!row) return; if(kidsAsOf(row.code,month).length>0) return; keys.push(cellKeyOf(row,c)); });
+    selSet.forEach(k => { const [r,c]=k.split(":").map(Number); const row=displayRows[r]; if(!row) return; if(kidsAsOf(row.code,month).length>0) return; const key=cellKeyOf(row,c); if(key) keys.push(key); });
     return keys;
   };
   const mutateFmt = (fn) => { // fn(cur) → คืน object ใหม่ (หรือ null เพื่อลบ) · ใช้ได้ทั้งโหมดดู/แก้ไข
@@ -4488,7 +4410,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     };
     const onKey = (e) => {
       if (!selSet.size) return;
-      if (e.key === "Escape") { deselectAll(); return; }
+      // Esc ตอนมีช่องที่เลือก = แค่ยกเลิกการเลือก (preventDefault บอกตัวจัดการ Esc ของหน้าว่า "ใช้ไปแล้ว" ไม่ต้องยกเลิกการแก้ไข)
+      if (e.key === "Escape") { e.preventDefault(); deselectAll(); return; }
       const ae = document.activeElement;
       const editing = ae && ae.tagName === "INPUT";
       if ((e.key === "Delete" || e.key === "Backspace") && !editing && editingUnlocked) {
@@ -4521,7 +4444,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         </div>
         <ResponsiveContainer width="100%" height={280}>
           <BarChart data={chartData} margin={{top:14,right:8,left:-14,bottom:6}} barCategoryGap="22%"
-            onClick={(st)=>{ const mk = st && st.activePayload && st.activePayload[0] && st.activePayload[0].payload && st.activePayload[0].payload.monthKey; if (mk) setMonth(mk); }}
+            onClick={(st)=>{ const mk = st && st.activePayload && st.activePayload[0] && st.activePayload[0].payload && st.activePayload[0].payload.monthKey; if (mk) goMonth(mk); }}
             style={{cursor:"pointer"}}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2f7"/>
             <XAxis dataKey="label" tick={<MonthAxisTick selectedLabel={selectedLabel}/>} height={34} axisLine={false} tickLine={false} interval={0}/>
@@ -4552,7 +4475,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             const add = monthTotalLive(m);
             const exists = months.includes(m); // เดือนที่มีจริง (ไม่ใช่ default เปล่า) ถึงลบได้
             return (
-              <div key={m} onClick={()=>setMonth(m)} ref={active?activeChipRef:null}
+              <div key={m} onClick={()=>goMonth(m)} ref={active?activeChipRef:null}
                 style={{position:"relative",flexShrink:0,textAlign:"left",padding:"10px 28px 10px 16px",borderRadius:12,border:`1.5px solid ${active?T.blue:T.cardBorder}`,
                   background:active?T.blue:T.card,cursor:"pointer",minWidth:140,transition:"all 0.15s"}}>
                 <div style={{fontSize:15,fontWeight:750,color:active?"#fff":T.textPrimary,marginBottom:3,letterSpacing:0.2}}>{monthShortLabel(m)}</div>
@@ -5017,7 +4940,16 @@ const fmtMoneyInput = (v) => {
 function MoneyInput({ value, onChange, placeholder = "0", disabled, className = "input-base", style, onPaste }) {
   const [focused, setFocused] = useState(false);
   const [text, setText] = useState("");
-  const commit = () => { onChange(evalMoney(text)); setFocused(false); };
+  const focusedRef = useRef(false);
+  // บันทึกเฉพาะเมื่อค่าเปลี่ยนจริง (แค่คลิก/tab ผ่านช่องไม่ต้องเขียนเซิร์ฟเวอร์) และกัน Enter+blur ยิงซ้ำ
+  const commit = () => {
+    if (!focusedRef.current) return;
+    focusedRef.current = false;
+    setFocused(false);
+    const v = evalMoney(text);
+    const cur = (value === "" || value == null) ? "" : String(parseFloat(value));
+    if (v !== cur) onChange(v);
+  };
   return (
     <input
       type="text"
@@ -5027,7 +4959,7 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
       placeholder={placeholder}
       style={{ textAlign: "right", fontFamily: "'JetBrains Mono',monospace", ...(style || {}) }}
       value={focused ? text : fmtMoneyInput(value)}
-      onFocus={() => { setFocused(true); setText(value != null && value !== "" ? String(value) : ""); }}
+      onFocus={() => { focusedRef.current = true; setFocused(true); setText(value != null && value !== "" ? String(value) : ""); }}
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setText(e.target.value.replace(/[^0-9.+\-,\s]/g, ""))}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); e.currentTarget.blur(); } }}
@@ -5035,9 +4967,14 @@ function MoneyInput({ value, onChange, placeholder = "0", disabled, className = 
       onPaste={(e) => {
         // Excel-style block paste: if the clipboard holds a grid (tabs / newlines),
         // let the parent distribute it across many cells instead of pasting into one.
-        if (!onPaste) return;
         const raw = e.clipboardData?.getData("text") ?? "";
-        if (/[\t\n\r]/.test(raw.replace(/\s+$/, ""))) {
+        const isGrid = /[\t\n\r]/.test(raw.replace(/\s+$/, ""));
+        if (!onPaste) {
+          // ช่องที่วางทั้งบล็อกไม่ได้: ใช้แค่ค่าแรก (กันตัวเลขหลายช่องต่อกันเป็นเลขเดียว เช่น 1,000⏎2,000 → 10,002,000)
+          if (isGrid) { e.preventDefault(); setText(raw.split(/[\t\n\r]/)[0].replace(/[^0-9.+\-,\s]/g, "")); }
+          return;
+        }
+        if (isGrid) {
           e.preventDefault();
           e.currentTarget.blur();
           onPaste(raw);
@@ -5057,19 +4994,36 @@ function AccountPicker({ value, onChange, options }) {
   useLang();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
+  const [hi, setHi] = useState(0);            // แถวที่ไฮไลต์ (เลือกด้วยคีย์บอร์ด)
   const ref = useRef(null);
-  const sel = options.find(a => a.code === value);
+  const listRef = useRef(null);
+  const btnRef = useRef(null);
+  // รหัสที่เลือกไว้แต่ไม่อยู่ในรายการ (เช่นถูกซ่อน) ยังแสดงชื่อได้
+  const sel = options.find(a => a.code === value) || (value ? { code: value, name: ACCOUNTS.find(a => a.code === value)?.name || "" } : null);
   const ql = q.trim().toLowerCase();
   const list = ql ? options.filter(a => (`${a.code} ${a.name}`).toLowerCase().includes(ql)) : options;
+  useEffect(() => { setHi(0); }, [q, open]);
   useEffect(() => {
     if (!open) return;
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, [open]);
+  useEffect(() => { listRef.current?.querySelector(`[data-i="${hi}"]`)?.scrollIntoView({ block: "nearest" }); }, [hi]);
+  const pick = (code) => { onChange(code); setOpen(false); btnRef.current?.focus(); };
+  // ↑↓ เลื่อน · Enter เลือก · Esc ปิดเฉพาะรายการ (ไม่ให้ไปปิดฟอร์ม PO ทั้งฟอร์ม) · Tab ปิด
+  const onSearchKey = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi(h => Math.min(h + 1, Math.max(list.length - 1, 0))); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHi(h => Math.max(h - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); if (list[hi]) pick(list[hi].code); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setOpen(false); btnRef.current?.focus(); }
+    else if (e.key === "Tab") setOpen(false);
+  };
   return (
     <div ref={ref} style={{position:"relative"}}>
-      <button type="button" onClick={()=>{ setOpen(o=>!o); setQ(""); }}
+      <button type="button" ref={btnRef} onClick={()=>{ setOpen(o=>!o); setQ(""); }}
+        onKeyDown={e=>{ if (e.key==="ArrowDown" && !open) { e.preventDefault(); setOpen(true); setQ(""); } }}
+        aria-haspopup="listbox" aria-expanded={open}
         className="input-base" style={{width:"100%",textAlign:"left",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:6}}>
         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color: sel?T.textPrimary:T.textMuted}}>
           {sel ? `${sel.code} · ${sel.name}` : t("— เลือก Account Code —","— Select Account Code —")}
@@ -5079,21 +5033,22 @@ function AccountPicker({ value, onChange, options }) {
       {open && (
         <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:80,background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,boxShadow:"0 14px 34px rgba(15,23,42,0.2)",overflow:"hidden"}}>
           <div style={{padding:8,borderBottom:`1px solid ${T.cardBorder}`}}>
-            <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder={t("🔍 พิมพ์ค้นหา รหัส / ชื่อบัญชี","🔍 Type to search code / name")}
+            <input autoFocus value={q} onChange={e=>setQ(e.target.value)} onKeyDown={onSearchKey} placeholder={t("🔍 พิมพ์ค้นหา รหัส / ชื่อบัญชี · ↑↓ Enter","🔍 Type to search code / name · ↑↓ Enter")}
               className="input-base" style={{width:"100%",fontSize:13}} />
           </div>
-          <div className="mscroll" style={{maxHeight:260,overflowY:"auto"}}>
+          <div ref={listRef} role="listbox" className="mscroll" style={{maxHeight:260,overflowY:"auto"}}>
             {value && (
               <div onClick={()=>{ onChange(""); setOpen(false); }} style={{padding:"8px 12px",cursor:"pointer",fontSize:12,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>
                 {t("— ล้างการเลือก —","— Clear selection —")}
               </div>
             )}
             {list.length===0 && <div style={{padding:12,fontSize:12,color:T.textMuted}}>{t("ไม่พบรหัสที่ค้นหา","No matching code")}</div>}
-            {list.map(a => (
-              <div key={a.code} onClick={()=>{ onChange(a.code); setOpen(false); }}
-                style={{padding:"8px 12px",cursor:"pointer",fontSize:13,display:"flex",gap:8,alignItems:"baseline",background:a.code===value?T.blueLight:"transparent"}}
-                onMouseEnter={e=>e.currentTarget.style.background = a.code===value?T.blueLight:T.bg}
-                onMouseLeave={e=>e.currentTarget.style.background = a.code===value?T.blueLight:"transparent"}>
+            {list.map((a, i) => (
+              <div key={a.code} data-i={i} role="option" aria-selected={a.code===value} onClick={()=>pick(a.code)}
+                onMouseEnter={()=>setHi(i)}
+                style={{padding:"8px 12px",cursor:"pointer",fontSize:13,display:"flex",gap:8,alignItems:"baseline",
+                  background: i===hi ? T.bg : (a.code===value ? T.blueLight : "transparent"),
+                  boxShadow: i===hi ? `inset 3px 0 0 ${T.blue}` : "none"}}>
                 <span style={{fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:600,flexShrink:0}}>{a.code}</span>
                 <span style={{color:T.textSecondary,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.name}</span>
               </div>
@@ -5135,8 +5090,20 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   });
 
   // Record actual received / split remaining into a new round, then persist.
-  const setItemRounds = (itemId, rounds) =>
-    onChangePO?.({ ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) });
+  // PO ที่ปิดแล้ว (รับครบ+จ่ายครบ) แก้งวด/ยอด/วันรับได้เฉพาะ Admin — กันการ "ปลดล็อกตัวเอง"
+  // ด้วยการล้างวันรับจริง แล้วค่อยลบ/แก้ PO ได้ และทุกการแก้งวดบันทึกลงประวัติ PO
+  const setItemRounds = (itemId, rounds) => {
+    if (locked) { setCapWarn(t("🔒 PO นี้รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันรับได้เฉพาะ Admin","🔒 This PO is fully received & paid — only Admin can change amounts/dates")); return; }
+    const code = po.items.find(it => it.id===itemId)?.code || "";
+    const next = { ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) };
+    const msg  = t(`แก้งวดของเข้า ${code}`, `Edited delivery rounds ${code}`);
+    // แก้ต่อเนื่องหลายช่องภายใน 2 นาที (คนเดิม รายการเดิม) = รวมเป็นรายการประวัติเดียว ไม่ให้ประวัติรก
+    const last = (po.history||[])[0];
+    const recent = last && last.message===msg && last.user===(session?.name||"—") && (Date.now()-new Date(last.at).getTime()) < 120000;
+    onChangePO?.(recent
+      ? { ...next, history: [{ ...last, at: new Date().toISOString() }, ...(po.history||[]).slice(1)] }
+      : withHistory(next, historyEntry(session, "edited", msg)));
+  };
   // ลงยอดของเข้าจริง — ห้ามให้ยอดรวมทุกงวดเกิน "ยอดสั่ง" ของ PO นั้น (บล็อก+เตือน)
   const setActualAmount = (itemId, roundId, val) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
@@ -5165,6 +5132,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   const removeRound = (itemId, roundId) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
     if ((it.rounds||[]).length <= 1) return;
+    if (locked) { setItemRounds(itemId, it.rounds); return; } // แสดงคำเตือน 🔒 โดยไม่ถามยืนยันก่อน
     if (!confirm(t("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)","Delete this round? (its entered amount/date will be removed)"))) return;
     setItemRounds(itemId, it.rounds.filter(r => r.id !== roundId));
   };
@@ -5271,12 +5239,12 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>{t("ยอดของเข้าจริง (บาท)","Actual received (THB)")}</span>
-                          <MoneyInput value={r.actualAmount} placeholder={t("บาท","THB")}
+                          <MoneyInput value={r.actualAmount} placeholder={t("บาท","THB")} disabled={locked}
                             onChange={v=>setActualAmount(it.id,r.id,v)}/>
                         </label>
                         <label style={{display:"flex",flexDirection:"column",gap:3}}>
                           <span style={{fontSize:10,color:T.textSecondary}}>{t("วันของเข้าจริง","Actual date")}</span>
-                          <input type="date" value={r.actualDate}
+                          <input type="date" value={r.actualDate} disabled={locked}
                             onChange={e=>updateRound(it.id,r.id,"actualDate",e.target.value)} className="input-base"/>
                         </label>
                       </div>
@@ -5442,7 +5410,6 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const codes = Object.keys(cellMap).sort();
   const cellOf = (code, mk) => cellMap[code]?.[mk] || null;
   const cellTot = (c) => c ? (c.rec + c.po + c.plan) : 0;
-  const realTot = (code) => months.reduce((s, mk) => { const c = cellOf(code, mk); return s + (c ? c.rec + c.po : 0); }, 0); // "มีจริง" = รับแล้ว + PO
   const rowTot = (code) => months.reduce((s, mk) => s + cellTot(cellOf(code, mk)), 0);
   const colTot = (mk) => shownCodes.reduce((s, c) => s + cellTot(cellOf(c, mk)), 0);
 
@@ -5637,7 +5604,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const blankItem = () => ({ id:uid(), code:"", takeoff:"", store:"", amount:"",
     rounds:[{ id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }] });
   const emptyForm = () => ({
-    date:new Date().toISOString().slice(0,10), status:"PO Issued",
+    date:todayStr(), status:"PO Issued",
     supplier:{ name:"", poNumber:"" },
     paymentType:"", creditDays:DEFAULT_CREDIT_DAYS, notes:"",
     items:[ blankItem() ], isPlan:false,
@@ -5716,16 +5683,37 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
     // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
     if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert(t("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก","PO value cannot be negative — please fix before saving")); return; }
-    const validItems = form.items.filter(it=>it.code && it.amount).map(it=>({
-      id: it.id || uid(), code: it.code, takeoff: it.takeoff || "", store: it.store || "", amount: it.amount,
-      rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]).map((r,idx)=>({
+    // บรรทัดที่กรอกไม่ครบ — เดิมถูกทิ้งเงียบ ๆ ตอนบันทึก (ถ้ามีบรรทัดอื่นที่ครบ) ตอนนี้แจ้งก่อน
+    const amtOf = (it) => parseFloat(it.amount) || 0;
+    const lineNo = (it) => form.items.indexOf(it) + 1;
+    const noAmt  = form.items.filter(it => it.code && !(amtOf(it) > 0));
+    const noCode = form.items.filter(it => !it.code && amtOf(it) > 0);
+    if (noAmt.length || noCode.length) {
+      const msg = [
+        ...noAmt.map(it => t(`บรรทัดที่ ${lineNo(it)} (${it.code}): ยังไม่กรอกมูลค่า หรือมูลค่าเป็น 0`, `Line ${lineNo(it)} (${it.code}): no value, or value is 0`)),
+        ...noCode.map(it => t(`บรรทัดที่ ${lineNo(it)}: กรอกมูลค่าแล้วแต่ยังไม่เลือก Account Code`, `Line ${lineNo(it)}: has a value but no Account Code`)),
+      ].join("\n");
+      alert(t("กรอกรายการไม่ครบ — แก้ไขหรือลบบรรทัดนั้นก่อนบันทึก:\n\n","Some lines are incomplete — fix or remove them before saving:\n\n") + msg);
+      return;
+    }
+    // Acc. Code ซ้ำในใบเดียวกัน — ถามก่อน (ปกติควรรวมเป็นบรรทัดเดียว แล้วแบ่งงวดของเข้าแทน)
+    const codes = form.items.filter(it => it.code).map(it => it.code);
+    const dups = [...new Set(codes.filter((c, i) => codes.indexOf(c) !== i))];
+    if (dups.length && !window.confirm(t(`Acc. Code ซ้ำในใบเดียวกัน: ${dups.join(", ")}\nปกติควรรวมเป็นบรรทัดเดียว — ยืนยันบันทึกแบบนี้?`, `Duplicate Acc. Code in this PO: ${dups.join(", ")}\nUsually these should be one line — save anyway?`))) return;
+    const validItems = form.items.filter(it=>it.code && amtOf(it) > 0).map(it=>{
+      const rs = (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]);
+      return {
+      id: it.id || uid(), code: it.code, takeoff: it.takeoff || "", store: it.store || "", pct: it.pct ?? "", amount: it.amount,
+      rounds: rs.map((r,idx)=>({
         id: r.id || uid(),
         planDate: r.planDate || "",
-        planAmount: idx===0 ? (r.planAmount || it.amount) : (r.planAmount || ""),
+        // มีงวดเดียว = ยอดแผนเท่ากับมูลค่า PO เสมอ (เดิมแก้มูลค่าแล้วยอดแผนค้างค่าเก่า → ตารางของเข้าโชว์ยอดผิด)
+        planAmount: idx===0 ? (rs.length === 1 ? it.amount : (r.planAmount || it.amount)) : (r.planAmount || ""),
         actualAmount: r.actualAmount || "",
         actualDate: r.actualDate || "",
       })),
-    }));
+      };
+    });
     if (!validItems.length) { alert(t("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ","Please select an Account Code and enter at least one value")); return; }
     // กันยอดของเข้าจริงรวมทุกงวดเกินยอดสั่งของแต่ละรายการ (แจ้งเตือน + บันทึกไม่ได้)
     const overItem = validItems.find(it => {
@@ -5770,7 +5758,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // Persist an in-place update to a PO's items/rounds (used by the detail view
   // when recording actual goods received or splitting a round). Migrates the
   // record to the new shape on first touch so it's normalised going forward.
-  const updatePO = (updated) => savePO(poEntries.map(x=>x.id===updated.id?updated:x));
+  const updatePO = (updated) => {
+    // เช็คสิทธิ์กับ "PO ที่บันทึกอยู่จริง" (ไม่ใช่ค่าที่กำลังจะแก้) — PO ที่ปิดแล้วแก้ได้เฉพาะ Admin
+    const stored = poEntries.find(x=>x.id===updated.id);
+    if (stored && !canEditPO(stored, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
+    savePO(poEntries.map(x=>x.id===updated.id?updated:x));
+  };
 
   // One-click status change — used by the StatusPicker wherever a PO is
   // listed, so procurement doesn't need to open the full edit form just to
@@ -5804,7 +5797,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       supplier: { name: P.supplier.name || "", poNumber: P.supplier.poNumber || "" },
       paymentType: P.paymentType || "", creditDays: P.creditDays || DEFAULT_CREDIT_DAYS,
       items: P.items.map(it=>({
-        id: it.id || uid(), code: it.code || "", takeoff: it.takeoff || "", store: it.store || "", amount: it.amount || "",
+        id: it.id || uid(), code: it.code || "", takeoff: it.takeoff || "", store: it.store || "", pct: it.pct ?? "", amount: it.amount || "",
         rounds: (it.rounds && it.rounds.length ? it.rounds : [{id:uid(),planDate:"",planAmount:"",actualAmount:"",actualDate:""}])
           .map(r=>({ id:r.id||uid(), planDate:r.planDate||"", planAmount:r.planAmount||"", actualAmount:r.actualAmount||"", actualDate:r.actualDate||"" })),
       })), isPlan:false,
@@ -5827,14 +5820,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     setEditId(p.id); setEditingPlan(true); setDetailId(null); setView("add");
   };
   const openNewPO   = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:false }); setDetailId(null); setView("add"); };
-  const openNewPlan = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:true }); setDetailId(null); setView("add"); };
   const openEditPlan = (pl) => loadIntoForm(pl, true);   // แก้แผน (ติ๊กแผนอยู่)
   const startConvert = (pl) => loadIntoForm(pl, false);  // แปลงแผน → PO (เอาติ๊กออกให้แล้ว กดบันทึกก็เป็น PO)
   const deletePlan = (id) => {
     const pl = (plans||[]).find(p=>p.id===id);
     const d = pl ? (poRounds(pl).map(r=>r.planDate).filter(Boolean).sort()[0] || pl.date || "") : "";
-    const info = pl ? `${d||"(ไม่มีวัน)"}${pl.supplier?.name?` · ${pl.supplier.name}`:""} · ฿${fmt0(poItems(pl).reduce((s,it)=>s+(parseFloat(it.amount)||0),0))}` : "";
-    if (window.confirm(t(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`,`Delete this incoming plan?${info?`\n\n${info}`:""}\n\n(deletes the "plan" only — real PO unaffected)`))) saveIncomingPlan(plans.filter(pl=>pl.id!==id));
+    const info = pl ? `${d||t("(ไม่มีวัน)","(no date)")}${pl.supplier?.name?` · ${pl.supplier.name}`:""} · ฿${fmt0(poItems(pl).reduce((s,it)=>s+(parseFloat(it.amount)||0),0))}` : "";
+    if (window.confirm(t(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`,`Delete this incoming plan?${info?`\n\n${info}`:""}\n\n(deletes the "plan" only — real PO unaffected)`))) { saveIncomingPlan(plans.filter(pl=>pl.id!==id)); return true; }
+    return false;   // กดยกเลิก — ให้ผู้เรียกรู้ (ไม่ปิดฟอร์มทิ้ง)
   };
   const deletePO = (id, confirmed=false) => {
     const po = poEntries.find(x=>x.id===id);
@@ -5857,7 +5850,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // กด Esc ระหว่างเปิดฟอร์มเพิ่ม/แก้ PO = ยกเลิก (ปิดฟอร์มโดยไม่บันทึก)
   useEffect(() => {
     if (view !== "add") return;
-    const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); closeForm(); } };
+    const onEsc = (e) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); closeForm(); } };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
   }, [view]);
@@ -5989,9 +5982,6 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   const budget = budgetForCode(it.code);
                   const net = itemNet(it);
                   const amt = parseFloat(it.amount)||0;
-                  const pct = net>0 ? Math.round(amt/net*100) : 0;
-                  const prevOrdered = poEntries.reduce((s,p)=> p.id===editId ? s : s + poAmountForCode(p, it.code), 0);
-                  const cumPct = net>0 ? Math.round((prevOrdered+amt)/net*100) : 0;
                   return (
                   <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
                     <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:12}}>
@@ -6082,7 +6072,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               <button onClick={submit} className="btn-primary" style={{background:T.amber,color:"#fff"}}>{editingPlan && !form.isPlan ? t("แปลงเป็น PO จริง","Convert to real PO") : form.isPlan ? t("บันทึกแผน","Save plan") : (editId?t("บันทึก","Save"):t("เพิ่ม PO","Add PO"))}</button>
               <button onClick={closeForm} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
               {editId && (
-                <button onClick={()=>{ if (editingPlan) { deletePlan(editId); closeForm(); } else deletePO(editId); }}
+                <button onClick={()=>{ if (editingPlan) { if (deletePlan(editId)) closeForm(); } else deletePO(editId); }}
                   style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,color:T.red,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
                   🗑 {editingPlan ? t("ลบแผนนี้","Delete this plan") : t("ลบ PO นี้","Delete this PO")}
                 </button>
@@ -6228,7 +6218,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </>
         )}
       </div>
-      <PODetailModal po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
+      <PODetailModal key={detailPO?.id || "none"} po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
     </Shell>
   );
 }
@@ -6262,14 +6252,6 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
     return next;
   });
 
-  const counts = poEntries.reduce((acc,p) => {
-    const inc = incomingStatus(p), pay = paymentStatus(p);
-    if (inc==="pending") acc.incPending++;
-    if (inc==="late")    acc.incLate++;
-    if (pay==="pending") acc.payPending++;
-    if (pay==="paid")    acc.payPaid++;
-    return acc;
-  }, { incPending:0, incLate:0, payPending:0, payPaid:0 });
 
   const q = search.toLowerCase();
   const passesFilter = (p) => {
@@ -6604,7 +6586,6 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 //  Incoming/Received (รับจริง=ดำ, ยังเป็นแผน=แดง) และ Payment Plan — แล้วปิดท้าย
 //  ด้วยสรุป PO: Total PO (ยอดผูกพัน) และ PO Balance (Total PO − รับจริง).
 //  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
-const MATRIX_EN_MONTH = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [], usdRate = 0 }) {
   const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries));
   const combined = buildCombinedBudget(tenderCosts, additions);
@@ -6829,24 +6810,6 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const backView = () => { if (viewHist.length) { const h = [...viewHist]; const prev = h.pop(); setViewHist(h); setView(prev); } else onBack(); };
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
-  // ค้นหา + ตัวกรอง "เฉพาะที่มี PO" บนแท็บ Cash Flow
-  const [dateSearch, setDateSearch] = useState("");
-  const [planSearch, setPlanSearch] = useState("");   // ค้นหาในหน้าแผนจ่ายรายเดือน
-  const [onlyWithPO, setOnlyWithPO] = useState(false);
-  // Which Acc. Code groups are collapsed on the "วันที่ (Cash Flow)" tab.
-  const [dateCollapsed, setDateCollapsed] = useState(() => new Set());
-  const toggleDateGroup = (code) => setDateCollapsed(prev => {
-    const next = new Set(prev);
-    next.has(code) ? next.delete(code) : next.add(code);
-    return next;
-  });
-  // Which months are collapsed on the "แผนจ่าย" (payment plan) tab.
-  const [planCollapsed, setPlanCollapsed] = useState(() => new Set());
-  const togglePlanMonth = (mk) => setPlanCollapsed(prev => {
-    const next = new Set(prev);
-    next.has(mk) ? next.delete(mk) : next.add(mk);
-    return next;
-  });
 
   // Budget = baseline Tender Cost + every monthly addition (ค่าธรรมดา + คอลัมน์
   // ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตัวเลขตรงกัน
@@ -6900,40 +6863,6 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   }).filter(a=>a.budget>0||a.pos.length>0);
   const pctUsedOf = (a) => a.budget>0 ? (a.committed/a.budget*100) : (a.committed>0 ? 999 : 0);
 
-  // ─── Cash-flow-by-date view ──────────────────────────────────────────────
-  // For each Acc. Code: budget vs. committed (+ variance / variance %), plus
-  // every PO booked to it with its three key dates — when the PO was opened,
-  // when goods are due in (plan → actual per delivery batch), and when
-  // payment is due — so accounting can see cash timing at a glance.
-  const dateGroups = accountData.map(a => {
-    const rows = poEntries
-      .filter(p => poItems(p).some(it => it.code === a.code))
-      .map(p => ({ po: p, item: poItems(p).find(it => it.code === a.code) }))
-      .sort((x, y) => (x.po.date || "").localeCompare(y.po.date || ""));
-    const variance = a.budget - a.committed;
-    const variancePct = a.budget > 0 ? (variance / a.budget) * 100 : (a.committed > 0 ? null : 0);
-    // จ่ายแล้ว (สถานะ Paid = จ่ายทันที, หรือถึงกำหนดจ่าย) และยอดที่ยังต้องเก็บเงินไว้รอจ่าย
-    // ของ Acc. Code นี้ — ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงทั้งแอปและ Excel
-    const paid = poEntries.reduce((s,p)=> s + poItems(p).filter(it=>it.code===a.code)
-      .reduce((ss,it)=> ss + (it.rounds||[]).filter(r=>roundPaid(p,r))
-        .reduce((s3,r)=> s3 + (parseFloat(r.actualAmount)||0), 0), 0), 0);
-    const toReserve = Math.max(a.committed - paid, 0);
-    return { ...a, rows, variance, variancePct, paid, toReserve };
-  }).sort((x, y) => x.code.localeCompare(y.code));
-  // ตัวกรองแท็บ Cash Flow: ค้นหา (วันที่/Acc.Code/ชื่อรายการ/เลข PO) + เฉพาะที่มี PO
-  const dq = dateSearch.trim().toLowerCase();
-  const shownDateGroups = dateGroups.filter(a => {
-    if (onlyWithPO && a.rows.length === 0) return false;
-    if (!dq) return true;
-    if (a.code.toLowerCase().includes(dq) || (a.name||"").toLowerCase().includes(dq)) return true;
-    return a.rows.some(({po}) =>
-      (poNumbersLabel(po)||"").toLowerCase().includes(dq) ||
-      (po.date||"").includes(dq) ||
-      (poNextDueDate(po)||"").includes(dq) ||
-      poRounds(po).some(r => (r.actualDate||"").includes(dq) || (r.planDate||"").includes(dq))
-    );
-  });
-  const withPOCount = dateGroups.filter(a => a.rows.length > 0).length;
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => -d);
     else { setSortKey(key); setSortDir(1); }
@@ -6970,18 +6899,6 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
     const paidA  = lines.reduce((s,l)=>s+(l.paidAmount||0),0); // รวมยอดจ่ายจริง (รองรับจ่ายบางส่วน)
     return { mk, label: mk==="9999-99"?t("ยังไม่ระบุวันจ่าย","No pay date"):monthShortLabel(mk), lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
   });
-  // ค้นหาในหน้าแผนจ่าย: กรองงวดตาม Supplier/PO No./Acc/วิธีจ่าย/วันครบกำหนด แล้วคิดยอดใหม่ต่อเดือน
-  const pq = planSearch.trim().toLowerCase();
-  const shownPayByMonth = (!pq ? payByMonth : payByMonth.map(m => {
-    const lines = m.lines.filter(l => [l.supplier,l.poNo,l.code,l.accName,l.payDate,l.method,PAYMENT_LABEL[l.status]].join(" ").toLowerCase().includes(pq));
-    if (!lines.length) return null;
-    const cash=lines.filter(l=>l.isCash).reduce((s,l)=>s+l.amount,0), credit=lines.filter(l=>!l.isCash).reduce((s,l)=>s+l.amount,0);
-    const sum=cash+credit, paidA=lines.reduce((s,l)=>s+(l.paidAmount||0),0);
-    return { ...m, lines, cash, credit, sum, paid:paidA, remain:Math.max(0,sum-paidA) };
-  }).filter(Boolean));
-  const planTotal  = payLines.reduce((s,l)=>s+l.amount,0);
-  const planPaid   = payLines.reduce((s,l)=>s+(l.paidAmount||0),0);
-  const planRemain = Math.max(0, planTotal - planPaid);
   const thisMonthKey = payToday.slice(0,7);
   // "ครบกำหนดเดือนนี้" = คงเหลือของเดือนนี้ + ยอดที่เลยกำหนดจากเดือนก่อน ๆ ที่ยังไม่จ่าย
   const dueThisMonth = payByMonth.filter(m=>m.mk!=="9999-99" && m.mk<=thisMonthKey).reduce((s,m)=>s+m.remain,0);
@@ -6989,9 +6906,6 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const nextMonthKey = (() => { const [y,m]=thisMonthKey.split("-").map(Number); const ny=m===12?y+1:y, nm=m===12?1:m+1; return `${ny}-${String(nm).padStart(2,"0")}`; })();
   const nextBucket   = payByMonth.find(m=>m.mk===nextMonthKey);
   const dueNextMonth = nextBucket?.remain || 0;
-  const nextCash     = nextBucket?.cash || 0;
-  const nextCredit   = nextBucket?.credit || 0;
-  const nextCount    = nextBucket?.lines.length || 0;
 
   const pieData = PO_STATUS.map(s=>({name:s,value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+poTotal(p),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
 
@@ -7005,35 +6919,6 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
     );
   };
 
-  const DateCell = ({ value, lateTint }) => (
-    <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:value?(lateTint?T.red:T.textPrimary):T.textMuted,fontWeight:value&&lateTint?650:450}}>
-      {value || "—"}
-    </span>
-  );
-  const Badge = ({ text, clr, bg }) => (
-    <span style={{background:bg,color:clr,fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{text}</span>
-  );
-  // Every delivery batch of a PO, one line per shipment: plan → actual date
-  // with its own on-time/late/received status, same as Procurement's view.
-  const DeliveryDates = ({ po }) => {
-    const deliveries = poDeliveries(po);
-    if (!deliveries.length) return <span style={{fontSize:12,color:T.textMuted}}>—</span>;
-    return (
-      <div style={{display:"flex",flexDirection:"column",gap:3}}>
-        {deliveries.map((d,i)=>{
-          const st = deliveryStatus(d);
-          return (
-            <div key={d.id||i} style={{display:"flex",alignItems:"center",gap:5}}>
-              {deliveries.length>1 && <span style={{fontSize:10,color:T.textMuted,fontWeight:650,minWidth:14}}>#{i+1}</span>}
-              <DateCell value={d.plan} lateTint={st==="late"}/>
-              <span style={{color:T.textMuted,fontSize:11}}>→</span>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:st==="received"?T.green:T.textMuted,fontWeight:st==="received"?600:450}}>{d.actual||t("รอ","Pending")}</span>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
 
   return (
     <Shell role="accounting" color={T.green} project={project} onBack={backView} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
@@ -7212,240 +7097,9 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
             </table></div>
             </div>
           </>
-        ) : view==="dates" ? (
-          <div>
-            {/* Grand totals across every Acc. Code that has a budget or a PO */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-              <StatCard label={t("งบประมาณรวม","Total budget")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.budget,0))} thb={dateGroups.reduce((s,a)=>s+a.budget,0)} rate={usdRate} sub={`${dateGroups.length} Acc. Code`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label={t("PO รวม","Total PO")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.committed,0))} thb={dateGroups.reduce((s,a)=>s+a.committed,0)} rate={usdRate} sub={`${poEntries.length} PO`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label={t("ส่วนต่างรวม","Total variance")} value={"฿"+fmt0(Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0)))} thb={Math.abs(dateGroups.reduce((s,a)=>s+a.variance,0))} rate={usdRate}
-                sub={dateGroups.reduce((s,a)=>s+a.variance,0)<0?t("เกินงบ","Over"):t("คงเหลือ","Remaining")}
-                color={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.red:T.green}
-                icon={dateGroups.reduce((s,a)=>s+a.variance,0)<0?"⚠️":"💰"}
-                accent={dateGroups.reduce((s,a)=>s+a.variance,0)<0?T.redBg:T.greenBg}/>
-              <StatCard label={t("ต้องเก็บไว้จ่ายรวม","Total to reserve")} value={"฿"+fmt0(dateGroups.reduce((s,a)=>s+a.toReserve,0))} thb={dateGroups.reduce((s,a)=>s+a.toReserve,0)} rate={usdRate}
-                sub={`${poEntries.filter(p=>paymentStatus(p)==="pending"||paymentStatus(p)==="late").length} ${t("PO รอจ่าย","PO awaiting pay")}`} color={T.red} icon="⏳" accent={T.redBg}/>
-            </div>
-
-            {/* ค้นหา + ตัวกรอง */}
-            <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
-              <input value={dateSearch} onChange={e=>setDateSearch(e.target.value)}
-                placeholder={t("🔍 ค้นหา: วันที่ / Acc. Code / ชื่อรายการ / เลข PO","🔍 Search: date / Acc. Code / name / PO no.")}
-                style={{flex:1,minWidth:240,maxWidth:420,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
-              <button onClick={()=>setOnlyWithPO(v=>!v)} title={t("แสดงเฉพาะ Acc. Code ที่มี PO","Show only Acc. Codes with PO")}
-                style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",
-                  border:`1.5px solid ${onlyWithPO?T.green:T.cardBorder}`,background:onlyWithPO?T.green:"transparent",color:onlyWithPO?"#fff":T.textSecondary}}>
-                <span style={{fontSize:14}}>{onlyWithPO?"☑":"☐"}</span> {t("เฉพาะที่มี PO","With PO only")} ({withPOCount})
-              </button>
-              <span style={{fontSize:12,color:T.textMuted}}>{t("แสดง","Showing")} {shownDateGroups.length} / {dateGroups.length} {t("หมวด","categories")}</span>
-            </div>
-
-            {dateGroups.length===0 ? (
-              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
-                <div style={{fontSize:32,marginBottom:12}}>📅</div>
-                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>{t("ยังไม่มีงบหรือ PO ให้แสดง","No budget or PO to show")}</div>
-              </div>
-            ) : shownDateGroups.length===0 ? (
-              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>
-                {t("ไม่พบหมวดที่ตรงกับเงื่อนไข","No matching categories")} {dateSearch.trim() && <>"{dateSearch}"</>} {onlyWithPO && ("· "+t("(กรองเฉพาะที่มี PO)","(with PO only)"))}
-              </div>
-            ) : (
-              <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                {shownDateGroups.map(a => {
-                  const isCollapsed = dateCollapsed.has(a.code);
-                  // แถบ = ความคืบหน้าการจ่ายของ PO ที่ผูกพันแล้ว (จ่ายแล้ว vs ต้องเก็บไว้จ่าย)
-                  const paidPct   = a.committed>0 ? (a.paid/a.committed*100) : 0;
-                  const barPct    = a.committed>0 ? Math.min(paidPct,100) : 0;
-                  const statusClr = a.over?T.red:a.committed>0?T.green:T.textMuted;
-                  const statusBg  = a.over?T.redBg:a.committed>0?T.greenBg:"#eef1f5";
-                  const statusTxt = a.over?t("⚠ เกินงบ","⚠ Over"):a.committed>0?"✅ OK":a.budget>0?t("ยังไม่ PO","No PO"):"—";
-                  const varClr    = a.variancePct===null ? T.textMuted : a.variance<0 ? T.red : T.green;
-                  return (
-                    <div key={a.code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderLeft:`4px solid ${statusClr}`,borderRadius:14,overflow:"hidden"}}>
-                      <div onClick={()=>toggleDateGroup(a.code)}
-                        style={{padding:"14px 18px",background:a.over?"#fff8f8":"#fbfcfe",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,cursor:"pointer",userSelect:"none"}}>
-                        {/* บรรทัด 1: ชื่อ + สถานะ */}
-                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                          <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12,flexShrink:0}}>▼</span>
-                          <span style={{color:T.blue,fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,background:T.blueLight,padding:"2px 8px",borderRadius:6,flexShrink:0}}>{a.code}</span>
-                          <span style={{color:T.textPrimary,fontSize:14,fontWeight:600,flex:1,minWidth:0}}>{a.name}</span>
-                          <span style={{background:statusBg,color:statusClr,fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:650,whiteSpace:"nowrap",flexShrink:0}}>{statusTxt}</span>
-                        </div>
-                        {/* บรรทัด 2: แถบความคืบหน้าการจ่าย + ยอดที่ต้องเก็บเงินไว้รอจ่าย */}
-                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                          <div style={{flex:1,background:"#eef1f5",borderRadius:99,height:8,overflow:"hidden"}} title={`${t("จ่ายแล้ว","Paid")} ${a.committed>0?paidPct.toFixed(0):0}% ${t("ของ PO","of PO")}`}>
-                            <div style={{width:`${barPct}%`,background:T.green,height:"100%",borderRadius:99,transition:"width 0.5s"}}/>
-                          </div>
-                          <span style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:a.toReserve>0?T.amber:a.committed>0?T.green:T.textMuted,textAlign:"right",whiteSpace:"nowrap"}}>
-                            {a.committed>0 ? (a.toReserve>0 ? `${t("เก็บไว้จ่าย","Reserve")} ฿${fmt0(a.toReserve)}` : t("จ่ายครบแล้ว","Fully paid")) : t("ยังไม่มี PO","No PO yet")}
-                          </span>
-                        </div>
-                        {/* บรรทัด 3: ตัวเลขสรุป 3 ช่อง — มูลค่า PO · จ่ายแล้ว · ต้องเก็บไว้จ่าย */}
-                        <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
-                          <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("มูลค่า PO","PO value")}</div>
-                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.amber}}>{a.committed>0?fmt(a.committed):"—"}</div>
-                            {a.committed>0&&usdLine(a.committed, usdRate)}
-                          </div>
-                          <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("จ่ายแล้ว","Paid")}</div>
-                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.green}}>{a.paid>0?fmt(a.paid):"—"}</div>
-                            {a.paid>0&&usdLine(a.paid, usdRate)}
-                          </div>
-                          <div style={{minWidth:96}}>
-                            <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{t("ต้องเก็บไว้จ่าย","To reserve")}</div>
-                            <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:a.toReserve>0?T.amber:T.green}}>{a.committed>0?fmt(a.toReserve):"—"}</div>
-                            {a.committed>0&&usdLine(a.toReserve, usdRate)}
-                          </div>
-                        </div>
-                        {/* งบประมาณ / ส่วนต่าง (ข้อมูลงบ ไว้ท้ายสุด) */}
-                        <div style={{display:"flex",gap:24,flexWrap:"wrap",marginTop:8,paddingTop:8,borderTop:`1px dashed ${T.cardBorder}`}}>
-                          <div style={{fontSize:11,color:T.textMuted}}>{t("งบประมาณ","Budget")}: <b style={{color:T.blue,fontFamily:"'JetBrains Mono',monospace"}}>{a.budget>0?fmt(a.budget):"—"}</b></div>
-                          <div style={{fontSize:11,color:T.textMuted}}>{a.variance<0?t("เกินงบ","Over"):t("งบคงเหลือ","Remaining")}: <b style={{color:varClr,fontFamily:"'JetBrains Mono',monospace"}}>{a.variancePct===null ? t("ไม่มีงบ","No budget") : `${a.variance<0?"-":""}${fmt(Math.abs(a.variance))}`}</b></div>
-                        </div>
-                      </div>
-                      {!isCollapsed && (
-                        a.rows.length===0 ? (
-                          <div style={{padding:"14px 18px",fontSize:12,color:T.textMuted}}>{t("ยังไม่มี PO ผูกกับ Acc. Code นี้","No PO linked to this Acc. Code")}</div>
-                        ) : (
-                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
-                          <thead>
-                            <tr>
-                              {[["วันเปิด PO (แพลน)","PO date (plan)"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["ของเข้า (แผน→จริง)","Incoming (plan→actual)"],["ต้องจ่ายเงินวันไหน","Due date"],["สถานะจ่าย","Pay status"]].map(([h,he])=>(
-                                <th key={h} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {a.rows.map(({po:p,item},i)=>{
-                              // แยกตาม Acc. Code → คิด/แสดงเฉพาะงวดของ item นี้ ไม่ปนงวดของ code อื่นในใบเดียวกัน
-                              const pItem = { ...p, items:[item] };
-                              const pay = paymentStatus(pItem);
-                              return (
-                                <tr key={p.id+"-"+(item.id||item.code)}
-                                  style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
-                                  <td style={{padding:"9px 16px"}}><DateCell value={p.date}/></td>
-                                  <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
-                                  <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{poNumbersLabel(p)}</td>
-                                  <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(item.amount)}{usdLine(parseFloat(item.amount)||0, usdRate)}</td>
-                                  <td style={{padding:"9px 16px"}}><DeliveryDates po={pItem}/></td>
-                                  <td style={{padding:"9px 16px"}}><DateCell value={poNextDueDate(pItem)} lateTint={false}/></td>
-                                  <td style={{padding:"9px 16px"}}><Badge text={payLabel(pay)} clr={PAYMENT_CLR[pay]} bg={PAYMENT_BG[pay]}/></td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table></div>
-                        )
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
         ) : view==="matrix" ? (
           <AccountingMatrixTab tenderCosts={tenderCosts} additions={additions} poEntries={poEntries} extraItems={extraItems} hiddenAccounts={hiddenAccounts} incomingPlan={incomingPlan} usdRate={usdRate} />
-        ) : (
-          <div>
-            {/* สรุปยอดที่ต้องเตรียมจ่าย */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-              <StatCard label={t("ต้องจ่ายทั้งหมด","Total to pay")} value={"฿"+fmt0(planTotal)} thb={planTotal} rate={usdRate} sub={`${payLines.length} ${t("งวด","rounds")}`} color={T.blue} icon="📋" accent={T.blueLight}/>
-              <StatCard label={t("จ่ายแล้ว","Paid")} value={"฿"+fmt0(planPaid)} thb={planPaid} rate={usdRate} sub={t("ครบกำหนด + ตัดจ่ายแล้ว","Due + paid")} color={T.green} icon="✅" accent={T.greenBg}/>
-              <StatCard label={t("คงเหลือต้องจ่าย","Remaining to pay")} value={"฿"+fmt0(planRemain)} thb={planRemain} rate={usdRate} sub={t("ยอดที่ยังไม่จ่าย","Unpaid amount")} color={T.amber} icon="⏳" accent={T.amberBg}/>
-              <StatCard label={`${t("ครบกำหนดเดือนนี้","Due this month")} (${monthShortLabel(thisMonthKey)})`} value={"฿"+fmt0(dueThisMonth)} thb={dueThisMonth} rate={usdRate} sub={t("เตรียมเงินเดือนนี้","Prepare this month")} color={T.red} icon="💰" accent={T.redBg}/>
-              <StatCard label={`${t("ครบกำหนดเดือนหน้า","Due next month")} (${monthShortLabel(nextMonthKey)})`} value={"฿"+fmt0(dueNextMonth)} thb={dueNextMonth} rate={usdRate} sub={dueNextMonth>0?`${nextCount} ${t("งวด · เตรียมล่วงหน้า","rounds · prepare ahead")}`:t("ยังไม่มีที่ครบกำหนด","Nothing due")} color={T.amber} icon="🔔" accent={T.amberBg}/>
-            </div>
-
-            {/* ค้นหา: Supplier / PO No. / Acc. Code / วิธีจ่าย / วันครบกำหนด */}
-            {payByMonth.length>0 && (
-              <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
-                <SearchInput value={planSearch} onChange={setPlanSearch} placeholder={t("🔍 ค้นหา Supplier / PO No. / Acc. Code / วิธีจ่าย / วันจ่าย","🔍 Search Supplier / PO No. / Acc. Code / method / date")} width={340}/>
-                <span style={{fontSize:12,color:T.textMuted}}>{t("แสดง","Showing")} {shownPayByMonth.length} / {payByMonth.length} {t("เดือน","months")} · {shownPayByMonth.reduce((s,m)=>s+m.lines.length,0)} {t("งวด","rounds")}</span>
-              </div>
-            )}
-            {payByMonth.length===0 ? (
-              <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
-                <div style={{fontSize:32,marginBottom:12}}>💰</div>
-                <div style={{fontSize:14,fontWeight:500,color:T.textSecondary}}>{t("ยังไม่มีงวดจ่ายให้แสดง","No payment rounds to show")}</div>
-                <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>{t("วันครบกำหนดจ่ายมาจากวันรับของ (แผน/จริง) + เทอมเครดิตของ PO","Due date = arrival date (plan/actual) + PO credit term")}</div>
-              </div>
-            ) : shownPayByMonth.length===0 ? (
-              <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบงวดที่ตรงกับ","No rounds match")} "{planSearch}"</div>
-            ) : (
-              <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                {shownPayByMonth.map(m => {
-                  const isCollapsed = planCollapsed.has(m.mk);
-                  const isThis = m.mk===thisMonthKey;
-                  return (
-                    <div key={m.mk} style={{background:T.card,border:`1px solid ${isThis?T.amber:T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-                      <div onClick={()=>togglePlanMonth(m.mk)}
-                        style={{padding:"12px 18px",background:isThis?T.amberBg:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:16,cursor:"pointer",userSelect:"none",flexWrap:"wrap"}}>
-                        <span style={{fontSize:11,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
-                        <div style={{minWidth:150}}>
-                          <span style={{color:T.textPrimary,fontSize:14,fontWeight:650}}>{m.label}</span>
-                          {isThis && <span style={{marginLeft:8,background:T.amber,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{t("เดือนนี้","This month")}</span>}
-                          <span style={{marginLeft:8,color:T.textMuted,fontSize:12}}>{m.lines.length} {t("งวด","rounds")}</span>
-                        </div>
-                        <div style={{flex:1}}/>
-                        <div style={{textAlign:"right",minWidth:88}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เงินสด","Cash")}</div>
-                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.green}}>{m.cash>0?fmt(m.cash):"—"}</div>
-                          {m.cash>0&&usdLine(m.cash, usdRate)}
-                        </div>
-                        <div style={{textAlign:"right",minWidth:88}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("เครดิต","Credit")}</div>
-                          <div style={{fontSize:13,fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.blue}}>{m.credit>0?fmt(m.credit):"—"}</div>
-                          {m.credit>0&&usdLine(m.credit, usdRate)}
-                        </div>
-                        <div style={{textAlign:"right",minWidth:100}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("รวมต้องจ่าย","Total due")}</div>
-                          <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:T.textPrimary}}>{fmt(m.sum)}</div>
-                          {usdLine(m.sum, usdRate)}
-                        </div>
-                        <div style={{textAlign:"right",minWidth:100}}>
-                          <div style={{fontSize:9,color:T.textMuted,textTransform:"uppercase",letterSpacing:0.5}}>{t("คงเหลือ","Remaining")}</div>
-                          <div style={{fontSize:14,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,color:m.remain>0?T.amber:T.green}}>{fmt(m.remain)}</div>
-                          {usdLine(m.remain, usdRate)}
-                        </div>
-                      </div>
-                      {!isCollapsed && (
-                        <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
-                          <thead>
-                            <tr>
-                              {[["ครบกำหนดจ่าย","Due date"],["Supplier","Supplier"],["PO No.","PO No."],["Acc. Code","Acc. Code"],["วิธีจ่าย","Method"],["วันรับของ","Received"],["ยอดต้องจ่าย (THB)","Amount due (THB)"],["สถานะ","Status"]].map(([h,he])=>(
-                                <th key={h} style={{padding:"9px 16px",textAlign:h==="ยอดต้องจ่าย (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>{t(h,he)}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {m.lines.map((l,i)=>(
-                              <tr key={i} style={{background:i%2===0?T.card:"#fafbfd",borderBottom:"1px solid #f1f5f9"}}>
-                                <td style={{padding:"9px 16px"}}><DateCell value={l.payDate} lateTint={l.status==="late"}/></td>
-                                <td style={{padding:"9px 16px",color:T.textPrimary,fontWeight:500}}>{l.supplier}</td>
-                                <td style={{padding:"9px 16px",color:T.textMuted,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{l.poNo}</td>
-                                <td style={{padding:"9px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13}}>{l.code||"—"}</td>
-                                <td style={{padding:"9px 16px"}}>
-                                  <span style={{background:l.isCash?T.greenBg:T.blueLight,color:l.isCash?T.green:T.blue,fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{l.method}</span>
-                                </td>
-                                <td style={{padding:"9px 16px",whiteSpace:"nowrap"}}>
-                                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:T.textSecondary}}>{l.incoming||"—"}</span>
-                                  {l.incomingType && <span style={{marginLeft:5,fontSize:12,color:T.textMuted}}>({l.incomingType})</span>}
-                                </td>
-                                <td style={{padding:"9px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:600,color:T.textPrimary}}>{fmt(l.amount)}{usdLine(l.amount, usdRate)}</td>
-                                <td style={{padding:"9px 16px"}}><Badge text={payLabel(l.status)} clr={PAYMENT_CLR[l.status]} bg={PAYMENT_BG[l.status]}/></td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table></div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
+        ) : null}
       </div>
     </Shell>
   );
