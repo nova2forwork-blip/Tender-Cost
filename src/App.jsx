@@ -7525,14 +7525,18 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           <option value="code">{t("จัดกลุ่ม: ตาม Acc. Code","Group: by Acc. Code")}</option>
           <option value="po">{t("จัดกลุ่ม: ตาม PO","Group: by PO")}</option>
         </select>
-        <button onClick={()=>setCollapsed(new Set(allGroupKeys))}
-          style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
-          ▲ {t("ย่อทั้งหมด","Collapse all")}
-        </button>
-        <button onClick={()=>setCollapsed(new Set())}
-          style={{background:"transparent",border:`1.5px solid ${T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
-          ▼ {t("ขยายทั้งหมด","Expand all")}
-        </button>
+        {/* ปุ่มเดียวสลับ ย่อ/ขยายทั้งหมด (เดิมแยก 2 ปุ่ม) — แบบเดียวกับหน้ารายการ PO */}
+        {allGroupKeys.length>0 && (() => {
+          const allCollapsed = allGroupKeys.every(k => collapsed.has(k));
+          return (
+            <button data-toggle-all aria-expanded={!allCollapsed} onClick={()=>setCollapsed(allCollapsed ? new Set() : new Set(allGroupKeys))}
+              className="btn-ghost" style={{padding:"7px 14px",fontSize:12,display:"inline-flex",alignItems:"center",gap:6}}>
+              {allCollapsed
+                ? <><Ico name="chevrons" size={14} />{t("ขยายทั้งหมด","Expand all")}</>
+                : <><Ico name="chevrons" size={14} style={{transform:"rotate(180deg)"}} />{t("ย่อทั้งหมด","Collapse all")}</>}
+            </button>
+          );
+        })()}
         <div style={{flex:1}}/>
       </div>
 
