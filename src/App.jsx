@@ -540,6 +540,7 @@ function useLang() {
 }
 
 // ─── Global CSS ───────────────────────────────────────────────────────────────
+const FAB_SIZE = 54, FAB_GAP = 20;   // ปุ่มลอยมุมขวาล่าง (ใช้ใน CSS ด้านล่างด้วย จึงต้องประกาศก่อน)
 const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300..800&family=JetBrains+Mono:wght@400..700&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -556,7 +557,14 @@ const GLOBAL_CSS = `
   .calc-pop button:active { transform: scale(0.96); }
   .fab-btn:hover { background: #1d4ed8 !important; }
   .fab-btn:active { transform: scale(0.94) !important; }
-  @media print { .fab-btn, .calc-pop, [data-table-top] { display: none !important; } }
+  @media print { .fab-btn, .calc-pop, [data-table-top] { display: none !important; } body.has-fab { padding: 0 !important; } }
+  /* เว้นพื้นที่ให้ปุ่มลอยมุมขวาล่าง — ไม่ให้ทับตาราง: จอกว้าง = แถบว่างด้านขวา · จอแคบ = เว้นท้ายหน้า */
+  @media (min-width: 1024px) {
+    body.has-fab { padding-right: ${FAB_SIZE + FAB_GAP * 2}px; }
+    /* แถบหัวสียังยาวเต็มจอ (ยื่นเข้าไปในแถบว่าง) แต่ปุ่มในแถบหัวอยู่แนวเดียวกับเนื้อหา */
+    body.has-fab .app-header { margin-right: -${FAB_SIZE + FAB_GAP * 2}px; padding-right: ${FAB_SIZE + FAB_GAP * 2 + 30}px !important; }
+  }
+  @media (max-width: 1023.98px) { body.has-fab { padding-bottom: ${(FAB_SIZE + 12) * 2 + FAB_GAP + 8}px; } }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
   .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
   .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
@@ -1845,6 +1853,8 @@ export default function App() {
     setScreen("home"); setRole(null); setActiveId(null);
   };
 
+  // มีปุ่มลอยมุมขวาล่าง (หลังล็อกอิน) → ให้ CSS เว้นพื้นที่ไว้ ไม่ให้ปุ่มทับตาราง
+  useEffect(() => { document.body.classList.toggle("has-fab", !!session); return () => document.body.classList.remove("has-fab"); }, [session]);
   // เตือนก่อนปิด/รีเฟรช/กดปุ่มย้อนของเบราว์เซอร์ ขณะยังมีการแก้ไขที่ไม่ได้บันทึก
   useEffect(() => {
     const onBeforeUnload = (e) => { if (UnsavedGuard.dirty) { e.preventDefault(); e.returnValue = ""; } };
@@ -2835,7 +2845,7 @@ function AdminPanel({ onBack, onLogout, session }) {
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
-      <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+      <div className="app-header" style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
         <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
         <div>
           <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
@@ -3165,7 +3175,7 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
       {/* Header */}
-      <div style={{background:T.headerGrad,padding:"0 32px"}}>
+      <div className="app-header" style={{background:T.headerGrad,padding:"0 32px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px",flexWrap:"wrap",gap:12}}>
           <div>
             <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600,marginBottom:4}}>TENDER COST SYSTEM</div>
@@ -3340,7 +3350,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
-      <div style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+      <div className="app-header" style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
         <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
         <div>
           <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
@@ -3462,7 +3472,6 @@ const useCalcOpen = () => {
 };
 // ปุ่มลอยมุมขวาล่าง: เครื่องคิดเลข (ล่างสุด) + กลับไปด้านบน (อยู่เหนือ แสดงเมื่อเลื่อนลงมาแล้ว)
 // z-index ต่ำกว่าหน้าต่างป๊อปอัพ (100+) จึงไม่บังปุ่มบันทึกของฟอร์ม PO
-const FAB_SIZE = 54, FAB_GAP = 20;
 const fabStyle = (active) => ({ position:"fixed", right:FAB_GAP, width:FAB_SIZE, height:FAB_SIZE, borderRadius:16, border:"none", cursor:"pointer",
   background: active ? "#2563eb" : "#1e3a8a", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", zIndex:95,
   boxShadow:"0 10px 24px rgba(30,58,138,0.35), 0 2px 6px rgba(15,23,42,0.18)", transition:"background .15s, transform .12s, opacity .2s" });
@@ -3797,7 +3806,7 @@ function Shell({ role, color, project, onBack, onHome, onDept, children, syncedA
   };
   return (
     <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
-      <div style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+      <div className="app-header" style={{background:gradients[role],padding:"14px 28px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
         <button onClick={onBack} title={t("กลับหน้าก่อนหน้า","Go back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
         {onHome && (
           <button onClick={onHome} title={t("ไปหน้าเลือกโครงการ","Go to projects")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>🏠 {t("หน้าโครงการ","Projects")}</button>
