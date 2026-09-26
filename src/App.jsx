@@ -614,8 +614,15 @@ const GLOBAL_CSS = `
 // จึงอ่านตัวเดียว — ไม่บวกคีย์คอลัมน์ย่อย ":" ซ้ำ (กันนับซ้ำ) และคอลัมน์ที่ลบไป
 // แล้วก็ไม่ถูกนับ เพราะยอด roll-up ถูกคำนวณใหม่โดยไม่รวมคอลัมน์นั้น
 const monthAddValue = (additions, m, code) => parseFloat(additions?.[m]?.[code]) || 0;
+// เผื่อเศษ/สูญเสีย: คิดจาก "ราคาเดิม" ของแต่ละ Acc. Code แล้วนับเป็นงบ (ทุน) จริง — บวกเข้าแต่ละรหัส
+// ทำให้งบคงเหลือ / เกินงบ ของจัดซื้อและบัญชีรวมส่วนเผื่อนี้ด้วย (ตัดสินใจ 2026-09-26) · งานเพิ่มรายเดือนไม่ถูกบวก %
+const WASTE_RATE = 0.03;
+const WASTE_LBL  = "3%";
+const wasteOf   = (v) => (parseFloat(v) || 0) * WASTE_RATE;
+const withWaste = (v) => (parseFloat(v) || 0) + wasteOf(v);
 const buildCombinedBudget = (tenderCosts, additions) => {
-  const combined = {...tenderCosts};
+  const combined = {};
+  Object.entries(tenderCosts || {}).forEach(([k, v]) => { combined[k] = k.startsWith("$") ? v : withWaste(v); });
   Object.entries(additions || {}).forEach(([mKey, monthObj]) => {
     if (mKey.startsWith("$")) return;
     Object.entries(monthObj || {}).forEach(([code, val]) => {
@@ -923,7 +930,7 @@ function addDashboardSheet(wb, sheetName, { title, subtitle, theme, cards = [], 
     ws["!rows"][gTitleRow] = {hpx:22};
     setS(gTitleRow, 0, { font:{bold:true,sz:11,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:lighten(theme.main,0.85)}}, alignment:{vertical:"center",horizontal:"left",indent:1} });
     const headFill = lighten(theme.main, 0.82);
-    const gh = ["กลุ่ม","ราคาเดิม","เพิ่มรายเดือน","งบรวม","สัดส่วน","กราฟสัดส่วน"];
+    const gh = ["กลุ่ม",`ราคาเดิม + เผื่อ ${WASTE_LBL}`,"เพิ่มรายเดือน","งบรวม","สัดส่วน","กราฟสัดส่วน"];
     gh.forEach((h,c) => setS(gHeadRow, c, { font:{bold:true,sz:9.5,color:{rgb:theme.dark},name:"Tahoma"}, fill:{fgColor:{rgb:headFill}}, alignment:{horizontal:c===0?"left":c<5?"right":"left",vertical:"center",indent:c===0||c===5?1:0}, border:{bottom:BORDER_THIN(lighten(theme.main,0.45))} }, h));
     for (let c=6;c<C;c++) setS(gHeadRow, c, { fill:{fgColor:{rgb:headFill}}, border:{bottom:BORDER_THIN(lighten(theme.main,0.45))} });
     if (C-1 > 5) ws["!merges"].push({ s:{r:gHeadRow,c:5}, e:{r:gHeadRow,c:C-1} });
@@ -974,15 +981,16 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const dashMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
   const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + monthAddValue(additions, m, a.code), 0) }));
   const dashBase   = accounts.reduce((s,a)=> s + (parseFloat(tenderCosts[a.code])||0), 0);
+  const dashWaste  = dashBase * WASTE_RATE;
   const dashAdded  = dashItems.reduce((s,i)=> s + i.value, 0);
   // แถว TOTAL (A1) ของชีต "งบประมาณ"/"รายเดือน (สรุป)" = 5 + จำนวนแถวข้อมูล
   // (หัวข้อ 3 แถว + หัวตารางแถว 4 → ข้อมูลเริ่มแถว 5 → TOTAL อยู่แถว 5+N)
   const TR = 5 + dashList.length;
-  const dashItemsF = dashItems.map((it, i) => ({ ...it, f: `'รายเดือน (สรุป)'!${XLSX.utils.encode_col(3 + i)}${TR}` }));
+  const dashItemsF = dashItems.map((it, i) => ({ ...it, f: `'รายเดือน (สรุป)'!${XLSX.utils.encode_col(4 + i)}${TR}` }));
   // สรุปตามกลุ่มวัสดุ (ไว้โชว์ตาราง+แถบสัดส่วนในหน้าสรุป)
   const byG = {};
   dashList.forEach(a => {
-    const bs = parseFloat(tenderCosts[a.code]) || 0, tt = parseFloat(combinedBudget[a.code]) || 0, g = a.group || "อื่น ๆ";
+    const bs = withWaste(tenderCosts[a.code]), tt = parseFloat(combinedBudget[a.code]) || 0, g = a.group || "อื่น ๆ";   // base = ราคาเดิม + เผื่อ %
     (byG[g] = byG[g] || { base:0, total:0 }); byG[g].base += bs; byG[g].total += tt;
   });
   const grandTot = Object.values(byG).reduce((s,x)=>s+x.total,0) || 1;
@@ -993,12 +1001,12 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     title: `สรุปงบประมาณ — ${project.name}`,
     subtitle: `พื้นที่ ${project.area||"-"} ft² · แผง ${project.panels||"-"} · Export: ${new Date().toLocaleDateString("th-TH")}`,
     theme,
-    // 4 การ์ดให้ตรงกับหน้า Baseline แบบใหม่: ราคาเดิม · เผื่อเศษ 3% · งานเพิ่ม · รวมทั้งหมด
+    // 4 การ์ดให้ตรงกับหน้า Baseline: ราคาเดิม · เผื่อเศษ 3% (รวมในงบ) · งานเพิ่ม · รวมทั้งหมด
     cards: [
-      { label:"ราคาเดิม (Tender Cost)",       value: dashBase, money:true, f:`'งบประมาณ'!D${TR}`, acc:["DBEAFE","1D4ED8"] },
-      { label:"เผื่อเศษ/สูญเสีย 3% (อ้างอิง)", value: dashBase*0.03, money:true,                    acc:["FEF3C7","92400E"] },
-      { label:"งานเพิ่ม (รวมทุกเดือน)",         value: dashAdded, money:true, f:`'งบประมาณ'!E${TR}`, acc:["EDE9FE","6D28D9"] },
-      { label:"รวมทั้งหมด",                    value: dashBase + dashAdded, money:true, f:`'งบประมาณ'!F${TR}`, acc:["D1FAE5","047857"] },
+      { label:"ราคาเดิม (Tender Cost)",                 value: dashBase,  money:true, f:`'งบประมาณ'!D${TR}`, acc:["DBEAFE","1D4ED8"] },
+      { label:`เผื่อเศษ/สูญเสีย ${WASTE_LBL} (รวมในงบ)`, value: dashWaste, money:true, f:`'งบประมาณ'!E${TR}`, acc:["FEF3C7","92400E"] },
+      { label:"งานเพิ่ม (รวมทุกเดือน)",                   value: dashAdded, money:true, f:`'งบประมาณ'!F${TR}`, acc:["EDE9FE","6D28D9"] },
+      { label:"รวมทั้งหมด",                              value: dashBase + dashWaste + dashAdded, money:true, f:`'งบประมาณ'!G${TR}`, acc:["D1FAE5","047857"] },
     ],
     chartTitle: "กราฟ: ยอดเพิ่มรายเดือน (THB)",
     items: dashItemsF,
@@ -1008,70 +1016,74 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
 
   // Sheet 1 — Baseline + monthly additions rolled up per Acc. Code
   const rows1 = [[`งบประมาณ (Tender Cost) — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม","เพิ่มรายเดือน (รวม)","รวมทั้งหมด",...(U?["รวมทั้งหมด (USD)"]:[])]);
+  rows1.push(["Acc. Code","Account Name","Group","ราคาเดิม",`เผื่อเศษ ${WASTE_LBL}`,"เพิ่มรายเดือน (รวม)","รวมทั้งหมด",...(U?["รวมทั้งหมด (USD)"]:[])]);
   const dataStart1 = rows1.length;
   const rowGroups1 = [];
   dashList.forEach(a => {
     const baseline = parseFloat(tenderCosts[a.code]) || 0;
+    const waste    = wasteOf(baseline);
     const total    = parseFloat(combinedBudget[a.code]) || 0;
-    const added = total - baseline;
-    rows1.push([a.code, a.name, a.group, baseline, added, total, ...(U?[toUsd(total,rate)]:[])]);
+    const added = total - baseline - waste;
+    rows1.push([a.code, a.name, a.group, baseline, waste, added, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups1.push(a.group);
   });
   const dataEnd1 = rows1.length-1;
   // ใส่ยอดรวมจริงเป็นค่าของเซลล์ด้วย (นอกจากสูตร) — แอปพรีวิวที่ไม่คำนวณสูตร (มือถือ/อีเมล) จะไม่โชว์ ฿0
   const colSum1 = (c) => rows1.slice(dataStart1, dataEnd1 + 1).reduce((s, r) => s + (Number(r[c]) || 0), 0);
-  rows1.push(["","TOTAL","",colSum1(3),colSum1(4),colSum1(5), ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
+  rows1.push(["","TOTAL","",colSum1(3),colSum1(4),colSum1(5),colSum1(6), ...(U?[toUsd(dashBase+dashWaste+dashAdded,rate)]:[])]);
   const totalRow1 = rows1.length-1;
   const ws1 = XLSX.utils.aoa_to_sheet(rows1);
-  // ลิงก์ด้วยสูตร: งบรวม = ราคาเดิม + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
+  // ลิงก์ด้วยสูตร: เผื่อเศษ = ราคาเดิม × % · งบรวม = ราคาเดิม + เผื่อเศษ + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
   for (let r = dataStart1; r <= dataEnd1; r++) {
-    const R = r + 1, ref = XLSX.utils.encode_cell({ r, c:5 });
-    if (ws1[ref]) ws1[ref].f = `D${R}+E${R}`;
+    const R = r + 1, refW = XLSX.utils.encode_cell({ r, c:4 }), ref = XLSX.utils.encode_cell({ r, c:6 });
+    if (ws1[refW]) ws1[refW].f = `D${R}*${WASTE_RATE}`;
+    if (ws1[ref]) ws1[ref].f = `D${R}+E${R}+F${R}`;
   }
-  ["D","E","F"].forEach((L, i) => {
+  ["D","E","F","G"].forEach((L, i) => {
     const ref = XLSX.utils.encode_cell({ r:totalRow1, c:3+i });
     if (ws1[ref]) ws1[ref].f = `SUM(${L}${dataStart1+1}:${L}${dataEnd1+1})`;
   });
-  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:18},{wch:18},...(U?[{wch:18}]:[])];
-  styleSheet(ws1, { numCols:6+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
-    moneyCols:U?[3,4,5,6]:[3,4,5], usdCols:U?[6]:[], theme, rowGroups:rowGroups1, groupDisplayCol:2, codeCol:0 });
-  xBackLink(ws1, 2, (6+(U?1:0))-1, "สรุป");
+  ws1["!cols"] = [{wch:12},{wch:40},{wch:16},{wch:18},{wch:14},{wch:18},{wch:18},...(U?[{wch:18}]:[])];
+  styleSheet(ws1, { numCols:7+(U?1:0), subRows:[1], headerRow:3, dataStart:dataStart1, dataEnd:dataEnd1, totalRow:totalRow1,
+    moneyCols:U?[3,4,5,6,7]:[3,4,5,6], usdCols:U?[7]:[], theme, rowGroups:rowGroups1, groupDisplayCol:2, codeCol:0 });
+  xBackLink(ws1, 2, (7+(U?1:0))-1, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws1, "งบประมาณ");
 
   // Sheet 2 — one column per month, so QS can see exactly how the budget grew
   const months = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
   const rows2 = [[`รายการเพิ่มรายเดือน — ${project.name}`], [`Export: ${new Date().toLocaleDateString("th-TH")}`], []];
-  rows2.push(["Acc. Code","Account Name","ราคาเดิม", ...months.map(monthShortLabel), "รวมทั้งหมด", ...(U?["รวม (USD)"]:[])]);
+  rows2.push(["Acc. Code","Account Name","ราคาเดิม",`เผื่อเศษ ${WASTE_LBL}`, ...months.map(monthShortLabel), "รวมทั้งหมด", ...(U?["รวม (USD)"]:[])]);
   const dataStart2 = rows2.length;
   const rowGroups2 = [];
   dashList.forEach(a => {
     const baseline  = parseFloat(tenderCosts[a.code]) || 0;
+    const waste     = wasteOf(baseline);
     const monthVals = months.map(m => monthAddValue(additions, m, a.code));
-    const total = baseline + monthVals.reduce((s,v)=>s+v,0);
-    rows2.push([a.code, a.name, baseline, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
+    const total = baseline + waste + monthVals.reduce((s,v)=>s+v,0);
+    rows2.push([a.code, a.name, baseline, waste, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups2.push(a.group);
   });
   const dataEnd2 = rows2.length-1;
-  const M = months.length, totColC = 3 + M;
+  const M = months.length, totColC = 4 + M;
   const colSum2 = (c) => rows2.slice(dataStart2, dataEnd2 + 1).reduce((s, r) => s + (Number(r[c]) || 0), 0);
-  rows2.push(["","TOTAL",colSum2(2), ...months.map((_,i)=>colSum2(3+i)), colSum2(totColC), ...(U?[toUsd(dashBase+dashAdded,rate)]:[])]);
+  rows2.push(["","TOTAL",colSum2(2),colSum2(3), ...months.map((_,i)=>colSum2(4+i)), colSum2(totColC), ...(U?[toUsd(dashBase+dashWaste+dashAdded,rate)]:[])]);
   const totalRow2 = rows2.length-1;
-  const numCols2 = 4 + months.length + (U?1:0);
+  const numCols2 = 5 + months.length + (U?1:0);
   const ws2 = XLSX.utils.aoa_to_sheet(rows2);
-  // ลิงก์ด้วยสูตร: รวมทั้งหมด(ต่อแถว) = ราคาเดิม + ผลรวมทุกเดือน · TOTAL = ผลรวมคอลัมน์
-  const lastMonthL = XLSX.utils.encode_col(2 + M);
+  // ลิงก์ด้วยสูตร: เผื่อเศษ = ราคาเดิม × % · รวมทั้งหมด(ต่อแถว) = ราคาเดิม + เผื่อเศษ + ผลรวมทุกเดือน · TOTAL = ผลรวมคอลัมน์
+  const lastMonthL = XLSX.utils.encode_col(3 + M);
   for (let r = dataStart2; r <= dataEnd2; r++) {
-    const R = r + 1, ref = XLSX.utils.encode_cell({ r, c: totColC });
-    if (ws2[ref]) ws2[ref].f = M > 0 ? `C${R}+SUM(D${R}:${lastMonthL}${R})` : `C${R}`;
+    const R = r + 1, refW = XLSX.utils.encode_cell({ r, c: 3 }), ref = XLSX.utils.encode_cell({ r, c: totColC });
+    if (ws2[refW]) ws2[refW].f = `C${R}*${WASTE_RATE}`;
+    if (ws2[ref]) ws2[ref].f = M > 0 ? `C${R}+D${R}+SUM(E${R}:${lastMonthL}${R})` : `C${R}+D${R}`;
   }
-  [2, ...months.map((_,i)=>3+i), totColC].forEach(c => {
+  [2, 3, ...months.map((_,i)=>4+i), totColC].forEach(c => {
     const L = XLSX.utils.encode_col(c), ref = XLSX.utils.encode_cell({ r:totalRow2, c });
     if (ws2[ref]) ws2[ref].f = `SUM(${L}${dataStart2+1}:${L}${dataEnd2+1})`;
   });
-  ws2["!cols"] = [{wch:12},{wch:34},{wch:14}, ...months.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
+  ws2["!cols"] = [{wch:12},{wch:34},{wch:14},{wch:12}, ...months.map(()=>({wch:12})), {wch:16}, ...(U?[{wch:16}]:[])];
   styleSheet(ws2, { numCols:numCols2, subRows:[1], headerRow:3, dataStart:dataStart2, dataEnd:dataEnd2, totalRow:totalRow2,
-    moneyCols:[2, ...months.map((_,i)=>3+i), 3+months.length, ...(U?[4+months.length]:[])], usdCols:U?[4+months.length]:[], theme, rowGroups:rowGroups2, codeCol:0 });
+    moneyCols:[2, 3, ...months.map((_,i)=>4+i), 4+months.length, ...(U?[5+months.length]:[])], usdCols:U?[5+months.length]:[], theme, rowGroups:rowGroups2, codeCol:0 });
   xBackLink(ws2, 2, numCols2-1, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws2, "รายเดือน (สรุป)");
 
@@ -1127,7 +1139,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     monthLinksQS.push({ text: monthShortLabel(m), sheet: nm });
   });
   // ลิงก์หัวคอลัมน์เดือนในชีต "รายเดือน (สรุป)" → กระโดดไปชีตของเดือนนั้น (ไล่ที่มา)
-  months.forEach((m,i)=>{ if (monthSheetMap[m]) xLinkCell(ws2, XLSX.utils.encode_cell({ r:3, c:3+i }), monthSheetMap[m], `ดูรายละเอียดเดือน ${monthShortLabel(m)}`); });
+  months.forEach((m,i)=>{ if (monthSheetMap[m]) xLinkCell(ws2, XLSX.utils.encode_cell({ r:3, c:4+i }), monthSheetMap[m], `ดูรายละเอียดเดือน ${monthShortLabel(m)}`); });
   // แถบลิงก์นำทางใต้ dashboard หน้าสรุป
   {
     const navR = dashQS.nextRow + 1;
@@ -1166,33 +1178,34 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     [hasCols ? `แยกตามรายการ ${cols.length} คอลัมน์  ·  Export: ${new Date().toLocaleDateString("th-TH")}`
              : `Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
-    ["Acc. Code", "Account Name", "Group", "ราคาเดิม", ...valLabels, "รวมเดือนนี้", "รวมสะสมถึงเดือนนี้", ...(U?["รวมสะสม (USD)"]:[])],
+    ["Acc. Code", "Account Name", "Group", "ราคาเดิม", `เผื่อเศษ ${WASTE_LBL}`, ...valLabels, "รวมเดือนนี้", "รวมสะสมถึงเดือนนี้", ...(U?["รวมสะสม (USD)"]:[])],
   ];
   const dataStart = rows.length;
   const colTotals = valLabels.map(() => 0);
-  let gBase = 0, gMonth = 0, gCum = 0;
+  let gBase = 0, gWaste = 0, gMonth = 0, gCum = 0;
   const rowGroups = [];
   accounts.forEach(a => {
     const baseline = parseFloat(tenderCosts[a.code]) || 0;
     const b = brk[a.code];
     const vals = hasOther ? [...b.vals, b.other] : b.vals;
     const monthTot = b.total;   // = ค่าหลักที่บันทึกไว้ ตรงกับ "รวมสะสม" และชีตสรุป
-    const cum = baseline + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
+    const waste = wasteOf(baseline);
+    const cum = baseline + waste + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
     if (monthTot === 0 && baseline === 0 && cum === 0) return;
-    rows.push([a.code, a.name, a.group, baseline, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
+    rows.push([a.code, a.name, a.group, baseline, waste, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
     rowGroups.push(a.group);
     vals.forEach((v, i) => { colTotals[i] += v; });
-    gBase += baseline; gMonth += monthTot; gCum += cum;
+    gBase += baseline; gWaste += waste; gMonth += monthTot; gCum += cum;
   });
   const dataEnd = rows.length - 1;
-  rows.push(["", "TOTAL", "", gBase, ...colTotals, gMonth, gCum, ...(U?[toUsd(gCum,rate)]:[])]);
+  rows.push(["", "TOTAL", "", gBase, gWaste, ...colTotals, gMonth, gCum, ...(U?[toUsd(gCum,rate)]:[])]);
   const totalRow = rows.length - 1;
-  const numCols = 6 + valLabels.length + (U?1:0);
+  const numCols = 7 + valLabels.length + (U?1:0);
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }, ...(U?[{ wch:18 }]:[])];
+  ws["!cols"] = [{ wch:12 }, { wch:34 }, { wch:14 }, { wch:16 }, { wch:13 }, ...valLabels.map(()=>({ wch:15 })), { wch:16 }, { wch:18 }, ...(U?[{ wch:18 }]:[])];
   styleSheet(ws, {
     numCols, subRows:[1], headerRow:3, dataStart, dataEnd, totalRow,
-    moneyCols: [3, ...valLabels.map((_, i) => 4 + i), 4 + valLabels.length, 5 + valLabels.length, ...(U?[6 + valLabels.length]:[])], usdCols:U?[6 + valLabels.length]:[],
+    moneyCols: [3, 4, ...valLabels.map((_, i) => 5 + i), 5 + valLabels.length, 6 + valLabels.length, ...(U?[7 + valLabels.length]:[])], usdCols:U?[7 + valLabels.length]:[],
     theme, rowGroups, groupDisplayCol: 2, codeCol: 0,
   });
   XLSX.utils.book_append_sheet(wb, ws, clean(monthShortLabel(month)));
@@ -1258,7 +1271,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
     return "1F2937";
   };
   // คอลัมน์ต้นทุน: Tender Cost · Take off · Stock · Issue PO · Pending PO + เดือน (1 ช่อง/เดือน) + TOTAL + Balance Cost
-  const header = ["Acc. Code","Acc. Name","Tender Cost","Take off","Stock","Issue PO","Pending PO"];
+  const header = ["Acc. Code","Acc. Name",`Tender Cost (+${WASTE_LBL})`,"Take off","Stock","Issue PO","Pending PO"];
   mMonths.forEach(mk => header.push(monthShortLabel(mk)));
   header.push("TOTAL","Balance Cost");
   const rows = [
@@ -1348,7 +1361,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
       mgRow, pyRow, mgTot:mgRow.reduce((s,c)=>s+c.eff,0), pyTot:pyRow.reduce((s,x)=>s+x,0) };
   }).filter(r => r.budget||r.committed||r.stock||r.mgTot||r.pyTot);
   if (!rowsData.length) return;
-  const header = ["Acc. Code","Acc. Name","Tender Cost","Balance Pending PO","Stock","Pending PO",
+  const header = ["Acc. Code","Acc. Name",`Tender Cost (+${WASTE_LBL})`,"Balance Pending PO","Stock","Pending PO",
     ...mgM.map(mk=>`${monthShortLabel(mk)} (เข้า)`), "รวมเข้า",
     ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "Balance Cost"];
   const rows = [
@@ -1624,7 +1637,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       ? ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","งบสะสม (USD)","Committed เดือนนี้","Committed สะสม","Committed สะสม (USD)","% ใช้ไปสะสม"]
       : ["เดือน","Budget เพิ่มเดือนนี้","งบสะสม","Committed เดือนนี้","Committed สะสม","% ใช้ไปสะสม"]);
     const dataStart4 = rows4.length;
-    const baselineTotal = accounts.reduce((s,a)=>s+(parseFloat(tenderCosts[a.code])||0),0);
+    const baselineTotal = accounts.reduce((s,a)=>s+withWaste(tenderCosts[a.code]),0);   // ราคาเดิม + เผื่อเศษ (รวมในงบ)
     // "Committed" ต้องนิยามให้ตรงกับชีตอื่น: ผลรวมยอด item เฉพาะ code ที่อยู่ในผังบัญชี
     // (ไม่ใช้ poTotal ทั้งใบ เพราะ PO อาจมี item ที่ code ไม่อยู่ในผัง ทำให้ยอดสะสมไม่ตรงกับ Sheet อื่น)
     const acctCodeSet = new Set(accounts.map(a=>a.code));
@@ -3579,7 +3592,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   const allRows = [...visibleAccounts, ...standaloneExtras.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const base  = allRows.reduce((s,r)=>s+effectiveValue(r),0);
-  const adj3  = base * 0.03;
+  const adj3  = base * WASTE_RATE;   // เผื่อเศษ/สูญเสีย — รวมในงบ (ทุน) แล้ว
 
   const q = search.toLowerCase();
   const filtered = allRows.filter(a => {
@@ -3602,7 +3615,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   // (skip the "$…" meta keys). Same rule buildCombinedBudget() uses, so
   // Baseline + Additions here matches the grand total shown elsewhere.
   const rowAddTotal = (row) => Object.keys(additions).reduce((s,m)=> m.startsWith("$") ? s : s + monthAddValue(additions, m, row.code), 0);
-  const rowGrand    = (row) => effectiveValue(row) + rowAddTotal(row);
+  const rowGrand    = (row) => withWaste(effectiveValue(row)) + rowAddTotal(row);   // ราคาเดิม + เผื่อเศษ + งานเพิ่ม = งบจริง
   const addAll      = allRows.reduce((s,r)=> s + rowAddTotal(r), 0);   // งานเพิ่มรวมทุก Code ทุกเดือน
 
   const displayRows = (() => {
@@ -3679,9 +3692,9 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
       {/* Stats */}
       <div className="stat-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
         <StatCard label={t("ราคาเดิมรวม (Tender Cost)","Total Tender Cost")} value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub={t("ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง","All baseline prices — used as the real budget")} color={T.blue} icon="📐" accent={T.blueLight}/>
-        <StatCard label={t("เผื่อเศษ/สูญเสีย 3%","Wastage allowance 3%")} value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub={t("ตัวเลขอ้างอิงเท่านั้น (ไม่รวมในงบ)","Reference only (not in budget)")} color={T.amber} icon="⚙️" accent={T.amberBg}/>
+        <StatCard label={t(`เผื่อเศษ/สูญเสีย ${WASTE_LBL}`,`Wastage allowance ${WASTE_LBL}`)} value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub={t("รวมในงบแล้ว — บวกเข้าแต่ละ Acc. Code","Included in the budget — added to each Acc. Code")} color={T.amber} icon="⚙️" accent={T.amberBg}/>
         <StatCard label={t("งานเพิ่ม (รวมทุกเดือน)","Additions (all months)")} value={"฿"+fmt0(addAll)} thb={addAll} rate={usdRate} sub={t("รวมยอดที่เพิ่มจากแท็บรายเดือน","Total added from the Monthly tab")} color={T.purple} icon="➕" accent={T.purpleBg}/>
-        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(base+addAll)} thb={base+addAll} rate={usdRate} sub={t("ราคาเดิม + งานเพิ่ม (งบจริง)","Baseline + additions (actual budget)")} color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(base+adj3+addAll)} thb={base+adj3+addAll} rate={usdRate} sub={t(`ราคาเดิม + เผื่อเศษ ${WASTE_LBL} + งานเพิ่ม (งบจริง)`,`Baseline + ${WASTE_LBL} wastage + additions (actual budget)`)} color={T.green} icon="✅" accent={T.greenBg}/>
       </div>
 
       {/* Filters + Add row + Save */}
@@ -3767,7 +3780,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
 
       {/* Table */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-        <div className="hscroll"><table style={{width:"100%",minWidth:980,borderCollapse:"collapse",fontSize:13}}>
+        <div className="hscroll"><table style={{width:"100%",minWidth:1100,borderCollapse:"collapse",fontSize:13}}>
           <thead>
             <tr style={{background:"#f8fafc"}}>
               {[
@@ -3775,6 +3788,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                 {label:"Group", key:"group", align:"left"},
                 {label:"Account Name", key:"name", align:"left"},
                 {label:t("ราคาเดิม (THB)","Tender Cost (THB)"), key:"value", align:"right"},
+                {label:t(`เผื่อเศษ ${WASTE_LBL}`,`Wastage ${WASTE_LBL}`), key:"waste", align:"right"},
                 {label:t("รวมงานเพิ่ม","Total Additions"), key:"add", align:"right"},
                 {label:t("รวมทั้งหมด","Grand total"), key:"grand", align:"right"},
                 {label:"", key:null, align:"center"},
@@ -3832,7 +3846,10 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                         <div style={{width:160,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[a.code]>0?T.textPrimary:T.textMuted}}>{fmt(rowVal)}{usdLine(rowVal, usdRate)}</div>
                       )}
                     </td>
-                    {(() => { const addV = rowAddTotal(a); const grandV = rowVal + addV; return (<>
+                    {(() => { const addV = rowAddTotal(a); const wV = wasteOf(rowVal); const grandV = rowVal + wV + addV; return (<>
+                    <td style={{padding:"8px 16px",textAlign:"right"}}>
+                      <div style={{width:120,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:wV?T.amber:T.textMuted}}>{fmt(wV)}{usdLine(wV, usdRate)}</div>
+                    </td>
                     <td style={{padding:"8px 16px",textAlign:"right"}}>
                       <div style={{width:150,marginLeft:"auto",padding:"7px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(addV>0?{background:T.amberBg,color:T.amber,fontWeight:650,borderRadius:8}:{color:T.textMuted})}}>{fmt(addV)}{usdLine(addV, usdRate)}</div>
                     </td>
@@ -3870,7 +3887,10 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                           <div style={{width:160,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:draft[k.code]>0?T.textPrimary:T.textMuted}}>{fmt(parseFloat(draft[k.code])||0)}{usdLine(parseFloat(draft[k.code])||0, usdRate)}</div>
                         )}
                       </td>
-                      {(() => { const kBase = parseFloat(draft[k.code])||0; const kAdd = rowAddTotal(k); const kGrand = kBase + kAdd; return (<>
+                      {(() => { const kBase = parseFloat(draft[k.code])||0; const kAdd = rowAddTotal(k); const kW = wasteOf(kBase); const kGrand = kBase + kW + kAdd; return (<>
+                      <td style={{padding:"6px 16px",textAlign:"right"}}>
+                        <div style={{width:120,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13,color:kW?T.amber:T.textMuted}}>{fmt(kW)}{usdLine(kW, usdRate)}</div>
+                      </td>
                       <td style={{padding:"6px 16px",textAlign:"right"}}>
                         <div style={{width:150,marginLeft:"auto",padding:"6px 8px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:13, ...(kAdd>0?{color:T.amber,fontWeight:600}:{color:T.textMuted})}}>{fmt(kAdd)}{usdLine(kAdd, usdRate)}</div>
                       </td>
@@ -3896,7 +3916,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                           placeholder={t("ชื่อรายการย่อย เช่น Silicone Structure","Sub-item name e.g. Silicone Structure")} style={{width:"100%",fontSize:13}}
                           onKeyDown={e=>e.key==="Enter"&&handleAddSub(a.code)} autoFocus />
                       </td>
-                      <td colSpan={4} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                      <td colSpan={5} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
                         <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(a.code)}>+ {t("เพิ่ม","Add")}</button>
                         <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>{t("ยกเลิก","Cancel")}</button>
                       </td>
@@ -3912,6 +3932,10 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
               <td style={{padding:"12px 16px",textAlign:"right",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
                 {fmt(filtered.reduce((s,a)=>s+effectiveValue(a),0))}
                 {usdLine(filtered.reduce((s,a)=>s+effectiveValue(a),0), usdRate)}
+              </td>
+              <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
+                {fmt(filtered.reduce((s,a)=>s+wasteOf(effectiveValue(a)),0))}
+                {usdLine(filtered.reduce((s,a)=>s+wasteOf(effectiveValue(a)),0), usdRate)}
               </td>
               <td style={{padding:"12px 16px",textAlign:"right",color:T.amber,fontFamily:"'JetBrains Mono',monospace",fontWeight:650,fontSize:14}}>
                 {fmt(filtered.reduce((s,a)=>s+rowAddTotal(a),0))}
@@ -4092,7 +4116,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // parentCode) also have their own entries in tenderCosts, and their total
   // is already rolled up into their parent's value, so a wholesale sum
   // double-counts every account that has sub-items.
-  const baseTotal = allRows.reduce((s,r) => s + (parseFloat(tenderCosts[r.code]) || 0), 0);
+  const baseTotal = allRows.reduce((s,r) => s + withWaste(tenderCosts[r.code]), 0);   // ราคาเดิม + เผื่อเศษ (รวมในงบ)
   const thisMonthAdd = allRows.reduce((s,r) => s + rowMonthValue(r.code, month, draftAdd), 0);
   const cumulativeSoFar = months.filter(m=>m<month).reduce((s,m)=>s+monthTotal(m),0) + thisMonthAdd + baseTotal;
 
@@ -4132,7 +4156,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   // Mirrors the per-row figures computed inline in the table body, so header
   // sorting can order rows by the same "ยอดก่อนหน้า / เพิ่มเดือนนี้ / รวมสะสม" values shown.
-  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+rowMonthValue(r.code, m),0) + (parseFloat(tenderCosts[r.code])||0);
+  const cumBeforeOf = (r) => months.filter(m=>m<month).reduce((s,m)=>s+rowMonthValue(r.code, m),0) + withWaste(tenderCosts[r.code]);
   const cumOf = (r) => cumBeforeOf(r) + rowMonthValue(r.code, month, draftAdd);
 
   const handleSort = (key) => {
@@ -4615,8 +4639,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       <div className="stat-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
         <StatCard label={t("ยอดยกมา (ก่อนเดือนนี้)","Brought forward (before this month)")} value={"฿"+fmt0(baselineForMonth)} thb={baselineForMonth} rate={usdRate} sub={`${t("สะสมถึง","up to")} ${prevMonthLabel}`} color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label={t("เพิ่มเดือนนี้","Added this month")} value={"฿"+fmt0(thisMonthAdd)} thb={thisMonthAdd} rate={usdRate} sub={new Date(month+"-01").toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{year:"numeric",month:"long"})} color={T.amber} icon="➕" accent={T.amberBg}/>
-        <StatCard label={t("รวมสะสมถึงเดือนนี้","Cumulative to this month")} value={"฿"+fmt0(cumulativeSoFar)} thb={cumulativeSoFar} rate={usdRate} sub={t("เดิม + เพิ่มสะสมถึงเดือนที่เลือก","Baseline + additions up to selected month")} color={T.green} icon="✅" accent={T.greenBg}/>
-        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(grandTotal)} thb={grandTotal} rate={usdRate} sub={t("เดิม + ทุกเดือนที่มีข้อมูล (ล่าสุด)","Baseline + all months (latest)")} color={T.purple} icon="🧮" accent={T.purpleBg}/>
+        <StatCard label={t("รวมสะสมถึงเดือนนี้","Cumulative to this month")} value={"฿"+fmt0(cumulativeSoFar)} thb={cumulativeSoFar} rate={usdRate} sub={t(`เดิม (+${WASTE_LBL}) + เพิ่มสะสมถึงเดือนที่เลือก`,`Baseline (+${WASTE_LBL}) + additions up to selected month`)} color={T.green} icon="✅" accent={T.greenBg}/>
+        <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(grandTotal)} thb={grandTotal} rate={usdRate} sub={t(`เดิม (+${WASTE_LBL}) + ทุกเดือนที่มีข้อมูล (ล่าสุด)`,`Baseline (+${WASTE_LBL}) + all months (latest)`)} color={T.purple} icon="🧮" accent={T.purpleBg}/>
       </div>
 
       {/* Toolbar: search + group filter + actions */}
@@ -4860,7 +4884,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         </button>
                       )}
                     </td>
-                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace", ...qsFrz(3,rowBg)}} title={t("ราคาเดิม + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน","Baseline + additions of all previous months")}>{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
+                    <td style={{padding:"8px 16px",textAlign:"right",color:cumBefore!==0?T.textPrimary:T.textMuted,fontFamily:"'JetBrains Mono',monospace", ...qsFrz(3,rowBg)}} title={t(`ราคาเดิม + เผื่อเศษ ${WASTE_LBL} + ยอดเพิ่มของทุกเดือนก่อนหน้ารวมกัน`,`Baseline + ${WASTE_LBL} wastage + additions of all previous months`)}>{fmt(cumBefore)}{usdLine(cumBefore, usdRate)}</td>
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                     {isMultiCol ? (
                       hasKids ? (
@@ -4924,7 +4948,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       (kidsAsOf already filtered them), so a sub-item created in ก.ย. simply
                       doesn't exist in ส.ค. or earlier — no ghost "0.00" row. */}
                   {!isCollapsed && kids.map((k,ki) => {
-                    const kBaseVal = parseFloat(tenderCosts[k.code]) || 0;
+                    const kBaseVal = withWaste(tenderCosts[k.code]);   // ราคาเดิม + เผื่อเศษ
                     const kCumBefore = months.filter(m=>m<month).reduce((s,m)=>s+(parseFloat(additions[m]?.[k.code])||0),0) + kBaseVal;
                     const kThisVal = parseFloat(draftAdd[k.code]) || 0;
                     const kCum = kCumBefore + kThisVal;
@@ -5613,7 +5637,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                 <tr>
                   <th onClick={()=>toggleSort("code")}    style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
                   <th onClick={()=>toggleSort("name")}    style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
-                  <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("tender")}</th>
+                  <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS รวมเผื่อเศษ ${WASTE_LBL}`,`QS budget incl. ${WASTE_LBL} wastage`)}>Tender Cost (+{WASTE_LBL}){arrow("tender")}</th>
                   <th onClick={()=>toggleSort("takeoff")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Take off{arrow("takeoff")}</th>
                   <th onClick={()=>toggleSort("stock")}   style={{ ...hM(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
                   <th onClick={()=>toggleSort("issue")}   style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Issue PO{arrow("issue")}</th>
@@ -6031,7 +6055,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </div>
         )}
         <div className="stat-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-          <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t("เดิม + เพิ่มรายเดือนทุกเดือน","Baseline + all monthly additions")} color={T.blue} icon="📋" accent={T.blueLight}/>
+          <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t(`เดิม + เผื่อเศษ ${WASTE_LBL} + เพิ่มรายเดือนทุกเดือน`,`Baseline + ${WASTE_LBL} wastage + all monthly additions`)} color={T.blue} icon="📋" accent={T.blueLight}/>
           <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} ${t("รายการ","items")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
           <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} ${t("รายการ","items")} · ${t("จ่ายอัตโนมัติ","auto-paid")}`} color={T.green} icon="✅" accent={T.greenBg}/>
           <StatCard label={t("งบคงเหลือ","Budget remaining")} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${((totalComm/tenderTotal)*100).toFixed(1)}% ${t("ใช้ไปแล้ว","used")}`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
@@ -6904,7 +6928,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
             <tr>
               <th onClick={()=>toggleSort("code")}      style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
               <th onClick={()=>toggleSort("name")}      style={{ ...hCell("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
-              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }}>Tender Cost{arrow("budget")}</th>
+              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS รวมเผื่อเศษ ${WASTE_LBL}`,`QS budget incl. ${WASTE_LBL} wastage`)}>Tender Cost (+{WASTE_LBL}){arrow("budget")}</th>
               <th onClick={()=>toggleSort("balPO")}     style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Pending PO{arrow("balPO")}</th>
               <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
               <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("balCost")}</th>
@@ -7209,7 +7233,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
         {view==="dashboard" ? (
           <>
             <div className="stat-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-              <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t("เดิม + เพิ่มรายเดือนทุกเดือน","Baseline + all monthly additions")} color={T.blue} icon="📋" accent={T.blueLight}/>
+              <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t(`เดิม + เผื่อเศษ ${WASTE_LBL} + เพิ่มรายเดือนทุกเดือน`,`Baseline + ${WASTE_LBL} wastage + all monthly additions`)} color={T.blue} icon="📋" accent={T.blueLight}/>
               <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${pct.toFixed(1)}% ${t("ของงบ","of budget")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
               <StatCard label={t("วางบิลแล้ว","Invoiced")} value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate} sub={t("รอจ่าย + จ่ายแล้ว","Awaiting + paid")} color={T.purple} icon="🧾" accent={T.purpleBg}/>
               <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidPOCount} ${t("รายการ","items")}`} color={T.green} icon="✅" accent={T.greenBg}/>
