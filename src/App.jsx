@@ -556,7 +556,7 @@ const GLOBAL_CSS = `
   .calc-pop button:active { transform: scale(0.96); }
   .fab-btn:hover { background: #1d4ed8 !important; }
   .fab-btn:active { transform: scale(0.94) !important; }
-  @media print { .fab-btn { display: none !important; } }
+  @media print { .fab-btn, .calc-pop { display: none !important; } }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
   .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
   .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
@@ -622,8 +622,40 @@ const monthAddValue = (additions, m, code) => parseFloat(additions?.[m]?.[code])
 // ทำให้งบคงเหลือ / เกินงบ ของจัดซื้อและบัญชีรวมส่วนเผื่อนี้ด้วย (ตัดสินใจ 2026-09-26) · งานเพิ่มรายเดือนไม่ถูกบวก %
 const WASTE_RATE = 0.03;
 const WASTE_LBL  = "3%";
-const wasteOf   = (v) => (parseFloat(v) || 0) * WASTE_RATE;
+const wasteOf   = (v) => Math.round((parseFloat(v) || 0) * WASTE_RATE * 100) / 100;   // ปัดเป็นสตางค์ ให้จอ/Excel/เทียบ PO ตรงกัน
 const withWaste = (v) => (parseFloat(v) || 0) + wasteOf(v);
+// คำนวณ "ยอดแม่" ใหม่จากข้อมูลย่อย — ใช้หลังรวมการแก้จาก 2 เครื่อง (ยอดแม่เก็บเป็นค่าสรุป ถ้ารวมทีละช่อง
+// ยอดแม่จะเป็นของเครื่องใดเครื่องหนึ่ง ไม่ตรงกับผลรวมลูก) · กติกาเดียวกับตอนกดบันทึกในหน้า QS
+const rollupTenders = (tn, extra = []) => {
+  if (!tn || typeof tn !== "object" || Array.isArray(tn)) return tn;
+  const out = { ...tn }, kidsOf = {};
+  (extra || []).forEach(e => { if (e && e.parentCode && !e.addedInMonth) (kidsOf[e.parentCode] = kidsOf[e.parentCode] || []).push(e.code); });
+  Object.entries(kidsOf).forEach(([p, kids]) => {
+    const v = kids.reduce((s, k) => s + (parseFloat(out[k]) || 0), 0);
+    if (v > 0) out[p] = v; else delete out[p];
+  });
+  return out;
+};
+const rollupAdditions = (ad, extra = []) => {
+  if (!ad || typeof ad !== "object" || Array.isArray(ad)) return ad;
+  const out = { ...ad };
+  const rows = [...ACCOUNTS.map(a => a.code), ...(extra || []).filter(e => e && !e.parentCode).map(e => e.code)];
+  Object.keys(ad).forEach(m => {
+    const mo0 = ad[m];
+    if (m.startsWith("$") || !mo0 || typeof mo0 !== "object" || Array.isArray(mo0)) return;
+    const mo = { ...mo0 }, cols = Array.isArray(mo.$columns) ? mo.$columns : Array.isArray(ad.$columns) ? ad.$columns : [];
+    rows.forEach(code => {
+      const kids = (extra || []).filter(e => e && e.parentCode === code && (!e.addedInMonth || e.addedInMonth <= m));
+      let v;
+      if (kids.length) v = kids.reduce((s, k) => s + (parseFloat(mo[k.code]) || 0), 0);
+      else if (cols.length && cols.some(c => `${code}:${c.id}` in mo)) v = cols.reduce((s, c) => s + (parseFloat(mo[`${code}:${c.id}`]) || 0), 0);
+      else return;
+      if (v) mo[code] = v; else delete mo[code];
+    });
+    out[m] = mo;
+  });
+  return out;
+};
 const buildCombinedBudget = (tenderCosts, additions) => {
   const combined = {};
   Object.entries(tenderCosts || {}).forEach(([k, v]) => { combined[k] = k.startsWith("$") ? v : withWaste(v); });
@@ -985,7 +1017,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const dashMonths = [...new Set(Object.keys(additions||{}).filter(k=>!k.startsWith("$")))].sort();
   const dashItems  = dashMonths.map(m => ({ label: monthShortLabel(m), value: accounts.reduce((s,a)=> s + monthAddValue(additions, m, a.code), 0) }));
   const dashBase   = accounts.reduce((s,a)=> s + (parseFloat(tenderCosts[a.code])||0), 0);
-  const dashWaste  = dashBase * WASTE_RATE;
+  const dashWaste  = accounts.reduce((s,a)=> s + wasteOf(tenderCosts[a.code]), 0);
   const dashAdded  = dashItems.reduce((s,i)=> s + i.value, 0);
   // แถว TOTAL (A1) ของชีต "งบประมาณ"/"รายเดือน (สรุป)" = 5 + จำนวนแถวข้อมูล
   // (หัวข้อ 3 แถว + หัวตารางแถว 4 → ข้อมูลเริ่มแถว 5 → TOTAL อยู่แถว 5+N)
@@ -1026,8 +1058,8 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   dashList.forEach(a => {
     const baseline = parseFloat(tenderCosts[a.code]) || 0;
     const waste    = wasteOf(baseline);
-    const total    = parseFloat(combinedBudget[a.code]) || 0;
-    const added = total - baseline - waste;
+    const added    = Object.keys(additions||{}).reduce((s,m)=> m.startsWith("$") ? s : s + monthAddValue(additions, m, a.code), 0);   // รวมตรง ๆ (ไม่ลบกัน กันเศษทศนิยม -฿0)
+    const total    = baseline + waste + added;
     rows1.push([a.code, a.name, a.group, baseline, waste, added, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups1.push(a.group);
   });
@@ -1040,7 +1072,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   // ลิงก์ด้วยสูตร: เผื่อเศษ = ราคาเดิม × % · งบรวม = ราคาเดิม + เผื่อเศษ + เพิ่ม (ต่อแถว) · TOTAL = ผลรวมทั้งคอลัมน์
   for (let r = dataStart1; r <= dataEnd1; r++) {
     const R = r + 1, refW = XLSX.utils.encode_cell({ r, c:4 }), ref = XLSX.utils.encode_cell({ r, c:6 });
-    if (ws1[refW]) ws1[refW].f = `D${R}*${WASTE_RATE}`;
+    if (ws1[refW]) ws1[refW].f = `ROUND(D${R}*${WASTE_RATE},2)`;
     if (ws1[ref]) ws1[ref].f = `D${R}+E${R}+F${R}`;
   }
   ["D","E","F","G"].forEach((L, i) => {
@@ -1078,7 +1110,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
   const lastMonthL = XLSX.utils.encode_col(3 + M);
   for (let r = dataStart2; r <= dataEnd2; r++) {
     const R = r + 1, refW = XLSX.utils.encode_cell({ r, c: 3 }), ref = XLSX.utils.encode_cell({ r, c: totColC });
-    if (ws2[refW]) ws2[refW].f = `C${R}*${WASTE_RATE}`;
+    if (ws2[refW]) ws2[refW].f = `ROUND(C${R}*${WASTE_RATE},2)`;
     if (ws2[ref]) ws2[ref].f = M > 0 ? `C${R}+D${R}+SUM(E${R}:${lastMonthL}${R})` : `C${R}+D${R}`;
   }
   [2, 3, ...months.map((_,i)=>4+i), totColC].forEach(c => {
@@ -1275,7 +1307,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
     return "1F2937";
   };
   // คอลัมน์ต้นทุน: Tender Cost · Take off · Stock · Issue PO · Pending PO + เดือน (1 ช่อง/เดือน) + TOTAL + Balance Cost
-  const header = ["Acc. Code","Acc. Name",`Tender Cost (+${WASTE_LBL})`,"Take off","Stock","Issue PO","Pending PO"];
+  const header = ["Acc. Code","Acc. Name",`Tender Cost (รวมเผื่อ ${WASTE_LBL})`,"Take off","Stock","Issue PO","Pending PO"];
   mMonths.forEach(mk => header.push(monthShortLabel(mk)));
   header.push("TOTAL","Balance Cost");
   const rows = [
@@ -1365,7 +1397,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
       mgRow, pyRow, mgTot:mgRow.reduce((s,c)=>s+c.eff,0), pyTot:pyRow.reduce((s,x)=>s+x,0) };
   }).filter(r => r.budget||r.committed||r.stock||r.mgTot||r.pyTot);
   if (!rowsData.length) return;
-  const header = ["Acc. Code","Acc. Name",`Tender Cost (+${WASTE_LBL})`,"Balance Pending PO","Stock","Pending PO",
+  const header = ["Acc. Code","Acc. Name",`Tender Cost (รวมเผื่อ ${WASTE_LBL})`,"Balance Pending PO","Stock","Pending PO",
     ...mgM.map(mk=>`${monthShortLabel(mk)} (เข้า)`), "รวมเข้า",
     ...payM.map(mk=>`${monthShortLabel(mk)} (จ่าย)`), "รวมจ่าย", "Total PO", "Balance Cost"];
   const rows = [
@@ -1801,7 +1833,7 @@ export default function App() {
   const [exportMsg,   setExportMsg]   = useState("");   // สถานะตอนกด Export (กำลังสร้าง/เสร็จ/พลาด)
   const runExport = async (fn) => {
     setExportMsg(t("⏳ กำลังสร้างไฟล์ Excel…","⏳ Building Excel file…"));
-    try { await inThai(fn); setExportMsg(t("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด","✓ File created — check your Downloads folder")); setTimeout(()=>setExportMsg(""), 3500); }
+    try { await new Promise(r => setTimeout(r, 40)); await inThai(fn); setExportMsg(t("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด","✓ File created — check your Downloads folder")); setTimeout(()=>setExportMsg(""), 3500); }
     catch (e) { console.warn("export failed:", e); setExportMsg(t("⚠ สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง","⚠ Couldn't create the file — please try again")); setTimeout(()=>setExportMsg(""), 4500); }
   };
 
@@ -1988,20 +2020,36 @@ export default function App() {
   // เขียนลงเซิร์ฟเวอร์ พร้อมลองใหม่อัตโนมัติ 1 ครั้งเมื่อเน็ตสะดุดชั่วคราว ก่อนค่อย
   // แจ้งเตือน (กันเซฟหลุดเพราะ blip เล็ก ๆ). ถ้าส่ง prev มาด้วย จะใช้ ssMerge เพื่อ
   // "รวม" การแก้ของเราลงบนของล่าสุดบนเซิร์ฟเวอร์ (กันทับงานคนอื่นที่แก้พร้อมกัน).
-  const persist = (key, value, prev) => {
+  const persist = (key, value, prev, setState) => {
     // จำเวลาที่เครื่องนี้เขียน key นี้ ทั้งก่อนยิงและหลังสำเร็จ — เพื่อให้ echo ของ realtime
     // ที่วิ่งกลับมา (ซึ่งมาหลังเขียนเสร็จ) ยังอยู่ในกรอบเวลา แล้วถูกข้าม ไม่ดึงมาทับตัวเอง
     const mark = () => { lastWriteRef.current[key] = Date.now(); };
     mark();
-    const attempt = () => { mark(); return (prev !== undefined ? ssMerge(key, prev, value) : ssOrThrow(key, value)); };
+    // หลังรวมงานของเครื่องอื่นเข้ามา: คำนวณยอดแม่ใหม่ (Tender / รายเดือน) ให้ตรงกับข้อมูลย่อย
+    const pid = (key.match(/^tcs-(?:tenders|additions)-(.+)$/) || [])[1];
+    const normalize = pid ? (v) => {
+      const extra = currentRef.current[`tcs-extra-${pid}`] || [];
+      return key.startsWith("tcs-tenders-") ? rollupTenders(v, extra) : rollupAdditions(v, extra);
+    } : undefined;
+    const attempt = () => { mark(); return (prev !== undefined ? ssMerge(key, prev, value, { normalize }) : ssOrThrow(key, value)); };
+    const done = (written) => {
+      mark(); setSyncedAt(new Date()); setSyncError("");
+      // ค่าที่เขียนจริงมีงานของเครื่องอื่นรวมอยู่ → แสดงบนจอด้วย (เฉพาะถ้าเรายังไม่ได้แก้ต่อ กันทับงานที่เพิ่งพิมพ์)
+      if (setState && written !== undefined && currentRef.current[key] === value && JSON.stringify(written) !== JSON.stringify(value)) {
+        setState(written); dropUndoFor(key);
+      }
+    };
+    const noRetry = (e) => e?.code === "42501" || e?.code === "GONE";   // ไม่มีสิทธิ์ / ถูกลบไปแล้ว → ลองซ้ำก็ไม่ผ่าน
     return attempt()
-      .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
-      .catch(e0 => (e0?.code === "42501" ? Promise.reject(e0) : new Promise(res => setTimeout(res, 900)).then(attempt))   // ไม่มีสิทธิ์ → ลองซ้ำก็ไม่ผ่าน
-        .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
+      .then(done)
+      .catch(e0 => (noRetry(e0) ? Promise.reject(e0) : new Promise(res => setTimeout(res, 900)).then(attempt))
+        .then(done)
         .catch(e => {
           console.warn("บันทึกไม่สำเร็จ:", key, e);
           setSyncError(e?.code === "42501"
             ? t("⚠ บัญชีนี้ไม่มีสิทธิ์บันทึกส่วนนี้ — การแก้ล่าสุดไม่ถูกบันทึก (รีเฟรชหน้าเพื่อดูค่าจริง แล้วติดต่อแอดมิน)","⚠ This account isn't allowed to save this part — your latest change was not saved (refresh to see the real data, then contact an admin)")
+            : e?.code === "GONE"
+            ? t("⚠ ข้อมูลส่วนนี้ถูกลบไปแล้ว (เช่นโครงการถูกลบ) — การแก้ล่าสุดไม่ถูกบันทึก กรุณารีเฟรชหน้า","⚠ This data was deleted (e.g. the project was removed) — your latest change was not saved. Please refresh")
             : t("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต","⚠ Save failed — your latest change may not be saved. Please retry / check your connection"));
         }));
   };
@@ -2010,7 +2058,7 @@ export default function App() {
     if (undoRef.current.length > 60) undoRef.current.shift();
     redoRef.current = []; // มีการแก้ใหม่ → ล้าง redo
     setState(next);
-    persist(key, next, prev);
+    persist(key, next, prev, setState);
     syncUndo();
   }, []);
   const undo = useCallback(() => {
@@ -2019,7 +2067,7 @@ export default function App() {
     const cur = currentRef.current[e.key];
     redoRef.current.push({ key: e.key, value: cur, setState: e.setState, label: e.label });
     e.setState(e.value);
-    persist(e.key, e.value, cur);
+    persist(e.key, e.value, cur, e.setState);
     syncUndo();
   }, []);
   const redo = useCallback(() => {
@@ -2028,7 +2076,7 @@ export default function App() {
     const cur = currentRef.current[e.key];
     undoRef.current.push({ key: e.key, value: cur, setState: e.setState, label: e.label });
     e.setState(e.value);
-    persist(e.key, e.value, cur);
+    persist(e.key, e.value, cur, e.setState);
     syncUndo();
   }, []);
   // เปลี่ยนโครงการ "หรือ" เปลี่ยนหน้า → ล้างประวัติ undo (กันย้อนข้ามโครงการ/ข้ามบริบท)
@@ -2395,7 +2443,7 @@ export default function App() {
         </div>
       )}
       {screen === "app" && projReadyId === activeId && effectiveRole === "qs"          && (
-        <QSView {...sharedProps} onExport={() => runExport(() =>
+        <QSView {...sharedProps} runExportFn={runExport} onExport={() => runExport(() =>
           // ใช้ฟอร์มเดียวกันทั้งเปิด/ปิด USD — ปิด USD ก็แค่ไม่มีคอลัมน์ USD (ฟอร์มเหมือนกัน)
           Promise.resolve(exportQSExcel(activeProject, tenderCosts, additions, extraItems, hiddenAccounts))
         )} />
@@ -3084,14 +3132,20 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
     if (!ids.length) return;
     let alive = true;
     const parts = ["tenders","additions","extra","hidden","po"];
-    sgMany(ids.flatMap(id => parts.map(k => `tcs-${k}-${id}`)))
-      .then(all => {
+    // แบ่งเป็นชุดละ 40 โครงการ (กัน URL ยาวเกินเมื่อมีโครงการเยอะ)
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 40) chunks.push(ids.slice(i, i + 40));
+    Promise.all(chunks.map(c => sgMany(c.flatMap(id => parts.map(k => `tcs-${k}-${id}`)))))
+      .then(res => {
         if (!alive) return;
-        const out = {};
-        ids.forEach(id => { const d = {}; parts.forEach(k => { d[k] = all[`tcs-${k}-${id}`]; }); out[id] = projectSummary(d); });
+        const all = Object.assign({}, ...res), out = {};
+        ids.forEach(id => {
+          const d = {}; parts.forEach(k => { d[k] = all[`tcs-${k}-${id}`]; });
+          try { out[id] = projectSummary(d); } catch (e) { console.warn("สรุปโครงการไม่ได้:", id, e); out[id] = "err"; }   // ข้อมูลเสียโครงการเดียวไม่ลากทั้งหน้า
+        });
         setSummaries(out);
       })
-      .catch(e => console.warn("โหลดสรุปโครงการไม่สำเร็จ:", e));
+      .catch(e => { console.warn("โหลดสรุปโครงการไม่สำเร็จ:", e); if (alive) setSummaries(Object.fromEntries(ids.map(id => [id, "err"]))); });
     return () => { alive = false; };
   }, [projIdsKey]);
   const shownProjects = projects.filter(p => {
@@ -3219,7 +3273,10 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
   );
 }
 
-function ProjectCard({ project, summary, onOpen, onDelete }) {
+function ProjectCard({ project, summary: sm, onOpen, onDelete }) {
+  const failed = sm === "err";                     // โหลดตัวเลขไม่ได้ → แสดง "—" (ไม่ค้าง "…")
+  const summary = failed ? null : sm;
+  const wait = failed ? "—" : "…";
   const ageRaw = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
   const age = Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : null;
   return (
@@ -3242,9 +3299,9 @@ function ProjectCard({ project, summary, onOpen, onDelete }) {
       </div>
       <div className="proj-stats" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16,padding:"10px 12px",background:T.bg,borderRadius:10}}>
         {[
-          [t("งบรวม","Budget"), summary ? "฿"+fmtK(summary.budget) : "…", T.textPrimary],
-          [t("ออก PO แล้ว","PO issued"), summary ? (summary.budget > 0 ? `${summary.pct.toFixed(0)}%` : (summary.poCount ? "฿"+fmtK(summary.committed) : "0%")) : "…", summary && summary.pct > 100 ? T.red : T.blue],
-          [t("ต้องจ่ายเดือนนี้","Due this month"), summary ? (summary.dueNow > 0 ? "฿"+fmtK(summary.dueNow) : "—") : "…", summary && summary.dueNow > 0 ? T.red : T.textMuted],
+          [t("งบรวม","Budget"), summary ? "฿"+fmtK(summary.budget) : wait, T.textPrimary],
+          [t("ออก PO แล้ว","PO issued"), summary ? (summary.budget > 0 ? `${summary.pct.toFixed(0)}%` : (summary.poCount ? "฿"+fmtK(summary.committed) : "0%")) : wait, summary && summary.pct > 100 ? T.red : T.blue],
+          [t("ต้องจ่ายเดือนนี้","Due this month"), summary ? (summary.dueNow > 0 ? "฿"+fmtK(summary.dueNow) : "—") : wait, summary && summary.dueNow > 0 ? T.red : T.textMuted],
         ].map(([l, v, c]) => (
           <div key={l} style={{minWidth:0}}>
             <div style={{fontSize:11,color:T.textMuted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{l}</div>
@@ -3390,6 +3447,9 @@ const calcEval = (src) => {
   } catch (e) { return { ok: false, div0: e.message === "div0" }; }
 };
 const fmtCalc = (v) => Number(v).toLocaleString("en-US", { maximumFractionDigits: 4 });
+// ตัวเลขเป็นข้อความธรรมดา (ไม่มี , และไม่เป็น 1e-8 / 1e+21) — ใช้ใส่กลับเข้าสูตร/คัดลอก
+const plainNum = (v, dp = 8) => { const r = Math.round(v * 10 ** dp) / 10 ** dp; return Number.isInteger(r) ? String(r) : r.toFixed(dp).replace(/\.?0+$/, ""); };
+const CALC_MAX = 1e15;   // เกินนี้ความละเอียดของตัวเลขไม่พอ
 // แสดงสูตรให้อ่านง่าย: ใส่ , หลักพัน · × ÷ − แทน * / -
 const prettyExpr = (s) => String(s).replace(/\d+(\.\d*)?/g, (m) => { const [a, b] = m.split("."); return Number(a).toLocaleString("en-US") + (b !== undefined ? "." + b : ""); })
   .replace(/\*/g, " × ").replace(/\//g, " ÷ ").replace(/([\d%)])-/g, "$1 − ").replace(/\+/g, " + ");
@@ -3456,6 +3516,20 @@ function CalculatorPopup({ selSum = null }) {
   const exprRef = useRef(null);
   useEffect(() => { if (open) setTimeout(() => boxRef.current?.focus(), 0); }, [open]);
   // วางตำแหน่งด้วย top/left เสมอ (เปิดครั้งแรกที่มุมขวาล่าง) — เวลาความสูงเปลี่ยน ปุ่มจะไม่เลื่อนหนีนิ้ว/เมาส์
+  const [, setVp] = useState(0);
+  useEffect(() => {   // หมุนจอ/ย่อหน้าต่าง → วาดใหม่แล้วดึงกลับเข้าจอ
+    if (!open) return;
+    const f = () => setVp(v => v + 1);
+    window.addEventListener("resize", f); window.addEventListener("orientationchange", f);
+    return () => { window.removeEventListener("resize", f); window.removeEventListener("orientationchange", f); };
+  }, [open]);
+  useLayoutEffect(() => {   // ทุกครั้งที่วาด: ถ้าหลุดขอบ (ความสูงเปลี่ยน / จอเล็กลง / เปิดใหม่) ดึงกลับเข้าจอ
+    if (!open || !pos || !boxRef.current) return;
+    const r = boxRef.current.getBoundingClientRect();
+    const x = Math.min(Math.max(4, pos.x), Math.max(4, window.innerWidth - r.width - 4));
+    const y = Math.min(Math.max(4, pos.y), Math.max(4, window.innerHeight - r.height - 4));
+    if (x !== pos.x || y !== pos.y) setPos({ x, y });
+  });
   useLayoutEffect(() => {
     if (!open || pos || !boxRef.current) return;
     const r = boxRef.current.getBoundingClientRect();
@@ -3476,8 +3550,11 @@ function CalculatorPopup({ selSum = null }) {
     if (k === "=") {
       const r = calcEval(expr);
       if (!r.ok) { if (!r.empty) setErr(r.div0 ? t("หารด้วย 0 ไม่ได้","Can't divide by 0") : t("สูตรไม่ครบ","Incomplete formula")); return; }
-      setDone({ expr, v: r.v }); setHist(h => [{ expr, v: r.v }, ...h].slice(0, 10));
-      setExpr(String(r.v)); return;
+      if (Math.abs(r.v) >= CALC_MAX) { setErr(t("ตัวเลขใหญ่เกินไป","Number too large")); return; }
+      if (done && expr === plainNum(done.v)) return;                       // กด = ซ้ำ → ไม่ต้องทำอะไร
+      setDone({ expr, v: r.v });
+      if (/[+\-*/%]/.test(expr.replace(/^-/, ""))) setHist(h => [{ expr, v: r.v }, ...h].slice(0, 10));   // เก็บเฉพาะที่เป็นสูตรจริง
+      setExpr(plainNum(r.v)); return;
     }
     // หลังกด = : พิมพ์ตัวเลขต่อ = เริ่มใหม่ · พิมพ์เครื่องหมายต่อ = ใช้ผลลัพธ์เดิมต่อ
     let base = expr;
@@ -3489,17 +3566,18 @@ function CalculatorPopup({ selSum = null }) {
     }
     if (k === ".") { const seg = base.split(/[+\-*/()%]/).pop(); if (seg.includes(".")) return; setExpr(base + (seg === "" ? "0." : ".")); return; }
     if (k === "%") { if (!/[\d)]$/.test(base)) return; setExpr(base + "%"); return; }
+    if (/\d/.test(k) && (base.split(/[+\-*/()%]/).pop() || "").replace(".", "").length >= 15) return;   // ยาวเกินความละเอียดตัวเลข
     setExpr(base + k);
   };
   const insertNumber = (v) => {
-    const n = String(Math.round(v * 100) / 100);
+    const n = plainNum(Math.round(v * 100) / 100, 2);
     setDone(null); setErr("");
     setExpr(e => (!e || /[+\-*/(]$/.test(e)) ? e + (n.startsWith("-") && e ? `(${n})` : n) : e + "+" + n);
   };
   const result = done ? done.v : preview.ok ? preview.v : null;
   const copy = async () => {
     if (result == null) return;
-    const txt = String(Math.round(result * 100) / 100);
+    const txt = plainNum(result, 4);   // ความละเอียดเท่าที่แสดงบนจอ
     try { await navigator.clipboard.writeText(txt); } catch { /* บางเบราว์เซอร์ไม่อนุญาต */ }
     setCopied(true); setTimeout(() => setCopied(false), 1500);
   };
@@ -3508,17 +3586,40 @@ function CalculatorPopup({ selSum = null }) {
     const k = e.key;
     if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "c" && !String(window.getSelection?.() || "")) { e.preventDefault(); copy(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const map = { "Enter": "=", "=": "=", "Backspace": "⌫", "Delete": "AC", "x": "*", "X": "*", ",": "" };
     if (k === "Escape") { e.preventDefault(); CalcStore.set(false); return; }
-    if (k.toLowerCase() === "c") { e.preventDefault(); press("AC"); return; }
-    const m = k in map ? map[k] : k;
+    if (k === " " || k === "Spacebar") { e.preventDefault(); return; }   // กันเผลอกดปุ่มที่โฟกัสอยู่ (เช่นปิด)
+    // แป้นพิมพ์ภาษาไทย: แถวตัวเลขให้ ๅ / - ภ ถ … และ x c . / - = ให้ ป แ ใ ฝ ข ช → ดูจากตำแหน่งปุ่ม (e.code) ประกอบ
+    const code = e.code || "";
+    const map = { "Enter": "=", "Backspace": "⌫", "Delete": "AC", "x": "*", "X": "*", "c": "AC", "C": "AC", ",": "" };
+    const byCode = { NumpadAdd:"+", NumpadSubtract:"-", NumpadMultiply:"*", NumpadDivide:"/", NumpadDecimal:".", NumpadEnter:"=", NumpadEqual:"=",
+      KeyX:"*", KeyC:"AC", Period:".", Slash:"/", Minus:"-", Equal:"=" };
+    const dm = /^Digit(\d)$/.exec(code);
+    let m = null;
+    if (/^[0-9]$/.test(k)) m = k;
+    else if (dm && !"%*()".includes(k)) m = dm[1];                 // แถวตัวเลข (ยกเว้น Shift+5/8/9/0 บนแป้นอังกฤษ = % * ( ))
+    else if (/^Numpad\d$/.test(code)) m = code.slice(6);
+    else if (k in map) m = map[k];
+    else if (/^[.+\-*/%()=]$/.test(k)) m = k;
+    else if (byCode[code]) m = byCode[code];
     if (m === "") { e.preventDefault(); return; }
     if (/^[0-9.+\-*/%()=⌫]$/.test(m) || m === "AC" || m === "⌫") { e.preventDefault(); press(m); }
   };
   const onPaste = (e) => {
-    const txt = (e.clipboardData?.getData("text") || "").replace(/[^\d.,+\-*/×÷%()−]/g, "").replace(/,/g, "");
-    if (!txt) return;
-    e.preventDefault(); setDone(null); setErr(""); setExpr(x => x + txt.replace(/×/g, "*").replace(/÷/g, "/").replace(/−/g, "-"));
+    const raw = e.clipboardData?.getData("text") || "";
+    if (!raw.trim()) return;
+    e.preventDefault(); setCopied(false);
+    // หลายช่องจาก Excel (แท็บ/ขึ้นบรรทัด) → บวกกัน · "(1,234.50)" แบบบัญชี = ติดลบ · × ÷ − x → เครื่องหมายคิดเลข
+    const cells = raw.split(/[\t\r\n]+/).map(c => c.trim()).filter(Boolean).map(c => {
+      const neg = /^\(\s*[\d,.]+\s*\)$/.test(c);
+      let v = c.replace(/[฿$\s]/g, "").replace(/,/g, "").replace(/×|[xX]/g, "*").replace(/÷/g, "/").replace(/[−–]/g, "-");
+      if (neg) v = "-" + v.replace(/[()]/g, "");
+      return v;
+    });
+    const txt = cells.length > 1 ? cells.map(c => (/^-/.test(c) ? `(${c})` : c)).join("+") : (cells[0] || "");
+    if (!txt || /[^\d.+\-*/%()]/.test(txt)) { setErr(t("วางได้เฉพาะตัวเลข/สูตร","Only numbers or formulas can be pasted")); return; }
+    setErr("");
+    if (done) { setDone(null); setExpr(/^[\d.(]/.test(txt) ? txt : expr + txt); return; }   // หลังกด = : ตัวเลข → เริ่มใหม่
+    setExpr(x => x + txt);
   };
   // ลากย้ายจากแถบหัว
   const onDragStart = (e) => {
@@ -3534,7 +3635,6 @@ function CalculatorPopup({ selSum = null }) {
     setPos({ x, y });
   };
   const onDragEnd = () => { drag.current = null; };
-  const clampIn = (p) => { const r = boxRef.current?.getBoundingClientRect(); if (!r || !p) return p; return { x: Math.min(Math.max(4, p.x), Math.max(4, window.innerWidth - r.width - 4)), y: Math.min(Math.max(4, p.y), Math.max(4, window.innerHeight - r.height - 4)) }; };
 
   const KEYS = [
     ["AC","⌫","%","/"],
@@ -3555,13 +3655,13 @@ function CalculatorPopup({ selSum = null }) {
     if (op) return { ...base, color:T.blue, background:"rgba(219,234,254,0.95)", fontSize:20 };
     return base;
   };
-  const cp = clampIn(pos);
-  const place = cp ? { left: cp.x, top: cp.y } : { right: 20, bottom: 80, visibility: "hidden" };
+  const place = pos ? { left: pos.x, top: pos.y } : { right: 20, bottom: 80, visibility: "hidden" };
 
   return (
     <div ref={boxRef} data-calc tabIndex={-1} onKeyDown={onKey} onPaste={onPaste} role="dialog" aria-label={t("เครื่องคิดเลข","Calculator")}
+      onPointerDownCapture={() => { const b = boxRef.current; if (b && !b.contains(document.activeElement)) b.focus({ preventScroll: true }); }}
       className="calc-pop"
-      style={{position:"fixed", ...place, zIndex:250, width:292, maxWidth:"calc(100vw - 24px)", outline:"none",
+      style={{position:"fixed", ...place, zIndex:250, width:292, maxWidth:"calc(100vw - 24px)", maxHeight:"calc(100vh - 8px)", overflowY:"auto", outline:"none",
         background:"rgba(246,249,253,0.93)", backdropFilter:"blur(18px) saturate(160%)", WebkitBackdropFilter:"blur(18px) saturate(160%)",
         border:"1px solid rgba(255,255,255,0.7)", borderRadius:24, boxShadow:"0 24px 60px rgba(15,23,42,0.28), inset 0 1px 0 rgba(255,255,255,0.6)",
         padding:14, animation:"fadeIn 0.15s ease"}}>
@@ -3569,11 +3669,11 @@ function CalculatorPopup({ selSum = null }) {
       <div onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd}
         style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,cursor:"grab",touchAction:"none"}}>
         <span style={{fontSize:12,fontWeight:700,color:T.textMuted,letterSpacing:0.5,flex:1}}>🧮 {t("เครื่องคิดเลข","Calculator")}</span>
-        <button onClick={()=>setShowHist(v=>!v)} title={t("ประวัติการคำนวณ","History")} tabIndex={-1}
+        <button onClick={()=>setShowHist(v=>!v)} title={t("ประวัติการคำนวณ","History")} aria-label={t("ประวัติการคำนวณ","History")} tabIndex={-1}
           style={{border:"none",background:showHist?"rgba(37,99,235,0.12)":"transparent",color:showHist?T.blue:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:14}}>🕘</button>
-        <button onClick={copy} title={t("คัดลอกผลลัพธ์","Copy result")} tabIndex={-1} disabled={result==null}
+        <button onClick={copy} title={t("คัดลอกผลลัพธ์","Copy result")} aria-label={t("คัดลอกผลลัพธ์","Copy result")} tabIndex={-1} disabled={result==null}
           style={{border:"none",background:"transparent",color:copied?T.green:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:result==null?"default":"pointer",fontSize:copied?12:14,fontWeight:700}}>{copied ? t("คัดลอกแล้ว","Copied") : "📋"}</button>
-        <button onClick={()=>CalcStore.set(false)} title={t("ปิด (Esc)","Close (Esc)")} tabIndex={-1}
+        <button onClick={()=>CalcStore.set(false)} title={t("ปิด (Esc)","Close (Esc)")} aria-label={t("ปิด","Close")} tabIndex={-1}
           style={{border:"none",background:"transparent",color:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:15,lineHeight:1}}>✕</button>
       </div>
 
@@ -3682,7 +3782,7 @@ function Shell({ role, color, project, onBack, onHome, onDept, children, syncedA
 }
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, setEditMode }) {
+function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, runExportFn, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
   const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
   const goTab   = (id) => { if (id !== tab) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setTabHist(h => [...h, tab]); setTab(id); } };
@@ -3775,7 +3875,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
           ))}
           <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
           {tab==="monthly" && (
-            <button onClick={()=>monthlyExportRef.current && inThai(monthlyExportRef.current)} className="btn-ghost"
+            <button onClick={()=>{ const fn = monthlyExportRef.current; if (!fn) return; if (runExportFn) runExportFn(fn); else inThai(fn); }} className="btn-ghost"
               style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
               ⬇️ {t("Export เดือนนี้","Export this month")}
             </button>
@@ -3877,7 +3977,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   const allRows = [...visibleAccounts, ...standaloneExtras.map(e => ({ code:e.code, name:e.name, group:e.group, isExtra:true }))];
 
   const base  = allRows.reduce((s,r)=>s+effectiveValue(r),0);
-  const adj3  = base * WASTE_RATE;   // เผื่อเศษ/สูญเสีย — รวมในงบ (ทุน) แล้ว
+  const adj3  = allRows.reduce((s,r)=>s+wasteOf(effectiveValue(r)),0);   // เผื่อเศษ/สูญเสีย — รวมในงบ (ทุน) แล้ว · ผลรวมรายรหัส (ปัดสตางค์) ให้ตรงกับตาราง
 
   const q = search.toLowerCase();
   const filtered = allRows.filter(a => {
@@ -3976,7 +4076,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
     <div style={{padding:"4px 28px 24px"}}>
       {/* Stats */}
       <div className="stat-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:24}}>
-        <StatCard label={t("ราคาเดิมรวม (Tender Cost)","Total Tender Cost")} value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub={t("ราคาเดิมทั้งหมด — ใช้เป็นงบตั้งต้นจริง","All baseline prices — used as the real budget")} color={T.blue} icon="📐" accent={T.blueLight}/>
+        <StatCard label={t("ราคาเดิมรวม (Tender Cost)","Total Tender Cost")} value={"฿"+fmt0(base)} thb={base} rate={usdRate} sub={t(`ราคาเดิมทั้งหมด (ก่อนบวกเผื่อเศษ ${WASTE_LBL})`,`All baseline prices (before the ${WASTE_LBL} wastage)`)} color={T.blue} icon="📐" accent={T.blueLight}/>
         <StatCard label={t(`เผื่อเศษ/สูญเสีย ${WASTE_LBL}`,`Wastage allowance ${WASTE_LBL}`)} value={"฿"+fmt0(adj3)} thb={adj3} rate={usdRate} sub={t("รวมในงบแล้ว — บวกเข้าแต่ละ Acc. Code","Included in the budget — added to each Acc. Code")} color={T.amber} icon="⚙️" accent={T.amberBg}/>
         <StatCard label={t("งานเพิ่ม (รวมทุกเดือน)","Additions (all months)")} value={"฿"+fmt0(addAll)} thb={addAll} rate={usdRate} sub={t("รวมยอดที่เพิ่มจากแท็บรายเดือน","Total added from the Monthly tab")} color={T.purple} icon="➕" accent={T.purpleBg}/>
         <StatCard label={t("รวมทั้งหมด","Grand total")} value={"฿"+fmt0(base+adj3+addAll)} thb={base+adj3+addAll} rate={usdRate} sub={t(`ราคาเดิม + เผื่อเศษ ${WASTE_LBL} + งานเพิ่ม (งบจริง)`,`Baseline + ${WASTE_LBL} wastage + additions (actual budget)`)} color={T.green} icon="✅" accent={T.greenBg}/>
@@ -5922,7 +6022,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                 <tr>
                   <th onClick={()=>toggleSort("code")}    style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
                   <th onClick={()=>toggleSort("name")}    style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
-                  <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS รวมเผื่อเศษ ${WASTE_LBL}`,`QS budget incl. ${WASTE_LBL} wastage`)}>Tender Cost (+{WASTE_LBL}){arrow("tender")}</th>
+                  <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS = ราคาเดิม + เผื่อเศษ ${WASTE_LBL} (ของราคาเดิม) + งานเพิ่ม`,`QS budget = baseline + ${WASTE_LBL} wastage (on baseline) + additions`)}>Tender Cost<span style={{fontSize:10,fontWeight:600,opacity:0.75,marginLeft:4}}>{t(`รวมเผื่อ ${WASTE_LBL}`,`incl. ${WASTE_LBL}`)}</span>{arrow("tender")}</th>
                   <th onClick={()=>toggleSort("takeoff")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Take off{arrow("takeoff")}</th>
                   <th onClick={()=>toggleSort("stock")}   style={{ ...hM(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
                   <th onClick={()=>toggleSort("issue")}   style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Issue PO{arrow("issue")}</th>
@@ -7213,7 +7313,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
             <tr>
               <th onClick={()=>toggleSort("code")}      style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
               <th onClick={()=>toggleSort("name")}      style={{ ...hCell("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
-              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS รวมเผื่อเศษ ${WASTE_LBL}`,`QS budget incl. ${WASTE_LBL} wastage`)}>Tender Cost (+{WASTE_LBL}){arrow("budget")}</th>
+              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS = ราคาเดิม + เผื่อเศษ ${WASTE_LBL} (ของราคาเดิม) + งานเพิ่ม`,`QS budget = baseline + ${WASTE_LBL} wastage (on baseline) + additions`)}>Tender Cost<span style={{fontSize:10,fontWeight:600,opacity:0.75,marginLeft:4}}>{t(`รวมเผื่อ ${WASTE_LBL}`,`incl. ${WASTE_LBL}`)}</span>{arrow("budget")}</th>
               <th onClick={()=>toggleSort("balPO")}     style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Balance Pending PO{arrow("balPO")}</th>
               <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
               <th onClick={()=>toggleSort("balCost")}   style={{ ...hCell(bCost), minWidth: 100, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("balCost")}</th>
