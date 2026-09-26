@@ -554,7 +554,9 @@ const GLOBAL_CSS = `
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
   .calc-pop button:active { transform: scale(0.96); }
-  @media (max-width: 640px) { .calc-toggle-lbl { display: none; } }
+  .fab-btn:hover { background: #1d4ed8 !important; }
+  .fab-btn:active { transform: scale(0.94) !important; }
+  @media print { .fab-btn { display: none !important; } }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
   .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
   .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
@@ -2308,9 +2310,9 @@ export default function App() {
         <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
           background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
       )}
-      {session && <CalculatorPopup selSum={selStats ? selStats.sum : null} />}
+      {session && <><ScrollTopFab /><CalcFab /><CalculatorPopup selSum={selStats ? selStats.sum : null} /></>}
       {selStats && (
-        <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
+        <div style={{position:"fixed",right:FAB_GAP + FAB_SIZE + 12,bottom:20,zIndex:96,maxWidth:`calc(100vw - ${FAB_GAP + FAB_SIZE + 24}px)`,display:"flex",alignItems:"center",gap:0,
           background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
           fontSize:12,fontFamily:"'JetBrains Mono',monospace",overflow:"hidden"}}>
           {(() => {
@@ -3117,7 +3119,6 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
             <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · {t("จัดซื้อ · บัญชี","Procurement · Accounting")} — Real-time sync</div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-            <CalcToggle/>
             <LangToggle/>
             <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
             {session?.role === "admin" && (
@@ -3399,13 +3400,42 @@ const useCalcOpen = () => {
   useEffect(() => { CalcStore.subs.add(setO); return () => { CalcStore.subs.delete(setO); }; }, []);
   return o;
 };
-function CalcToggle({ dark = true }) {
+// ปุ่มลอยมุมขวาล่าง: เครื่องคิดเลข (ล่างสุด) + กลับไปด้านบน (อยู่เหนือ แสดงเมื่อเลื่อนลงมาแล้ว)
+// z-index ต่ำกว่าหน้าต่างป๊อปอัพ (100+) จึงไม่บังปุ่มบันทึกของฟอร์ม PO
+const FAB_SIZE = 54, FAB_GAP = 20;
+const fabStyle = (active) => ({ position:"fixed", right:FAB_GAP, width:FAB_SIZE, height:FAB_SIZE, borderRadius:16, border:"none", cursor:"pointer",
+  background: active ? "#2563eb" : "#1e3a8a", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", zIndex:95,
+  boxShadow:"0 10px 24px rgba(30,58,138,0.35), 0 2px 6px rgba(15,23,42,0.18)", transition:"background .15s, transform .12s, opacity .2s" });
+function CalcFab() {
   useLang();
   const open = useCalcOpen();
   return (
-    <button onClick={() => CalcStore.set(!open)} title={t("เครื่องคิดเลข","Calculator")} aria-pressed={open} data-calc-toggle
-      style={{background: open ? "#fff" : dark ? "rgba(255,255,255,0.15)" : "#fff", border:`1px solid ${dark ? "rgba(255,255,255,0.3)" : T.cardBorder}`, borderRadius:8, padding:"5px 11px", minHeight:32, fontSize:15, color: open ? T.blue : dark ? "#fff" : T.textPrimary, cursor:"pointer", display:"inline-flex", alignItems:"center", gap:6, whiteSpace:"nowrap", fontWeight:700}}>
-      🧮<span className="calc-toggle-lbl" style={{fontSize:13}}>{t("คิดเลข","Calc")}</span>
+    <button onClick={() => CalcStore.set(!open)} title={t("เครื่องคิดเลข","Calculator")} aria-label={t("เครื่องคิดเลข","Calculator")} aria-pressed={open} data-calc-toggle
+      className="fab-btn" style={{ ...fabStyle(open), bottom:FAB_GAP }}>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="4.5" y="2.5" width="15" height="19" rx="2.5" stroke="#fff" strokeWidth="1.8"/>
+        <rect x="7.5" y="5.5" width="9" height="3.5" rx="0.8" fill="#fff"/>
+        {[0,1,2].flatMap(r => [0,1,2].map(c => <circle key={`${r}${c}`} cx={8.5 + c*3.5} cy={12.5 + r*3} r="1.05" fill="#fff"/>))}
+      </svg>
+    </button>
+  );
+}
+function ScrollTopFab() {
+  useLang();
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setShow(window.scrollY > 300);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  const toTop = () => { try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); } };
+  return (
+    <button onClick={toTop} title={t("กลับไปด้านบน","Back to top")} aria-label={t("กลับไปด้านบน","Back to top")} data-scroll-top tabIndex={show ? 0 : -1}
+      className="fab-btn" style={{ ...fabStyle(false), bottom:FAB_GAP + FAB_SIZE + 12, opacity: show ? 1 : 0, pointerEvents: show ? "auto" : "none", transform: show ? "none" : "translateY(8px)" }}>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
     </button>
   );
 }
@@ -3429,7 +3459,10 @@ function CalculatorPopup({ selSum = null }) {
   useLayoutEffect(() => {
     if (!open || pos || !boxRef.current) return;
     const r = boxRef.current.getBoundingClientRect();
-    setPos({ x: Math.max(4, window.innerWidth - r.width - 20), y: Math.max(4, window.innerHeight - r.height - 80) });
+    const side = window.innerWidth >= r.width + FAB_SIZE + FAB_GAP * 2 + 8;   // มีที่ข้างปุ่มลอยไหม
+    setPos(side
+      ? { x: window.innerWidth - r.width - FAB_SIZE - FAB_GAP - 12, y: Math.max(4, window.innerHeight - r.height - FAB_GAP) }
+      : { x: Math.max(4, window.innerWidth - r.width - 12), y: Math.max(4, window.innerHeight - r.height - FAB_SIZE - FAB_GAP - 12) });
   }, [open, pos]);
   useEffect(() => { const el = exprRef.current; if (el) el.scrollLeft = el.scrollWidth; });   // สูตรยาว → เลื่อนให้เห็นท้ายสุด
   if (!open) return null;
@@ -3624,7 +3657,6 @@ function Shell({ role, color, project, onBack, onHome, onDept, children, syncedA
           <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
         </div>
-        <CalcToggle/>
         <LangToggle/>
         <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
         {project.area && (
