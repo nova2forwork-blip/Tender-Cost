@@ -2174,7 +2174,9 @@ export default function App() {
   useEffect(() => {
     const d = dragRef.current;
     const INTERACT = 'input,textarea,select,button,a,[contenteditable="true"]';
-    const NUM_RE = /^-?\d[\d,]*\.\d+$/;
+    // ยอดเงิน: 1,234.56 · -1,234.56 · (1,234.56) = ติดลบแบบบัญชี (ตัวแดงในวงเล็บ) · "–" / "-" = ศูนย์
+    const NUM_RE = /^(-?\d[\d,]*\.\d+|\(\d[\d,]*\.\d+\))$/;
+    const isZeroMark = (tv) => tv === "–" || tv === "-";
     const HL = "rgba(37,99,235,0.20)";
     const EDGE = 46, SPEED = 24;
     const clearHilite = () => { hiliteRef.current.forEach(({el,prev}) => { el.style.backgroundColor = prev; }); hiliteRef.current = []; };
@@ -2198,7 +2200,7 @@ export default function App() {
             // ข้ามตัวเลข USD (บรรทัด ≈ $ ใต้ยอดบาท) ไม่ให้ถูกนับ/รวมซ้ำกับบาท
             if (n.parentElement && n.parentElement.closest(".usd-sub")) return NodeFilter.FILTER_REJECT;
             const tv = (n.nodeValue||"").trim();
-            return (NUM_RE.test(tv) || tv === "–") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            return (NUM_RE.test(tv) || isZeroMark(tv)) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
           },
         });
         let node;
@@ -2208,10 +2210,11 @@ export default function App() {
           if (r.width === 0 && r.height === 0) continue;
           if (r.right >= box.left && r.left <= box.right && r.bottom >= box.top && r.top <= box.bottom) {
             const txt = node.nodeValue.trim();
-            const v = txt === "–" ? 0 : parseFloat(txt.replace(/,/g, ""));   // "–" = ยอด 0 (นับเหมือนเดิมตอนแสดง 0.00)
+            const neg = /^\(.*\)$/.test(txt);                                   // (1,234.56) → −1,234.56
+            const v = isZeroMark(txt) ? 0 : (neg ? -1 : 1) * parseFloat(txt.replace(/[(),]/g, ""));   // "–"/"-" = ยอด 0
             if (!isNaN(v)) {
               nums.push(v);
-              cellData.push({ top: r.top, left: r.left, text: txt === "–" ? "0" : txt });   // คัดลอกไป Excel เป็นตัวเลข
+              cellData.push({ top: r.top, left: r.left, text: isZeroMark(txt) ? "0" : (neg ? "-" + txt.slice(1, -1) : txt) });   // คัดลอกไป Excel เป็นตัวเลข (ติดลบเป็น -)
               const td = node.parentElement && node.parentElement.closest("td"); if (td) cells.add(td);
             }
           }
@@ -2257,7 +2260,7 @@ export default function App() {
       // ถ้าเริ่มบนเซลล์ข้อความ (รหัสบัญชี/ชื่อรายการ/หัวตาราง) ปล่อยให้เลือก-คัดลอกข้อความได้ตามปกติ
       const startCell = t.closest("td");
       const stTxt = (startCell && startCell.textContent || "").trim();
-      if (!startCell || !(/\d[\d,]*\.\d/.test(stTxt) || stTxt === "–")) return;   // "–" = ช่องยอดเงินที่เป็น 0
+      if (!startCell || !(/\d[\d,]*\.\d/.test(stTxt) || stTxt === "–" || stTxt === "-")) return;   // "–" = ช่องยอดเงินที่เป็น 0
       d.scrollEl = t.closest(".mscroll") || t.closest(".hscroll") || t.closest(".fatscroll") || null;
       const s = getScroll();
       d.ax = e.clientX - s.ox + s.x; d.ay = e.clientY - s.oy + s.y; // anchor ในพิกัดเนื้อหา
