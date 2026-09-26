@@ -3509,7 +3509,7 @@ function TableTopButton() {
   const elRef = useRef(null);
   useEffect(() => {
     let raf = 0;
-    const W = 150, H = 38, M = 14;
+    const W = 44, H = 44, M = 14, GAP = 16;
     const place = () => {
       raf = 0;
       const el = elRef.current;
@@ -3522,8 +3522,9 @@ function TableTopButton() {
       const head = el.querySelector("thead");
       const visTop = Math.max(r.top, head ? head.getBoundingClientRect().bottom : r.top, 0);
       if (visBottom - visTop < H + 60) { setBox(null); return; }   // ตารางแทบไม่อยู่ในจอ
+      const vw = document.documentElement.clientWidth || window.innerWidth;   // ไม่นับแถบเลื่อนของหน้า (ปุ่มมุมจอวัดจากตรงนี้)
       let left = r.left + el.clientLeft + el.clientWidth - W - M;
-      left = Math.min(left, window.innerWidth - FAB_SIZE - FAB_GAP - W - 12);   // ไม่ทับปุ่มมุมจอ
+      left = Math.min(left, vw - FAB_GAP - FAB_SIZE - GAP - W);          // เว้นระยะจากปุ่มมุมจอ ไม่ทับกัน
       setBox({ left: Math.max(4, left), top: visBottom - H - M });
     };
     const req = () => { if (!raf) raf = requestAnimationFrame(place); };
@@ -3541,13 +3542,12 @@ function TableTopButton() {
   const toTop = () => { const el = elRef.current; if (!el) return; try { el.scrollTo({ top: 0, behavior: "smooth" }); } catch { el.scrollTop = 0; } };
   return (
     <button onClick={toTop} data-table-top title={t("กลับแถวแรกของตาราง","Back to the first row of the table")} aria-label={t("กลับแถวแรกของตาราง","Back to the first row of the table")}
-      style={{ position:"fixed", left:box.left, top:box.top, zIndex:94, height:38, padding:"0 14px", borderRadius:19, border:"1.5px solid #1e3a8a",
-        background:"rgba(255,255,255,0.96)", color:"#1e3a8a", fontSize:13, fontWeight:700, cursor:"pointer", display:"inline-flex", alignItems:"center", gap:6,
-        boxShadow:"0 6px 18px rgba(30,58,138,0.22)", whiteSpace:"nowrap", fontFamily:"inherit" }}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      style={{ position:"fixed", left:box.left, top:box.top, zIndex:94, width:44, height:44, padding:0, borderRadius:14, border:"1.5px solid #1e3a8a",
+        background:"rgba(255,255,255,0.97)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center",
+        boxShadow:"0 6px 18px rgba(30,58,138,0.22)" }}>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <path d="M5 4h14M12 20V9M6.5 14.5 12 9l5.5 5.5" stroke="#1e3a8a" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
-      {t("แถวแรกของตาราง","First row")}
     </button>
   );
 }
