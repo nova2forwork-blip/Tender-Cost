@@ -556,7 +556,7 @@ const GLOBAL_CSS = `
   .calc-pop button:active { transform: scale(0.96); }
   .fab-btn:hover { background: #1d4ed8 !important; }
   .fab-btn:active { transform: scale(0.94) !important; }
-  @media print { .fab-btn, .calc-pop { display: none !important; } }
+  @media print { .fab-btn, .calc-pop, [data-table-top] { display: none !important; } }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
   .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
   .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
@@ -581,9 +581,9 @@ const GLOBAL_CSS = `
   .mscroll::-webkit-scrollbar-thumb:hover { background: #475569; }
   .mscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
   .mscroll { scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
-  .mscroll thead th { position: sticky; background: #f8fafc; z-index: 2; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
+  .mscroll thead th { position: sticky; background: #f8fafc; z-index: 4; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
   .mscroll thead tr:first-child th { top: 0; }
-  .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 2; }
+  .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 4; }
   /* สกรอลบาร์แนวนอนแบบใหญ่ คลิก/ลากง่าย — ใช้กับตารางรายเดือน (กว้างมาก) */
   .fatscroll { overflow: auto; -webkit-overflow-scrolling: touch; scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
   .fatscroll::-webkit-scrollbar { height: 28px; width: 28px; }
@@ -2358,7 +2358,7 @@ export default function App() {
         <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
           background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
       )}
-      {session && <><ScrollTopFab /><CalcFab /><CalculatorPopup selSum={selStats ? selStats.sum : null} /></>}
+      {session && <><TableTopButton /><ScrollTopFab /><CalcFab /><CalculatorPopup selSum={selStats ? selStats.sum : null} /></>}
       {selStats && (
         <div style={{position:"fixed",right:FAB_GAP + FAB_SIZE + 12,bottom:20,zIndex:96,maxWidth:`calc(100vw - ${FAB_GAP + FAB_SIZE + 24}px)`,display:"flex",alignItems:"center",gap:0,
           background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
@@ -3480,41 +3480,74 @@ function CalcFab() {
     </button>
   );
 }
+// ปุ่ม ↑ มุมขวาล่าง = กลับบนสุดของ "หน้าเพจ" เท่านั้น (ตารางมีปุ่มของตัวเอง — TableTopButton)
 function ScrollTopFab() {
   useLang();
   const [show, setShow] = useState(false);
-  const innerRef = useRef(null);   // ตาราง (กล่องที่เลื่อนในตัวเอง เช่น .mscroll) ที่ถูกเลื่อนลงล่าสุด
   useEffect(() => {
-    const TH = 300;
-    const update = () => {
-      const el = innerRef.current;
-      const innerDown = !!(el && el.isConnected && el.scrollTop > TH);
-      setShow(window.scrollY > TH || innerDown);
-    };
-    // scroll ไม่ bubble — ดักแบบ capture ที่ document เพื่อรู้ว่าตารางไหนถูกเลื่อน
-    const onAnyScroll = (e) => {
-      const el = e.target;
-      if (el && el.nodeType === 1 && !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !el.closest("[data-calc],[role=listbox]")
-          && el.scrollHeight > el.clientHeight + 4 && el.scrollTop > 0) innerRef.current = el;
-      update();
-    };
-    update();
-    document.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });
-    window.addEventListener("scroll", update, { passive: true });
-    return () => { document.removeEventListener("scroll", onAnyScroll, { capture: true }); window.removeEventListener("scroll", update); };
+    const onScroll = () => setShow(window.scrollY > 300);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
   }, []);
-  const toTop = () => {
-    const smooth = (target) => { try { target.scrollTo({ top: 0, behavior: "smooth" }); } catch { target.scrollTop = 0; } };
-    const el = innerRef.current;
-    if (el && el.isConnected && el.scrollTop > 0) smooth(el);          // แถวแรกของตาราง
-    if (window.scrollY > 0) { try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); } }   // บนสุดของหน้า
-  };
+  const toTop = () => { try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); } };
   return (
-    <button onClick={toTop} title={t("กลับไปด้านบน (ทั้งหน้าและตาราง)","Back to top (page and table)")} aria-label={t("กลับไปด้านบน","Back to top")} data-scroll-top tabIndex={show ? 0 : -1}
+    <button onClick={toTop} title={t("กลับบนสุดของหน้า","Back to top of page")} aria-label={t("กลับบนสุดของหน้า","Back to top of page")} data-scroll-top tabIndex={show ? 0 : -1}
       className="fab-btn" style={{ ...fabStyle(false), bottom:FAB_GAP + FAB_SIZE + 12, opacity: show ? 1 : 0, pointerEvents: show ? "auto" : "none", transform: show ? "none" : "translateY(8px)" }}>
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
+    </button>
+  );
+}
+
+// ปุ่ม "บนสุดของตาราง" — ลอยอยู่มุมขวาล่างของ "ตัวตาราง" ที่เลื่อนอยู่ในกล่องของตัวเอง (เช่นตารางรายเดือน)
+// โผล่เมื่อเลื่อนตารางลงไปแล้ว กดแล้วตารางกลับแถวแรก (หน้าเพจไม่ขยับ)
+function TableTopButton() {
+  useLang();
+  const [box, setBox] = useState(null);   // { left, top } ตำแหน่งปุ่ม หรือ null = ซ่อน
+  const elRef = useRef(null);
+  useEffect(() => {
+    let raf = 0;
+    const W = 150, H = 38, M = 14;
+    const place = () => {
+      raf = 0;
+      const el = elRef.current;
+      if (!el || !el.isConnected || el.scrollTop < 200) { setBox(null); return; }
+      const r = el.getBoundingClientRect();
+      let visBottom = Math.min(r.top + el.clientTop + el.clientHeight, window.innerHeight);
+      const foot = el.querySelector("tfoot");                          // แถวรวมที่ตรึงไว้ด้านล่าง → วางปุ่มเหนือแถวรวม
+      const fcell = foot && foot.querySelector("td,th");                 // ใช้ตำแหน่ง "ช่อง" (ตรึงแบบ sticky) ไม่ใช่กล่อง tfoot
+      if (fcell) { const fr = fcell.getBoundingClientRect(); if (fr.height && fr.top < visBottom) visBottom = fr.top; }
+      const head = el.querySelector("thead");
+      const visTop = Math.max(r.top, head ? head.getBoundingClientRect().bottom : r.top, 0);
+      if (visBottom - visTop < H + 60) { setBox(null); return; }   // ตารางแทบไม่อยู่ในจอ
+      let left = r.left + el.clientLeft + el.clientWidth - W - M;
+      left = Math.min(left, window.innerWidth - FAB_SIZE - FAB_GAP - W - 12);   // ไม่ทับปุ่มมุมจอ
+      setBox({ left: Math.max(4, left), top: visBottom - H - M });
+    };
+    const req = () => { if (!raf) raf = requestAnimationFrame(place); };
+    const onAnyScroll = (e) => {
+      const el = e.target;
+      if (el && el.nodeType === 1 && !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !el.closest("[data-calc],[role=listbox],[data-table-top]")
+          && el.scrollHeight > el.clientHeight + 4) elRef.current = el;
+      req();
+    };
+    document.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });
+    window.addEventListener("resize", req);
+    return () => { document.removeEventListener("scroll", onAnyScroll, { capture: true }); window.removeEventListener("resize", req); if (raf) cancelAnimationFrame(raf); };
+  }, []);
+  if (!box) return null;
+  const toTop = () => { const el = elRef.current; if (!el) return; try { el.scrollTo({ top: 0, behavior: "smooth" }); } catch { el.scrollTop = 0; } };
+  return (
+    <button onClick={toTop} data-table-top title={t("กลับแถวแรกของตาราง","Back to the first row of the table")} aria-label={t("กลับแถวแรกของตาราง","Back to the first row of the table")}
+      style={{ position:"fixed", left:box.left, top:box.top, zIndex:94, height:38, padding:"0 14px", borderRadius:19, border:"1.5px solid #1e3a8a",
+        background:"rgba(255,255,255,0.96)", color:"#1e3a8a", fontSize:13, fontWeight:700, cursor:"pointer", display:"inline-flex", alignItems:"center", gap:6,
+        boxShadow:"0 6px 18px rgba(30,58,138,0.22)", whiteSpace:"nowrap", fontFamily:"inherit" }}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M5 4h14M12 20V9M6.5 14.5 12 9l5.5 5.5" stroke="#1e3a8a" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+      {t("แถวแรกของตาราง","First row")}
     </button>
   );
 }
@@ -5228,7 +5261,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   {label:"", key:null, width:20},
                 ].map(({label,key,align,width},idx)=>(
                   <th key={idx}
-                    style={{padding:"11px 16px",textAlign:align||"left",color:key&&sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:label.length>2?0.8:0,textTransform:label.length>2?"uppercase":"none",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap",...(width?{width}:{})}}>
+                    style={{padding:"11px 16px",textAlign:align||"left",color:key&&sortKey===key?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:label.length>2?0.8:0,textTransform:label.length>2?"uppercase":"none",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap",...(width?{width}:{}),...(idx<4?qsFrz(idx,"#f8fafc",7):{})}}>
                     {key==="add" ? (
                       <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
                         <span onClick={()=>handleSort("add")} style={{cursor:"pointer",userSelect:"none"}}>{label}{sortKey==="add"?(sortDir===1?" ▲":" ▼"):""}</span>
