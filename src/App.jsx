@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, sgOrThrow, ssOrThrow, ssMerge, sdOrThrow, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
+import { supabase, sg, sgOrThrow, sgMany, ssOrThrow, ssMerge, sdOrThrow, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -518,6 +518,9 @@ let _LANG = "th";
 try { const s = localStorage.getItem("tcs-lang"); if (s === "en" || s === "th") _LANG = s; } catch { /* ignore */ }
 const _langSubs = new Set();
 const t = (th, en) => (_LANG === "en" ? (en ?? th) : th);
+// ไฟล์ Excel ออกแบบเป็นภาษาไทยเสมอ — ระหว่างสร้างไฟล์ให้ตัวช่วยทุกตัว (ชื่อเดือน, วันที่, สถานะ PO, t())
+// ทำงานเป็นไทย แล้วคืนภาษาเดิม (การสร้างไฟล์เป็น synchronous จึงไม่มีการวาดหน้าจอแทรกระหว่างนี้)
+const inThai = (fn) => { const prev = _LANG; _LANG = "th"; try { return fn(); } finally { _LANG = prev; } };
 const setLang = (l) => {
   if (l !== "en" && l !== "th") return;
   _LANG = l;
@@ -648,6 +651,22 @@ const poCodeSet = (poEntries=[]) => { const s = new Set(); (poEntries||[]).forEa
 // หน้าบัญชี/จัดซื้อ: ถ้า QS เผลอซ่อน Acc.Code ที่ยังมี PO อยู่ ต้องไม่ซ่อนในมุมมองเหล่านี้
 // (ไม่งั้นยอด committed/งบของ code นั้นหายจากยอดรวมเงียบ ๆ) — คืนรายการ "ซ่อนได้จริง" คือที่ไม่มี PO
 const hiddenSafeForPO = (hiddenAccounts=[], poEntries=[]) => { const withPO = poCodeSet(poEntries); return (hiddenAccounts||[]).filter(c => !withPO.has(c)); };
+// ตัวเลขสรุปของโครงการสำหรับการ์ดหน้ารายการโครงการ — สูตรเดียวกับการ์ดสรุปหน้าบัญชี
+// (งบรวม = เฉพาะรหัสระดับบน, ผูกพัน = มูลค่า PO ทั้งหมด, ต้องจ่ายเดือนนี้ = คงเหลือถึงเดือนนี้ รวมค้างจ่าย)
+const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [], po = [] }) => {
+  const combined = buildCombinedBudget(tenders || {}, additions || {});
+  const effHidden = hiddenSafeForPO(hidden || [], po || []);
+  const codes = [...ACCOUNTS.filter(a => !effHidden.includes(a.code)).map(a => a.code), ...(extra || []).filter(e => !e.parentCode).map(e => e.code)];
+  const budget = codes.reduce((s, c) => s + (parseFloat(combined[c]) || 0), 0);
+  const committed = (po || []).reduce((s, p) => s + poTotal(p), 0);
+  const thisMonth = todayStr().slice(0, 7), byMonth = {};
+  (po || []).flatMap(poPayLines).forEach(l => {
+    const mk = l.month || "9999-99"; const b = byMonth[mk] || (byMonth[mk] = { sum: 0, paid: 0 });
+    b.sum += l.amount; b.paid += (l.paidAmount || 0);
+  });
+  const dueNow = Object.entries(byMonth).filter(([mk]) => mk !== "9999-99" && mk <= thisMonth).reduce((s, [, b]) => s + Math.max(0, b.sum - b.paid), 0);
+  return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length };
+};
 
 // ─── Styling helper ─────────────────────────────────────────────────────────
 // Lays down a colored title bar (merged across every column), optional gray
@@ -1765,7 +1784,7 @@ export default function App() {
   const [exportMsg,   setExportMsg]   = useState("");   // สถานะตอนกด Export (กำลังสร้าง/เสร็จ/พลาด)
   const runExport = async (fn) => {
     setExportMsg(t("⏳ กำลังสร้างไฟล์ Excel…","⏳ Building Excel file…"));
-    try { await fn(); setExportMsg(t("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด","✓ File created — check your Downloads folder")); setTimeout(()=>setExportMsg(""), 3500); }
+    try { await inThai(fn); setExportMsg(t("✓ สร้างไฟล์เรียบร้อย — ดูที่โฟลเดอร์ดาวน์โหลด","✓ File created — check your Downloads folder")); setTimeout(()=>setExportMsg(""), 3500); }
     catch (e) { console.warn("export failed:", e); setExportMsg(t("⚠ สร้างไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง","⚠ Couldn't create the file — please try again")); setTimeout(()=>setExportMsg(""), 4500); }
   };
 
@@ -3038,6 +3057,24 @@ function CurrencyControl({ project, updateProject }) {
 function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
   const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
   const [projSearch, setProjSearch] = useState("");
+  // ตัวเลขสรุปของแต่ละโครงการ — โหลดเบื้องหลังในคำขอเดียว (ถ้าพลาดการ์ดแค่ไม่แสดงตัวเลข ไม่กระทบการใช้งาน)
+  const [summaries, setSummaries] = useState({});
+  const projIdsKey = projects.map(p => p.id).join("|");
+  useEffect(() => {
+    const ids = projIdsKey ? projIdsKey.split("|") : [];
+    if (!ids.length) return;
+    let alive = true;
+    const parts = ["tenders","additions","extra","hidden","po"];
+    sgMany(ids.flatMap(id => parts.map(k => `tcs-${k}-${id}`)))
+      .then(all => {
+        if (!alive) return;
+        const out = {};
+        ids.forEach(id => { const d = {}; parts.forEach(k => { d[k] = all[`tcs-${k}-${id}`]; }); out[id] = projectSummary(d); });
+        setSummaries(out);
+      })
+      .catch(e => console.warn("โหลดสรุปโครงการไม่สำเร็จ:", e));
+    return () => { alive = false; };
+  }, [projIdsKey]);
   const shownProjects = projects.filter(p => {
     const q = projSearch.trim().toLowerCase();
     if (!q) return true;
@@ -3088,17 +3125,7 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
             </button>
           </div>
         </div>
-        {/* Summary row */}
-        <div style={{display:"flex",gap:24,paddingBottom:20}}>
-          {[
-            {label:t("โครงการทั้งหมด","All projects"),value:projects.length,icon:"🏗"},
-          ].map(s=>(
-            <div key={s.label} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.12)",borderRadius:10,padding:"8px 16px"}}>
-              <span style={{fontSize:16}}>{s.icon}</span>
-              <span style={{fontSize:13,color:"rgba(255,255,255,0.85)",fontWeight:600}}>{s.value} {s.label}</span>
-            </div>
-          ))}
-        </div>
+        <div style={{height:4}}/>
       </div>
 
       {/* Body */}
@@ -3129,7 +3156,7 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
               <div style={{textAlign:"center",padding:"40px 0",color:T.textMuted,fontSize:13}}>{t("ไม่พบโครงการที่ตรงกับ","No projects match")} "{projSearch}"</div>
             ) : (
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:20}}>
-                {shownProjects.map(p => <ProjectCard key={p.id} project={p} onOpen={()=>openProject(p.id)} onDelete={session?.role==="admin" ? ()=>deleteProject(p.id) : null} />)}
+                {shownProjects.map(p => <ProjectCard key={p.id} project={p} summary={summaries[p.id]} onOpen={()=>openProject(p.id)} onDelete={session?.role==="admin" ? ()=>deleteProject(p.id) : null} />)}
               </div>
             )}
           </>
@@ -3173,7 +3200,7 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
   );
 }
 
-function ProjectCard({ project, onOpen, onDelete }) {
+function ProjectCard({ project, summary, onOpen, onDelete }) {
   const ageRaw = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
   const age = Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : null;
   return (
@@ -3194,6 +3221,18 @@ function ProjectCard({ project, onOpen, onDelete }) {
         {project.panels && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.panels} Panels</span>}
         {project.currency && <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
       </div>
+      <div className="proj-stats" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16,padding:"10px 12px",background:T.bg,borderRadius:10}}>
+        {[
+          [t("งบรวม","Budget"), summary ? "฿"+fmtK(summary.budget) : "…", T.textPrimary],
+          [t("ออก PO แล้ว","PO issued"), summary ? (summary.budget > 0 ? `${summary.pct.toFixed(0)}%` : (summary.poCount ? "฿"+fmtK(summary.committed) : "0%")) : "…", summary && summary.pct > 100 ? T.red : T.blue],
+          [t("ต้องจ่ายเดือนนี้","Due this month"), summary ? (summary.dueNow > 0 ? "฿"+fmtK(summary.dueNow) : "—") : "…", summary && summary.dueNow > 0 ? T.red : T.textMuted],
+        ].map(([l, v, c]) => (
+          <div key={l} style={{minWidth:0}}>
+            <div style={{fontSize:11,color:T.textMuted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{l}</div>
+            <div style={{fontSize:14,fontWeight:650,color:c,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>{v}</div>
+          </div>
+        ))}
+      </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div style={{fontSize:11,color:T.textMuted}}>{age === null ? "—" : age === 0 ? t("สร้างวันนี้","Created today") : `${age} ${t("วันที่แล้ว","days ago")}`}</div>
         <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>{t("เปิดโครงการ","Open")} →</button>
@@ -3206,7 +3245,16 @@ function ProjectCard({ project, onOpen, onDelete }) {
 function RoleSelect({ project, updateProject, onSelect, onBack }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(project);
-  useEffect(() => setDraft(project), [project]);
+  // จำค่าตอน "เริ่มแก้" ไว้ — ข้อมูลจากเครื่องอื่นที่เข้ามาระหว่างพิมพ์จะไม่ล้างฟอร์ม และตอนบันทึก
+  // ส่งเฉพาะช่องที่เราแก้จริง (เดิมส่งทุกช่อง → ทับช่องที่คนอื่นเพิ่งแก้ด้วยค่าเก่า)
+  const editBaseRef = useRef(project);
+  const startEdit = () => { editBaseRef.current = project; setDraft(project); setEditing(true); };
+  const saveEdit = () => {
+    const base = editBaseRef.current || {}, changed = {};
+    ["name","client","currency","usdRate","area","panels"].forEach(k => { if (String(draft[k] ?? "") !== String(base[k] ?? "")) changed[k] = draft[k]; });
+    if (Object.keys(changed).length) updateProject(changed);
+    setEditing(false);
+  };
 
   const ROLES = [
     {id:"qs",label:"QS",sub:"Quantity Surveyor",desc:t("ลงราคา Tender Cost\nประมาณการต้นทุนโครงการ","Enter Tender Cost\nestimate project cost"),color:T.blue,bg:T.blueLight,icon:"📐"},
@@ -3245,12 +3293,12 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
               ))}
             </div>
             <div style={{display:"flex",gap:10,marginTop:16}}>
-              <button className="btn-primary" onClick={()=>{updateProject(draft);setEditing(false);}}>{t("บันทึก","Save")}</button>
+              <button className="btn-primary" onClick={saveEdit}>{t("บันทึก","Save")}</button>
               <button className="btn-ghost" onClick={()=>setEditing(false)}>{t("ยกเลิก","Cancel")}</button>
             </div>
           </div>
         ) : (
-          <button onClick={()=>setEditing(true)} className="btn-ghost" style={{marginBottom:24,fontSize:12}}>✏️ {t("แก้ไขข้อมูลโครงการ","Edit project details")}</button>
+          <button onClick={startEdit} className="btn-ghost" style={{marginBottom:24,fontSize:12}}>✏️ {t("แก้ไขข้อมูลโครงการ","Edit project details")}</button>
         )}
 
         <div style={{fontSize:13,color:T.textSecondary,marginBottom:20,fontWeight:500}}>{t("เลือกแผนกที่จะทำงาน","Choose your department")}</div>
@@ -3429,7 +3477,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
           ))}
           <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
           {tab==="monthly" && (
-            <button onClick={()=>monthlyExportRef.current && monthlyExportRef.current()} className="btn-ghost"
+            <button onClick={()=>monthlyExportRef.current && inThai(monthlyExportRef.current)} className="btn-ghost"
               style={{display:"flex",alignItems:"center",gap:6,borderColor:T.green,color:T.green}}>
               ⬇️ {t("Export เดือนนี้","Export this month")}
             </button>
@@ -3758,7 +3806,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                       {a.isExtra ? (a.code.startsWith("EX-") ? "—" : a.code) : a.code}
                     </td>
                     <td style={{padding:"10px 16px"}}>
-                      <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                      {(i===0 || displayRows[i-1]?.group!==a.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>}
                     </td>
                     <td style={{padding:"10px 16px",color:T.textPrimary}}>
                       {a.name}
@@ -4799,7 +4847,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       {r.code}
                     </td>
                     <td style={{padding:"10px 16px", ...qsFrz(1,rowBg)}}>
-                      <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{r.group}</span>
+                      {(i===0 || displayRows[i-1]?.group!==r.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{r.group}</span>}
                     </td>
                     <td style={{padding:"10px 16px",color:T.textPrimary, ...qsFrz(2,rowBg)}}>
                       {r.name}
@@ -6927,6 +6975,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
   const [payListOpen, setPayListOpen] = useState(false);   // เปิดรายการ "ต้องจ่ายใคร" ใต้แถบ 🔔
+  useEffect(() => { setPayListOpen(false); }, [view]);   // เปลี่ยนแท็บ → พับรายการ ไม่ให้ดันตารางของแท็บใหม่ลงล่าง
 
   // Budget = baseline Tender Cost + every monthly addition (ค่าธรรมดา + คอลัมน์
   // ย่อย) combined per Acc. Code — ใช้ตัวช่วยกลางเดียวกับ Export ให้ตัวเลขตรงกัน
@@ -7254,7 +7303,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                       <td style={{padding:"10px 16px",color:T.blue,fontFamily:"'JetBrains Mono',monospace",fontSize:13,fontWeight:500}}>{a.code}</td>
                       <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
                       <td style={{padding:"10px 16px"}}>
-                        <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>
+                        {(i===0 || displayAccountData[i-1]?.group!==a.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>}
                       </td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:a.over?T.red:T.amber,fontWeight:a.over?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
