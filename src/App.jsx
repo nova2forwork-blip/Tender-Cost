@@ -3483,15 +3483,34 @@ function CalcFab() {
 function ScrollTopFab() {
   useLang();
   const [show, setShow] = useState(false);
+  const innerRef = useRef(null);   // ตาราง (กล่องที่เลื่อนในตัวเอง เช่น .mscroll) ที่ถูกเลื่อนลงล่าสุด
   useEffect(() => {
-    const onScroll = () => setShow(window.scrollY > 300);
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    const TH = 300;
+    const update = () => {
+      const el = innerRef.current;
+      const innerDown = !!(el && el.isConnected && el.scrollTop > TH);
+      setShow(window.scrollY > TH || innerDown);
+    };
+    // scroll ไม่ bubble — ดักแบบ capture ที่ document เพื่อรู้ว่าตารางไหนถูกเลื่อน
+    const onAnyScroll = (e) => {
+      const el = e.target;
+      if (el && el.nodeType === 1 && !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !el.closest("[data-calc],[role=listbox]")
+          && el.scrollHeight > el.clientHeight + 4 && el.scrollTop > 0) innerRef.current = el;
+      update();
+    };
+    update();
+    document.addEventListener("scroll", onAnyScroll, { capture: true, passive: true });
+    window.addEventListener("scroll", update, { passive: true });
+    return () => { document.removeEventListener("scroll", onAnyScroll, { capture: true }); window.removeEventListener("scroll", update); };
   }, []);
-  const toTop = () => { try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); } };
+  const toTop = () => {
+    const smooth = (target) => { try { target.scrollTo({ top: 0, behavior: "smooth" }); } catch { target.scrollTop = 0; } };
+    const el = innerRef.current;
+    if (el && el.isConnected && el.scrollTop > 0) smooth(el);          // แถวแรกของตาราง
+    if (window.scrollY > 0) { try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); } }   // บนสุดของหน้า
+  };
   return (
-    <button onClick={toTop} title={t("กลับไปด้านบน","Back to top")} aria-label={t("กลับไปด้านบน","Back to top")} data-scroll-top tabIndex={show ? 0 : -1}
+    <button onClick={toTop} title={t("กลับไปด้านบน (ทั้งหน้าและตาราง)","Back to top (page and table)")} aria-label={t("กลับไปด้านบน","Back to top")} data-scroll-top tabIndex={show ? 0 : -1}
       className="fab-btn" style={{ ...fabStyle(false), bottom:FAB_GAP + FAB_SIZE + 12, opacity: show ? 1 : 0, pointerEvents: show ? "auto" : "none", transform: show ? "none" : "translateY(8px)" }}>
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
