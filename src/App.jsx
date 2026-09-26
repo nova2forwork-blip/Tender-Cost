@@ -373,6 +373,9 @@ function PayDateText({ po }) {
 // จ่าย = วันรับของ (จริงถ้ามี ไม่มีใช้วันแผน) + เทอมเครดิต; เงินสดจ่ายวันรับของ.
 const poPayLines = (p) => {
   const P = migratePO(p);
+  // ตั้งสถานะ "Paid" เอง (มีหน้าต่างให้กรอกวันจ่าย) = จ่ายครบทั้งใบแล้ว แม้ของยังไม่เข้า (เช่นจ่ายล่วงหน้า)
+  // → แผนจ่ายต้องไม่ขอให้จ่ายซ้ำ (เดิมยังโผล่ในรายการ "ต้องจ่าย" และยอด "ครบกำหนดเดือนนี้")
+  const manualPaid = P.status === "Paid";
   const isCash = P.paymentType === "cash";
   const _cd = parseInt(P.creditDays,10);
   const term = isCash ? 0 : (isNaN(_cd) ? DEFAULT_CREDIT_DAYS : _cd); // นับ 0 วันเป็น 0 จริง (ให้ตรงกับ roundPayDate) — เฉพาะค่าว่าง/NaN ถึงใช้ค่าเริ่มต้น
@@ -380,7 +383,7 @@ const poPayLines = (p) => {
   const dueOf = (incoming) => incoming ? (isCash ? incoming : addDays(incoming, term)) : "";
   const roundAmt = (r) => (parseFloat(r.actualAmount)||0) || (parseFloat(r.planAmount)||0);
   const out = [];
-  poItems(P).forEach(it => {
+  poItems(P).forEach((it, itemIdx) => {
     const itemAmt = parseFloat(it.amount)||0;
     const rounds  = it.rounds || [];
     const roundSum = rounds.reduce((s,r)=>s+roundAmt(r), 0);
@@ -394,8 +397,8 @@ const poPayLines = (p) => {
         // "จ่ายแล้ว" ต้อง (1) รับของจริงแล้ว และ (2) ถึงวันครบกำหนดจ่าย — ถ้ามีแต่
         // วันรับของแต่ยังไม่กรอกจำนวนที่รับจริง ถือว่ายังไม่รับ = ยังไม่จ่าย
         const received = roundReceived(r);
-        const paid = received && roundPaid(P, r);
-        out.push({ code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
+        const paid = manualPaid || (received && roundPaid(P, r));
+        out.push({ itemIdx, code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
           payDate: dueOf(incoming), amount, received, paid, paidAmount: paid ? amount : 0 });
       });
     } else if (itemAmt > 0) {
@@ -404,8 +407,8 @@ const poPayLines = (p) => {
       const actualDates = rounds.map(r=>r.actualDate).filter(Boolean).sort();
       const planDates   = rounds.map(r=>r.planDate).filter(Boolean).sort();
       const incoming = actualDates[0] || planDates[0] || "";
-      const paidAmt  = Math.min(rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0), itemAmt);
-      out.push({ code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
+      const paidAmt  = manualPaid ? itemAmt : Math.min(rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0), itemAmt);
+      out.push({ itemIdx, code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
         payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: paidAmt >= itemAmt-0.5, paidAmount: paidAmt });
     }
   });
@@ -419,6 +422,14 @@ const poPayLines = (p) => {
     status: l.paid ? "paid" : (l.received && l.payDate && l.payDate < today ? "late" : "pending"),
   }));
 };
+
+// ยอด "จ่ายแล้ว" ของ PO — ใช้ตัวเดียวกันทุกที่ (การ์ดจัดซื้อ/บัญชี · แผนจ่าย · Excel · ป๊อปอัพ PO)
+// = ผลรวม paidAmount ของแผนจ่าย: ไม่เกินยอดสั่งของแต่ละรายการ และสถานะ Paid เอง = จ่ายครบ
+// (เดิมการ์ดรวม actualAmount ของทุกงวดที่ถึงกำหนด → งวดซ้ำ/กรอกเกินทำให้ "ชำระแล้ว" เกินยอด PO
+//  และ PO ที่ตั้ง Paid เองแต่ยังไม่กรอกของเข้า นับเป็น 0 ขณะที่ป้ายบอกว่าจ่ายแล้ว)
+const poPaidAmount = (p) => poPayLines(p).reduce((s, l) => s + (l.paidAmount || 0), 0);
+// ต่อรายการ (ตามลำดับใน PO — PO แบบเก่าได้ id ใหม่ทุกครั้งที่อ่าน จึงอ้างด้วยลำดับ)
+const itemPaidAmount = (p, idx) => poPayLines(p).filter(l => l.itemIdx === idx).reduce((s, l) => s + (l.paidAmount || 0), 0);
 
 // ─── Lock completed POs ─────────────────────────────────────────────────────
 // Once a PO has been fully received AND fully paid, its numbers are final —
@@ -458,6 +469,7 @@ const incomingStatus = (p) => {
 // Auto-pay: reaching a round's due date is what marks it paid, so payment is
 // never "late" — it's "pending" until the due date, then "paid".
 const paymentStatus = (p) => {
+  if (migratePO(p).status === "Paid" && poTotal(p) > 0) return "paid";   // ตั้ง Paid เอง = จ่ายครบ (ให้ตรงกับแผนจ่าย/การ์ด)
   const rounds = poRounds(p);
   const recvRounds = rounds.filter(roundReceived);
   if (!recvRounds.length) return "unset";
@@ -754,10 +766,24 @@ const monthRowBreakdown = (additions, m, code, cols) => {
   return { vals, other, total };
 };
 const OTHER_COL_LABEL = "อื่น ๆ / รายการย่อย";
-const exportAccountList = (extraItems=[], hiddenAccounts=[]) => [
-  ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)),
-  ...extraItems.filter(e => !e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group||"Other" })),
-];
+const exportAccountList = (extraItems=[], hiddenAccounts=[], poEntries=null, plans=null) => {
+  const list = [
+    ...ACCOUNTS.filter(a => !hiddenAccounts.includes(a.code)),
+    ...extraItems.filter(e => !e.parentCode).map(e => ({ code:e.code, name:e.name, group:e.group||"Other" })),
+  ];
+  if (!poEntries && !plans) return list;
+  // รหัสที่มี PO/แผนผูกอยู่ แต่ไม่อยู่ในรายการแล้ว (เช่นลบรายการเพิ่มทิ้ง) — ต้องยังแสดงในหน้าบัญชี/Excel
+  // ไม่งั้นยอด PO ของรหัสนั้นอยู่ในการ์ดรวม แต่ไม่มีแถวในตาราง → ผลรวมตารางไม่เท่าการ์ด
+  const have = new Set(list.map(a => a.code)), orphans = [];
+  [...(poEntries || []), ...(Array.isArray(plans) ? plans : [])].forEach(p => poItems(p).forEach(it => {
+    if (!it.code || have.has(it.code) || !(parseFloat(it.amount) || 0)) return;
+    have.add(it.code);
+    const e = extraItems.find(x => x.code === it.code);
+    orphans.push({ code: it.code, name: (e && e.name) || ORPHAN_NAME, group: "Other", orphan: true });
+  }));
+  return [...list, ...orphans];
+};
+const ORPHAN_NAME = "(รหัสนี้ไม่อยู่ในรายการแล้ว)";
 // เซตของ Acc.Code ที่ยังมี PO ผูกอยู่ (ยอด ≠ 0)
 const poCodeSet = (poEntries=[]) => { const s = new Set(); (poEntries||[]).forEach(p => poItems(p).forEach(it => { if (it.code && (parseFloat(it.amount)||0) !== 0) s.add(it.code); })); return s; };
 // หน้าบัญชี/จัดซื้อ: ถ้า QS เผลอซ่อน Acc.Code ที่ยังมี PO อยู่ ต้องไม่ซ่อนในมุมมองเหล่านี้
@@ -1325,7 +1351,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
 //  ปกติ(ดำ)=รับ/PO รอเข้า (ส้ม=ล่าช้า) · แผน(แดง)=ยังไม่เป็น PO + TOTAL แถว/คอลัมน์
 function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], theme, backSheet="สรุป" }) {
   const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
-  const acctList = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries));
+  const acctList = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries), poEntries, plansArr);
   const nameOf   = (code) => acctList.find(a=>a.code===code)?.name || ACCOUNTS.find(a=>a.code===code)?.name || "";
   const combinedB = buildCombinedBudget(tenderCosts, additions);
   const today = todayStr();
@@ -1440,7 +1466,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
 //  ต้นทุน (Tender/Balance Pending PO/Stock/Balance Cost) + กลุ่มเดือน Incoming/Received
 //  (รับจริง=ดำ · แผน/PO รอเข้า=แดง) + Payment Plan รายเดือน + สรุป PO (Total PO/PO Balance)
 function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], theme, backSheet="Summary" }) {
-  const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries));
+  const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries), poEntries, incomingPlan);
   const combined = buildCombinedBudget(tenderCosts, additions);
   const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
   const committedByCode = {}, stockByCode = {}, plannedByCode = {}, actual = {}, incoming = {}, payplan = {};
@@ -1515,7 +1541,7 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
   const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
 
   // หน้าแรก = สรุป (Dashboard): การ์ดตัวเลข + กราฟยอดสั่งซื้อรายเดือน
-  const dPaid = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=> ss + (parseFloat(r.actualAmount)||0), 0), 0);
+  const dPaid = poEntries.reduce((s,p)=> s + poPaidAmount(p), 0);
   const dTotal = poEntries.reduce((s,p)=> s + poTotal(p), 0);
   const dMonths = [...new Set(poEntries.map(p => (p.date||"").slice(0,7)).filter(Boolean))].sort();
   const dash = addDashboardSheet(wb, "สรุป", {
@@ -1631,7 +1657,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
   const theme = { main:"10B981", dark:"047857" };
   const rate = exportRate(project); const U = rate > 0;   // U = ใส่คอลัมน์ USD ไหม
   const combinedBudget = buildCombinedBudget(tenderCosts, additions);
-  const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries));
+  const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries), poEntries);
 
   // Sheet 1 — Budget vs Committed vs Variance per Acc. Code
   const rows1 = [[`สรุปงบประมาณ — ${project.name}`], [`พื้นที่ ${project.area||"-"} ft²  ·  แผง ${project.panels||"-"}  ·  Export: ${new Date().toLocaleDateString("th-TH")}`], []];
@@ -6081,7 +6107,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             const planned = (it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.planAmount)||0),0); // ยอดรวมที่วางแผนไว้ทุกงวด
             const planRemain = Math.max(ordered - planned, 0);   // ยอดที่ยัง "ไม่ถูกวางแผน" (ไว้แบ่งงวดเพิ่ม)
             const overPlanned = planned - ordered;               // >0 = รวมทุกงวดเกินยอดสั่ง (มีงวดเกิน/ซ้ำ)
-            const paidAmt = (it.rounds||[]).filter(r=>roundPaid(po,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
+            const paidAmt = itemPaidAmount(po, ii);
             return (
               <div key={it.id||ii} style={{background:T.bg,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
@@ -6524,7 +6550,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   ];
   const tenderTotal = topLevelCodes.reduce((s,c) => s + (parseFloat(combinedBudget[c]) || 0), 0);
   const totalComm   = poEntries.reduce((s,p)=>s+poTotal(p),0);
-  const totalPaid   = poEntries.reduce((s,p)=>s+poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0),0);
+  const totalPaid   = poEntries.reduce((s,p)=>s+poPaidAmount(p),0);
   const paidCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
 
   // Late-item alert counts, shown as a banner regardless of which tab is
@@ -7690,7 +7716,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 //  ด้วยสรุป PO: Total PO (ยอดผูกพัน) และ PO Balance (Total PO − รับจริง).
 //  โชว์เฉพาะเดือนที่มีข้อมูล + TOTAL แต่ละกลุ่ม.
 function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan = [], usdRate = 0 }) {
-  const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries));
+  const accounts = exportAccountList(extraItems, hiddenSafeForPO(hiddenAccounts, poEntries), poEntries, incomingPlan)
+    .map(a => a.orphan ? { ...a, name: t(ORPHAN_NAME, "(code no longer in the list)") } : a);
   const combined = buildCombinedBudget(tenderCosts, additions);
   const [aSearch, setASearch] = useState("");                       // ค้นหา Acc. Code/ชื่อบัญชี
   const [aSort, setASort] = useState({ key: "code", dir: "asc" });  // เรียงตามหัวคอลัมน์
@@ -7935,7 +7962,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const totalComm     = poEntries.reduce((s,p)=>s+poTotal(p),0);
   // จ่ายแล้ว = ทุกงวดที่ถือว่าจ่ายแล้ว (สถานะ Paid = จ่ายทันที, หรือถึงกำหนดจ่าย)
   // ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงกับหน้าจัดซื้อและไฟล์ Excel ทุกไฟล์
-  const totalPaid     = poEntries.reduce((s,p)=> s + poRounds(p).filter(r=>roundPaid(p,r)).reduce((ss,r)=>ss+(parseFloat(r.actualAmount)||0),0), 0);
+  const totalPaid     = poEntries.reduce((s,p)=> s + poPaidAmount(p), 0);
   const paidPOCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
   const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
   const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
@@ -7954,10 +7981,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
 
   // รวมบัญชีมาตรฐาน + "งานเพิ่ม" (standalone extra ที่ไม่ใช่รายการย่อย) ให้ยอดรวม
   // หน้าบัญชีตรงกับหน้า QS/ภาพรวม ที่นับ topLevelCodes เหมือนกัน
-  const acctRows = [
-    ...ACCOUNTS.filter(a=>!effHidden.includes(a.code)),
-    ...extraItems.filter(e=>!e.parentCode).map(e=>({ code:e.code, name:e.name, group:e.group||"Other" })),
-  ];
+  const acctRows = exportAccountList(extraItems, effHidden, poEntries).map(a => a.orphan ? { ...a, name: t(ORPHAN_NAME, "(code no longer in the list)") } : a);
   const accountData = acctRows.map(a=>{
     const budget=parseFloat(combinedBudget[a.code])||0;
     // Every PO line item booked to this Account Code, whether the PO is
