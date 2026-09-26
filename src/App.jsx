@@ -156,7 +156,26 @@ const todayStr = () => {
 // หน้าจอที่แก้แบบ draft (QS ราคาเดิม/รายเดือน) จะตั้งค่า .dirty ระหว่างพิมพ์ค้าง
 // แล้วปุ่มออกจากหน้า/สลับโครงการ/ล็อกเอาต์/รีเฟรชเบราว์เซอร์ จะถามยืนยันก่อนทิ้ง
 const UnsavedGuard = { dirty: false };
-const confirmLeaveIfDirty = () => !UnsavedGuard.dirty || window.confirm(t("มีการแก้ไขที่ยังไม่บันทึก — ออกจากหน้านี้โดยไม่บันทึกหรือไม่?","You have unsaved changes — leave this page without saving?"));
+// ─── กล่องข้อความในแอป (แทน alert / confirm / prompt ของเบราว์เซอร์) ───────────
+// หน้าตาเข้าชุดกับแอป อ่านง่ายบนมือถือ และไม่บล็อกทั้งหน้า · คืน Promise
+//   uiAlert(msg)            → รอจนกด "ตกลง"
+//   uiConfirm(msg, opts)    → true / false      opts: { title, okLabel, cancelLabel, danger }
+//   uiPrompt(msg, opts)     → ข้อความที่พิมพ์ / null   opts: { placeholder, match }
+const DialogStore = {
+  q: [], subs: new Set(),
+  push(d) { this.q = [...this.q, d]; this.subs.forEach(f => f(this.q)); },
+  shift() { this.q = this.q.slice(1); this.subs.forEach(f => f(this.q)); },
+};
+const uiAlert   = (message, opts = {}) => new Promise(res => DialogStore.push({ kind: "alert",   message, ...opts, resolve: () => res() }));
+const uiConfirm = (message, opts = {}) => new Promise(res => DialogStore.push({ kind: "confirm", message, ...opts, resolve: res }));
+const uiPrompt  = (message, opts = {}) => new Promise(res => DialogStore.push({ kind: "prompt",  message, ...opts, resolve: res }));
+// ออกจากหน้าตอนมีค่าที่ยังไม่บันทึก → ถามในแอปก่อน แล้วค่อยทำ fn
+const leaveIfDirty = (fn) => {
+  if (!UnsavedGuard.dirty) { fn(); return; }
+  uiConfirm(t("มีการแก้ไขที่ยังไม่บันทึก — ออกจากหน้านี้โดยไม่บันทึก?","You have unsaved changes — leave without saving?"),
+    { okLabel: t("ออกโดยไม่บันทึก","Leave without saving"), cancelLabel: t("อยู่ต่อ","Stay"), danger: true })
+    .then(ok => { if (ok) { UnsavedGuard.dirty = false; fn(); } });
+};
 // "2026-07-02" + 30 -> "2026-08-01" — คำนวณด้วย UTC ล้วนทั้งไปและกลับ กัน bug timezone
 // (ของเดิม parse เป็น local แต่อ่านกลับเป็น UTC ทำให้ในไทยคลาดไป 1 วันและตกเดือนผิด)
 const addDays = (dateStr, days) => {
@@ -542,6 +561,9 @@ function useLang() {
 
 // ─── Global CSS ───────────────────────────────────────────────────────────────
 const FAB_SIZE = 54, FAB_GAP = 20;   // ปุ่มลอยมุมขวาล่าง (ใช้ใน CSS ด้านล่างด้วย จึงต้องประกาศก่อน)
+const BNAV_H = 62;                    // แถบแท็บด้านล่าง (มือถือ) — ของลอยมุมล่างทั้งหมดยกขึ้นตามนี้
+const bnavH = () => (typeof document !== "undefined" && document.body && document.body.classList.contains("has-bnav")) ? BNAV_H : 0;
+const BOTTOM = (px) => `calc(var(--bnav, 0px) + var(--bnav-safe, 0px) + ${px}px)`;
 const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300..800&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -562,7 +584,7 @@ const GLOBAL_CSS = `
   /* แถบหัวบนจอเล็ก: เหลือบรรทัดเดียว (ซ่อนข้อความรอง) */
   @media (max-width: 760px) {
     .shell-bar { padding: 8px 12px !important; gap: 8px !important; min-height: 52px !important; }
-    .shell-bar .hdr-meta, .shell-bar .crumb-txt, .shell-bar .um-name, .shell-bar .crumb-sep { display: none !important; }
+    .shell-bar .hdr-meta, .shell-bar .crumb-txt, .shell-bar .um-name, .shell-bar .crumb-sep, .shell-bar .hdr-lbl { display: none !important; }
   }
   @media (max-width: 760px) { .shell-bar .sync-badge { font-size: 0 !important; gap: 0 !important; } }
   /* เว้นพื้นที่ให้ปุ่มลอยมุมขวาล่าง — ไม่ให้ทับตาราง: จอกว้าง = แถบว่างด้านขวา · จอแคบ = เว้นท้ายหน้า */
@@ -572,7 +594,11 @@ const GLOBAL_CSS = `
     body.has-fab .app-header { margin-right: -${FAB_SIZE + FAB_GAP * 2}px; padding-right: ${FAB_SIZE + FAB_GAP * 2 + 30}px !important; }
   }
   @media (max-width: 1023.98px) { body.has-fab { padding-bottom: ${(FAB_SIZE + 12) * 2 + FAB_GAP + 8}px; } }
+  body.has-bnav { --bnav: ${BNAV_H}px; --bnav-safe: env(safe-area-inset-bottom, 0px); }
+  body.has-fab.has-bnav { padding-bottom: calc(${(FAB_SIZE + 12) * 2 + FAB_GAP + 8 + BNAV_H}px + env(safe-area-inset-bottom, 0px)); }
+  @media print { [data-bottom-nav] { display: none !important; } }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
+  .icon-danger:hover { color: ${T.red} !important; background: ${T.redBg} !important; }
   .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
   .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
   .btn-primary:hover { background: ${T.blueDark}; box-shadow: 0 4px 12px rgba(37,99,235,0.3); }
@@ -580,7 +606,7 @@ const GLOBAL_CSS = `
   .btn-ghost:hover { border-color: ${T.blue}; color: ${T.blue}; }
   /* แท็บแบบแถบเลือก (segmented): พื้นเทา แท็บที่เลือกเป็นการ์ดขาว — สีเรียบเหมือนกันทุกแผนก */
   /* การ์ดสรุปที่มีตัวหลัก: ตัวแรกกว้างกว่า (จอกว้าง) · เต็มแถว (มือถือ) */
-  .stat-grid.has-lead { grid-template-columns: 1.6fr 1fr 1fr 1fr !important; }
+  .stat-grid.has-lead { grid-template-columns: 1.6fr 1fr 1fr !important; }
   @media (max-width: 900px) { .stat-grid.has-lead { grid-template-columns: 1fr 1fr !important; } .stat-grid.has-lead .stat-lead, .stat-grid.has-lead .stat-card:last-child:nth-child(even) { grid-column: 1 / -1; } }
   /* ฟอร์ม PO บนมือถือ: ช่องหลักเรียงทีละช่อง · ช่องตัวเลขของแต่ละรายการ 2 คอลัมน์ (ช่องสุดท้ายเต็มแถว) */
   @media (max-width: 600px) {
@@ -591,6 +617,7 @@ const GLOBAL_CSS = `
   .att-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #f5c2bd; background: #fff5f4; color: #b42318; border-radius: 999px; padding: 5px 12px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; min-height: 32px; }
   .att-chip b { font-weight: 800; }
   .att-chip:hover { background: #feeae8; }
+  .att-chip[aria-pressed="true"] { background: #b42318; color: #fff; border-color: #b42318; }
   .att-chip:focus-visible { outline: 2px solid #b42318; outline-offset: 1px; }
   .seg-tabs { display: inline-flex; gap: 2px; background: #e6ebf2; border-radius: 10px; padding: 3px; flex-wrap: wrap; }
   .seg-tab { background: transparent; border: none; border-radius: 8px; padding: 7px 16px; font-size: 13px; font-weight: 500; color: ${T.textSecondary}; cursor: pointer; white-space: nowrap; font-family: inherit; min-height: 34px; }
@@ -598,6 +625,9 @@ const GLOBAL_CSS = `
   .seg-tab.on { background: #fff; color: ${T.textPrimary}; font-weight: 650; box-shadow: 0 1px 2px rgba(15,23,42,0.08), 0 1px 6px rgba(15,23,42,0.06); }
   .seg-tab:focus-visible { outline: 2px solid ${T.blue}; outline-offset: 1px; }
   .date-th-text { font-size: 13px; }
+  .po-row:hover { background: #fafbfd; }
+  .po-grp:hover { background: #f1f5f9 !important; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .input-base { background: ${T.bg}; border: 1.5px solid ${T.cardBorder}; border-radius: 10px; padding: 10px 13px; color: ${T.textPrimary}; font-size: 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; width: 100%; }
   .input-base:focus { border-color: ${T.blue}; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
   .tag { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 600; }
@@ -633,6 +663,8 @@ const GLOBAL_CSS = `
     .btn-primary, .btn-ghost { min-height: 40px; padding-top: 10px; padding-bottom: 10px; }
     .input-base, .date-th-text { font-size: 16px !important; }
     .due-box { flex: 1 1 130px; min-width: 0 !important; }
+    .chip-scroll { flex-wrap: nowrap !important; overflow-x: auto; flex-basis: 100% !important; padding-bottom: 2px; scrollbar-width: none; }
+    .chip-scroll::-webkit-scrollbar { display: none; }
     .pay-h { flex-basis: 100%; }
     .hscroll::-webkit-scrollbar, .mscroll::-webkit-scrollbar { height: 18px; width: 18px; }
     .fatscroll::-webkit-scrollbar { height: 22px; width: 22px; }
@@ -745,7 +777,9 @@ const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [],
     b.sum += l.amount; b.paid += (l.paidAmount || 0);
   });
   const dueNow = Object.entries(byMonth).filter(([mk]) => mk !== "9999-99" && mk <= thisMonth).reduce((s, [, b]) => s + Math.max(0, b.sum - b.paid), 0);
-  return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length };
+  const late = (po || []).filter(p => incomingStatus(p) === "late").length;
+  const overCodes = codes.filter(c => { const b = parseFloat(combined[c]) || 0; const u = (po || []).reduce((s, p) => s + poAmountForCode(p, c), 0); return b > 0 && u > b + 0.005; }).length;
+  return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length, late, overCodes };
 };
 
 // ─── Styling helper ─────────────────────────────────────────────────────────
@@ -1830,7 +1864,7 @@ class ErrorBoundary extends Component {
     if (this.state.err) {
       return (
         <div style={{minHeight:"60vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,padding:24,textAlign:"center"}}>
-          <div style={{fontSize:40}}>😵</div>
+          <div style={{color:T.amber}}><Ico name="alert" size={40} sw={1.6} /></div>
           <div style={{fontSize:16,fontWeight:650,color:"#0f172a"}}>{t("เกิดข้อผิดพลาดในการแสดงผลหน้านี้","Something went wrong displaying this page")}</div>
           <div style={{fontSize:13,color:"#64748b",maxWidth:460}}>{t("ข้อมูลของคุณยังปลอดภัย ลองกดปุ่มด้านล่างเพื่อโหลดใหม่ ถ้ายังเป็นอยู่ให้แจ้งผู้ดูแลระบบ","Your data is safe. Press the button below to reload; if it keeps happening, contact your admin")}</div>
           <button onClick={()=>{ this.setState({err:null}); if(typeof window!=="undefined") window.location.reload(); }}
@@ -1875,12 +1909,10 @@ export default function App() {
   };
 
   const handleLogin = (user) => { setSession(user); setSessionState(user); };
-  const handleLogout = () => {
-    if (!confirmLeaveIfDirty()) return;
-    UnsavedGuard.dirty = false;
+  const handleLogout = () => leaveIfDirty(() => {
     clearSession(); setSessionState(null);
     setScreen("home"); setRole(null); setActiveId(null);
-  };
+  });
 
   // มีปุ่มลอยมุมขวาล่าง (หลังล็อกอิน) → ให้ CSS เว้นพื้นที่ไว้ ไม่ให้ปุ่มทับตาราง
   useEffect(() => { document.body.classList.toggle("has-fab", !!session); return () => document.body.classList.remove("has-fab"); }, [session]);
@@ -2285,20 +2317,18 @@ export default function App() {
   const saveIncomingPlan=useCallback((v)=> commit(`tcs-inplan-${activeId}`, v, incomingPlan, setIncomingPlan, t("แผนของเข้า","Incoming plan")), [commit, activeId, incomingPlan]);
   const savePO       = useCallback((po)   => commit(`tcs-po-${activeId}`, po, poEntries, setPO, t("PO / จัดซื้อ","PO / Procurement")), [commit, activeId, poEntries]);
 
-  const openProject = (id) => {
-    if (!confirmLeaveIfDirty()) return;
-    UnsavedGuard.dirty = false;
+  const openProject = (id) => leaveIfDirty(() => {
     setActiveId(id);
     if (session?.role === "admin") { setRole(null); setScreen("roleSelect"); }
     else { setRole(session?.role); setScreen("app"); }
-  };
+  });
   const deleteProject = async (id) => {
     // ลบทั้งโครงการ = ลบข้อมูลของทุกแผนก → เฉพาะ Admin (กันทั้งปุ่มและในฟังก์ชัน)
-    if (session?.role !== "admin") { alert(t("ลบโครงการได้เฉพาะ Admin","Only Admin can delete projects")); return; }
+    if (session?.role !== "admin") { uiAlert(t("ลบโครงการได้เฉพาะ Admin","Only Admin can delete projects")); return; }
     const proj = projects.find(p => p.id === id);
     const name = (proj?.name || "").trim();
     // ยืนยันแบบ "พิมพ์ชื่อโครงการให้ตรง" — กันเผลอลบ เพราะลบแล้วข้อมูลย่อยหายด้วย
-    const typed = window.prompt(t(
+    const typed = await uiPrompt(t(
       `⚠️ ลบโครงการ "${name}" ?\n\n` +
       `ข้อมูลทั้งหมดของโครงการนี้จะถูกลบด้วย:\n` +
       `• Tender Cost (ราคาเดิม)\n• PO / จัดซื้อ\n• ยอดเพิ่มรายเดือน · รายการเพิ่ม · หมวดที่ซ่อน\n\n` +
@@ -2309,9 +2339,9 @@ export default function App() {
       `• Tender Cost (baseline)\n• PO / procurement\n• Monthly additions · extra items · hidden categories\n\n` +
       `Admin can restore it from Admin → Restore data (latest 12:00/18:00 snapshot)\n\n` +
       `If you're sure, type the project name exactly to confirm:\n${name}`
-    ));
+    ), { placeholder: name, match: name, okLabel: t("ลบโครงการ","Delete project"), danger: true });
     if (typed == null) return;                                   // กดยกเลิก
-    if (typed.trim() !== name) { alert(t("ชื่อโครงการไม่ตรง — ยกเลิกการลบแล้ว","Name doesn't match — deletion cancelled")); return; }
+    if (typed.trim() !== name) { uiAlert(t("ชื่อโครงการไม่ตรง — ยกเลิกการลบแล้ว","Name doesn't match — deletion cancelled")); return; }
     // ไม่เข้า quick-undo เพราะการลบโครงการลบคีย์ย่อยด้วย — กู้ทั้งโครงการทำผ่านหน้า
     // Admin กู้คืนข้อมูล (kv_history เก็บไว้ให้ครบทุกคีย์)
     const next = projects.filter(p => p.id !== id);
@@ -2359,6 +2389,7 @@ export default function App() {
       <>
         <style>{GLOBAL_CSS}</style>
         <LoginScreen onLogin={handleLogin} />
+        <DialogHost />
       </>
     );
   }
@@ -2373,10 +2404,10 @@ export default function App() {
     additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts,
     incomingPlan, saveIncomingPlan,
     updateProject,
-    onBack: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen(session.role === "admin" ? "roleSelect" : "home"); },
-    onHome: () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("home"); },   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
+    onBack: () => leaveIfDirty(() => setScreen(session.role === "admin" ? "roleSelect" : "home")),
+    onHome: () => leaveIfDirty(() => setScreen("home")),   // ปุ่ม Home → หน้าเลือกโครงการ (ทุกโรล)
     // ปุ่ม "เลือกแผนก" → หน้าแรกของแต่ละแผนก (เฉพาะ admin ที่สลับแผนกได้)
-    onDept: session.role === "admin" ? () => { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setScreen("roleSelect"); } : null,
+    onDept: session.role === "admin" ? () => leaveIfDirty(() => setScreen("roleSelect")) : null,
     syncedAt, syncing, session, onLogout: handleLogout, setEditMode };
 
   return (
@@ -2391,7 +2422,7 @@ export default function App() {
         </div>
       )}
       {exportMsg && (
-        <div style={{position:"fixed",left:"50%",bottom:22,transform:"translateX(-50%)",zIndex:200,
+        <div style={{position:"fixed",left:"50%",bottom:BOTTOM(22),transform:"translateX(-50%)",zIndex:200,
           background:"#0f172a",color:"#e2e8f0",borderRadius:10,padding:"10px 18px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
           fontSize:13,fontWeight:600,whiteSpace:"nowrap"}}>{exportMsg}</div>
       )}
@@ -2400,8 +2431,9 @@ export default function App() {
           background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
       )}
       {session && <><TableTopButton /><ScrollTopFab /><CalcFab /><CalculatorPopup selSum={selStats ? selStats.sum : null} /></>}
+      <DialogHost />
       {selStats && (
-        <div style={{position:"fixed",right:FAB_GAP + FAB_SIZE + 12,bottom:20,zIndex:96,maxWidth:`calc(100vw - ${FAB_GAP + FAB_SIZE + 24}px)`,display:"flex",alignItems:"center",gap:0,
+        <div style={{position:"fixed",right:FAB_GAP + FAB_SIZE + 12,bottom:BOTTOM(20),zIndex:96,maxWidth:`calc(100vw - ${FAB_GAP + FAB_SIZE + 24}px)`,display:"flex",alignItems:"center",gap:0,
           background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
           fontSize:12,fontVariantNumeric:"tabular-nums",overflow:"hidden"}}>
           {(() => {
@@ -2427,12 +2459,12 @@ export default function App() {
             title={t("คัดลอกค่าที่เลือก (Ctrl+C)","Copy selected values (Ctrl+C)")}
             style={{marginLeft:6,marginRight:4,display:"flex",alignItems:"center",gap:5,border:"none",cursor:"pointer",borderRadius:8,padding:"6px 12px",
               fontFamily:"system-ui,sans-serif",fontSize:12,fontWeight:600,background:copied?"#065f46":"#334155",color:"#fff"}}>
-            {copied ? t("✓ คัดลอกแล้ว","✓ Copied") : t("⧉ คัดลอก","⧉ Copy")}
+            {copied ? t("✓ คัดลอกแล้ว","✓ Copied") : <><Ico name="copy" size={14} /> {t("คัดลอก","Copy")}</>}
           </button>
         </div>
       )}
       {editMode && (undoInfo.u > 0 || undoInfo.r > 0) && (
-        <div style={{position:"fixed",left:20,bottom:20,zIndex:95,display:"flex",gap:6,alignItems:"center",
+        <div style={{position:"fixed",left:20,bottom:BOTTOM(20),zIndex:95,display:"flex",gap:6,alignItems:"center",
           background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"7px 9px",boxShadow:"0 8px 28px rgba(15,23,42,0.16)"}}>
           <button onClick={undo} disabled={!undoInfo.u} title={t("ย้อนกลับ (Ctrl+Z)","Undo (Ctrl+Z)")}
             style={{display:"flex",alignItems:"center",gap:6,background:undoInfo.u?T.blue:"#e2e8f0",color:undoInfo.u?"#fff":"#94a3b8",
@@ -2529,7 +2561,7 @@ function LoginScreen({ onLogin }) {
       <form onSubmit={submit} style={{background:T.card,borderRadius:20,padding:36,width:400,maxWidth:"92vw",boxShadow:"0 24px 60px rgba(0,0,0,0.25)",position:"relative"}}>
         <div style={{position:"absolute",top:14,right:14}}><LangToggle dark={false}/></div>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <div style={{fontSize:34,marginBottom:8}}>🏗</div>
+          <div style={{marginBottom:8,color:T.textMuted}}><Ico name="box" size={34} sw={1.5} /></div>
           <div style={{fontSize:11,letterSpacing:3,color:T.textMuted,textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
           <div style={{fontSize:19,fontWeight:700,color:T.textPrimary,marginTop:4}}>{t("เข้าสู่ระบบ","Sign in")}</div>
           <div style={{fontSize:12,color:T.textMuted,marginTop:4}}>{t("ล็อกอินตามแผนก: QS · จัดซื้อ · บัญชี · Admin","Login by department: QS · Procurement · Accounting · Admin")}</div>
@@ -2573,15 +2605,15 @@ function UserRow({ u, onReset, onToggle, onDelete, isSelf }) {
         {resetting ? (
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
             <input className="input-base" type="password" autoComplete="new-password" placeholder={t("รหัสผ่านใหม่ (≥ 8 ตัว)","New password (≥ 8 chars)")} value={pw} onChange={e=>setPw(e.target.value)} style={{width:150,padding:"6px 10px"}} />
-            <button className="btn-primary" style={{padding:"6px 12px"}} onClick={async ()=>{ if(pw.trim().length<8){ alert(t("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร","Password must be at least 8 characters")); return; } if (await onReset(u.id,pw)) { setPw(""); setResetting(false); } }}>{t("บันทึก","Save")}</button>
+            <button className="btn-primary" style={{padding:"6px 12px"}} onClick={async ()=>{ if(pw.trim().length<8){ uiAlert(t("รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร","Password must be at least 8 characters")); return; } if (await onReset(u.id,pw)) { setPw(""); setResetting(false); } }}>{t("บันทึก","Save")}</button>
             <button className="btn-ghost" style={{padding:"6px 10px"}} onClick={()=>{setResetting(false);setPw("");}}>{t("ยกเลิก","Cancel")}</button>
           </div>
         ) : (
           <div style={{display:"flex",gap:8}}>
             <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setResetting(true)}>{t("รีเซ็ตรหัส","Reset password")}</button>
             {/* ห้ามระงับบัญชีตัวเอง (แอดมินคนสุดท้ายจะล็อกทุกคนออก) · ระงับคนอื่นถามยืนยันก่อน */}
-            {!(isSelf && u.active) && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={()=>{ if (u.active && !confirm(t(`ระงับผู้ใช้ "${u.username}"? ผู้ใช้นี้จะล็อกอินไม่ได้จนกว่าจะเปิดใช้อีกครั้ง`,`Suspend "${u.username}"? They won't be able to sign in until re-enabled`))) return; onToggle(u.id); }}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>}
-            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={()=>{if(confirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`))) onDelete(u.id);}}>{t("ลบ","Delete")}</button>}
+            {!(isSelf && u.active) && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={async ()=>{ if (u.active && !(await uiConfirm(t(`ระงับผู้ใช้ "${u.username}"? ผู้ใช้นี้จะล็อกอินไม่ได้จนกว่าจะเปิดใช้อีกครั้ง`,`Suspend "${u.username}"? They won't be able to sign in until re-enabled`), { danger: true, okLabel: t("ระงับ","Suspend") }))) return; onToggle(u.id); }}>{u.active?t("ระงับ","Suspend"):t("เปิดใช้","Enable")}</button>}
+            {!isSelf && <button className="btn-ghost" style={{padding:"6px 12px",fontSize:12,color:T.red,borderColor:T.red}} onClick={async ()=>{if((await uiConfirm(t(`ลบผู้ใช้ "${u.username}" ถาวร?\n\nย้อนกลับไม่ได้ — ผู้ใช้นี้จะเข้าระบบไม่ได้อีก`,`Delete user "${u.username}" permanently?\n\nCannot be undone — this user can no longer sign in`), { danger: true, okLabel: t("ลบผู้ใช้","Delete user") }))) onDelete(u.id);}}>{t("ลบ","Delete")}</button>}
           </div>
         )}
       </td>
@@ -2662,7 +2694,7 @@ function AdminRestoreTab() {
   const doRestoreRound = async (round) => {
     const rows = Object.values(round.byKey);
     const dl = deptLabelOf(dept);
-    if (!window.confirm(t(`กู้คืน "${dl}" ทั้งชุด (${rows.length} รายการ)\nกลับเป็นสแนปช็อต ${roundDateLabel(round)} · ${round.slot}?\n\nข้อมูลปัจจุบันของทุกไฟล์ในชุดนี้จะถูกแทนที่ด้วยข้อมูลจากรอบที่เลือก`,`Restore the whole "${dl}" set (${rows.length} items)\nback to snapshot ${roundDateLabel(round)} · ${round.slot}?\n\nCurrent data for every file in this set will be replaced with the selected round`))) return;
+    if (!(await uiConfirm(t(`กู้คืน "${dl}" ทั้งชุด (${rows.length} รายการ)\nกลับเป็นสแนปช็อต ${roundDateLabel(round)} · ${round.slot}?\n\nข้อมูลปัจจุบันของทุกไฟล์ในชุดนี้จะถูกแทนที่ด้วยข้อมูลจากรอบที่เลือก`,`Restore the whole "${dl}" set (${rows.length} items)\nback to snapshot ${roundDateLabel(round)} · ${round.slot}?\n\nCurrent data for every file in this set will be replaced with the selected round`), { okLabel: t("กู้คืน","Restore") }))) return;
     setBusy(true); setMsg("");
     let ok = 0, fail = 0;
     for (const row of rows) {
@@ -2770,7 +2802,7 @@ function AdminAccountsTab() {
     if (new Set(codes).size !== codes.length) { setMsg(t("⚠ มีรหัสซ้ำกัน — Acc code ห้ามซ้ำ","⚠ Duplicate codes — each Acc. Code must be unique")); return; }
     const renameMap = {}; clean.forEach(r => { if (r.orig && r.orig !== r.code) renameMap[r.orig] = r.code; });
     const nRen = Object.keys(renameMap).length;
-    if (!window.confirm((t(`บันทึกรายการบัญชี ${clean.length} รายการ?`,`Save ${clean.length} account codes?`)) + (nRen ? t(`\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ`,`\n\n${nRen} codes changed — existing data (Tender Cost / PO / monthly / plan) for all projects will be migrated automatically`) : "") + t(`\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`,`\n\nThe page will refresh when done`))) return;
+    if (!(await uiConfirm((t(`บันทึกรายการบัญชี ${clean.length} รายการ?`,`Save ${clean.length} account codes?`)) + (nRen ? t(`\n\nเปลี่ยนรหัส ${nRen} รายการ — ระบบจะย้ายข้อมูลเดิม (Tender Cost / PO / รายเดือน / แผน) ของทุกโครงการให้อัตโนมัติ`,`\n\n${nRen} codes changed — existing data (Tender Cost / PO / monthly / plan) for all projects will be migrated automatically`) : "") + t(`\n\nเสร็จแล้วหน้าจะรีเฟรชใหม่`,`\n\nThe page will refresh when done`), { okLabel: t("บันทึก","Save") }))) return;
     setBusy(true); setMsg(t("กำลังบันทึก…","Saving…"));
     try {
       if (nRen) { setMsg(t("กำลังย้ายข้อมูลข้ามทุกโครงการ…","Migrating data across all projects…")); await migrateAccountCodes(renameMap); }
@@ -2792,7 +2824,7 @@ function AdminAccountsTab() {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={addRow} className="btn-ghost">+ {t("เพิ่มรหัส","Add code")}</button>
-          <button onClick={save} disabled={busy || dupCodes.size > 0} className="btn-primary" style={{ background: dupCodes.size ? T.textMuted : T.blue }}>{busy ? t("⏳ กำลังบันทึก…","⏳ Saving…") : t("💾 บันทึก","💾 Save")}</button>
+          <button onClick={save} disabled={busy || dupCodes.size > 0} className="btn-primary" style={{ background: dupCodes.size ? T.textMuted : T.blue }}>{busy ? t("กำลังบันทึก…","Saving…") : t("บันทึก","Save")}</button>
         </div>
       </div>
       {msg && <div style={{ padding: "10px 18px", fontSize:12, fontWeight: 600, color: msg.startsWith("✓") ? T.green : (msg.startsWith("⚠") || msg.startsWith("บันทึกไม่") || msg.startsWith("Save failed")) ? T.red : T.textSecondary, background: "#f8fafc" }}>{msg}</div>}
@@ -2819,7 +2851,7 @@ function AdminAccountsTab() {
                     <input list="acc-groups" value={r.group} onChange={e => setCell(r.rid, "group", e.target.value)} style={inp} />
                   </td>
                   <td style={{ padding: "5px 10px", textAlign: "center" }}>
-                    <button onClick={() => delRow(r.rid)} title={t("ลบรหัสนี้","Delete this code")} style={{ background: "none", border: "none", color: T.red, cursor: "pointer", fontSize: 14 }}>🗑</button>
+                    <button onClick={() => delRow(r.rid)} title={t("ลบรหัสนี้","Delete this code")} aria-label={t("ลบรหัสนี้","Delete this code")} className="icon-danger" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 6, borderRadius: 8, display: "inline-grid", placeItems: "center" }}><Ico name="trash" size={16} /></button>
                   </td>
                 </tr>
               );
@@ -2859,7 +2891,7 @@ function AdminPanel({ onBack, onLogout, session }) {
   // การกระทำกับผู้ใช้ — ถ้าล้มเหลว (เน็ต/สิทธิ์/Edge Function) แจ้งให้รู้ (เดิมเงียบ ดูเหมือนสำเร็จ)
   const adminAct = async (fn, failMsg) => {
     try { setUsers(await fn()); return true; }
-    catch (e) { console.warn(failMsg, e); alert(`${failMsg}\n\n${e?.message || ""}`.trim()); return false; }
+    catch (e) { console.warn(failMsg, e); uiAlert(`${failMsg}\n\n${e?.message || ""}`.trim()); return false; }
   };
   const handleReset   = (id, pw) => adminAct(() => resetPassword(users, id, pw), t("⚠ รีเซ็ตรหัสผ่านไม่สำเร็จ","⚠ Password reset failed"));
   const handleToggle  = (id)     => adminAct(() => toggleActive(users, id),      t("⚠ เปลี่ยนสถานะผู้ใช้ไม่สำเร็จ","⚠ Couldn't change user status"));
@@ -2876,22 +2908,13 @@ function AdminPanel({ onBack, onLogout, session }) {
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
-      <div className="app-header" style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
-        <div>
-          <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
-          <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>Admin Panel</div>
-        </div>
-        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:12}}>
-          <LangToggle/>
-          <span style={{fontSize:12,color:"rgba(255,255,255,0.8)"}}>👤 {session.name} ({ROLE_LABELS[session.role]})</span>
-          <button onClick={onLogout} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>{t("ออกจากระบบ","Logout")}</button>
-        </div>
-      </div>
+      <TopBar onBack={onBack} title="Admin" sub={t("ผู้ใช้ · รหัสบัญชี · Log · กู้คืนข้อมูล","Users · account codes · log · restore")}>
+        <UserMenu session={session} onLogout={onLogout} />
+      </TopBar>
 
       <div style={{padding:"28px 32px"}}>
         <div style={{display:"flex",gap:8,marginBottom:22}}>
-          {[["users",t("👥 จัดการผู้ใช้","👥 Manage users")],["accounts",t("🏷️ รหัสบัญชี","🏷️ Account codes")],["logs",t("📜 Log การเข้าใช้งาน","📜 Access log")],["restore",t("🕘 กู้คืนข้อมูล","🕘 Restore data")]].map(([id,label])=>(
+          {[["users",t("จัดการผู้ใช้","Manage users")],["accounts",t("รหัสบัญชี","Account codes")],["logs",t("Log การเข้าใช้งาน","Access log")],["restore",t("กู้คืนข้อมูล","Restore data")]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
@@ -3029,8 +3052,9 @@ function SearchInput({ value, onChange, placeholder, width = 240, big = false })
   } : {};
   return (
     <div style={{position:"relative",width}}>
-      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-        className="input-base" style={{width:"100%",paddingRight:value?30:13,...bigStyle}}
+      <Ico name="search" size={16} color={T.textMuted} style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",pointerEvents:"none"}} />
+      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={String(placeholder||"").replace(/^\u{1F50D}\s*/u,"")}
+        className="input-base" style={{width:"100%",paddingLeft:34,paddingRight:value?30:13,...bigStyle}}
         onFocus={big?(e=>{e.currentTarget.style.borderColor=T.blue;e.currentTarget.style.boxShadow="0 0 0 3px rgba(37,99,235,0.15)";}):undefined}
         onBlur={big?(e=>{e.currentTarget.style.borderColor=value?T.blue:"#94a3b8";e.currentTarget.style.boxShadow="0 1px 4px rgba(15,23,42,0.07)";}):undefined}/>
       {value && (
@@ -3070,7 +3094,7 @@ function GroupFilter({ selected, onChange, options = GROUPS, color = T.blue }) {
       <button onClick={()=>setOpen(o=>!o)} title={t("กรองตามหมวด (เลือกได้หลายหมวด)","Filter by group (multi-select)")}
         style={{display:"flex",alignItems:"center",gap:7,padding:"6px 12px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap",
           border:`1.5px solid ${has?color:T.cardBorder}`, background: has?color:T.card, color: has?"#fff":T.textSecondary}}>
-        🏷 {label}
+        <Ico name="tag" size={14} /> {label}
         {has && <span style={{fontSize:11,opacity:0.85}}>({selected.length})</span>}
         <span style={{fontSize:9,opacity:0.8}}>▼</span>
       </button>
@@ -3124,6 +3148,16 @@ const ICON_PATHS = {
   chevrons: "M7 10l5 5 5-5",
   alert: "M12 4l9 16H3zM12 10v4M12 17h.01",
   calendar: "M4 6h16v14H4zM4 10h16M8 3v4M16 3v4",
+  trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6",
+  lock: "M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4.2-4.2",
+  copy: "M8 8h11v12H8zM5 16V4h11",
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+  truck: "M3 6h11v10H3zM14 10h4l3 3v3h-7M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM17 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+  tag: "M3 12V4h8l10 10-8 8zM7.5 7.5h.01",
+  filter: "M4 5h16l-6 8v6l-4-2v-4z",
+  users: "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21v-1a6 6 0 0 1 12 0v1M16 3.5a4 4 0 0 1 0 7.5M22 21v-1a6 6 0 0 0-4-5.6",
+  trend: "M3 17l6-6 4 4 8-8M15 7h6v6",
 };
 function Ico({ name, size = 16, color = "currentColor", sw = 1.9, style }) {
   const d = ICON_PATHS[name]; if (!d) return null;
@@ -3240,54 +3274,32 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
-      {/* Header */}
-      <div className="app-header" style={{background:T.headerGrad,padding:"0 32px"}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 0 20px",flexWrap:"wrap",gap:12}}>
-          <div>
-            <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600,marginBottom:4}}>TENDER COST SYSTEM</div>
-            <div style={{fontSize:22,fontWeight:700,color:"#fff",letterSpacing:"-0.5px"}}>{t("ระบบบริหารต้นทุนโครงการ","Project Cost Management")}</div>
-            <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · {t("จัดซื้อ · บัญชี","Procurement · Accounting")} — Real-time sync</div>
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-            <LangToggle/>
-            <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
-            {session?.role === "admin" && (
-              <button className="btn-primary" onClick={onOpenAdmin}
-                style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)"}}>
-                ⚙️ Admin
-              </button>
-            )}
-            {session?.role !== "accounting" && (
-              <button className="btn-primary" onClick={()=>setNewProjModal(true)}
-                style={{background:"rgba(255,255,255,0.2)",backdropFilter:"blur(8px)",border:"1.5px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:16,lineHeight:1}}>+</span> {t("โครงการใหม่","New project")}
-              </button>
-            )}
-            <div style={{width:1,alignSelf:"stretch",background:"rgba(255,255,255,0.2)"}}/>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:12,color:"#fff",fontWeight:600}}>{session?.name}</div>
-              <div style={{fontSize:11,color:"rgba(255,255,255,0.6)"}}>{ROLE_LABELS[session?.role]}</div>
-            </div>
-            <button onClick={onLogout} title={t("ออกจากระบบ","Logout")}
-              style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600}}>
-              {t("ออกจากระบบ","Logout")}
-            </button>
-          </div>
-        </div>
-        <div style={{height:4}}/>
-      </div>
+      <TopBar brand title={t("ระบบบริหารต้นทุนโครงการ","Project Cost Management")} sub={`QS · ${t("จัดซื้อ · บัญชี","Procurement · Accounting")} · Tender Cost`}>
+        <SyncBadge light syncing={syncing} syncedAt={syncedAt}/>
+        {session?.role === "admin" && (
+          <button className="btn-ghost" onClick={onOpenAdmin} title="Admin" aria-label="Admin" style={{display:"inline-flex",alignItems:"center",gap:6}}>
+            <Ico name="gear" size={16} /><span className="hdr-lbl">Admin</span>
+          </button>
+        )}
+        {session?.role !== "accounting" && (
+          <button className="btn-primary" onClick={()=>setNewProjModal(true)} title={t("โครงการใหม่","New project")} aria-label={t("โครงการใหม่","New project")} style={{display:"inline-flex",alignItems:"center",gap:6}}>
+            <Ico name="plus" size={16} /><span className="hdr-lbl">{t("โครงการใหม่","New project")}</span>
+          </button>
+        )}
+        <UserMenu session={session} onLogout={onLogout} />
+      </TopBar>
 
       {/* Body */}
       <div style={{padding:"28px 32px"}}>
         {projects.length === 0 && loadErr ? (
           <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
-            <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
+            <div style={{marginBottom:12,color:T.amber}}><Ico name="alert" size={40} sw={1.6} /></div>
             <div style={{fontSize:15,fontWeight:600,color:T.textPrimary,marginBottom:14}}>{t("โหลดรายการโครงการไม่สำเร็จ — ตรวจเน็ตแล้วกดลองใหม่","Couldn't load the project list — check your connection and retry")}</div>
             <button className="btn-primary" onClick={onRetryLoad}>{t("ลองใหม่","Retry")}</button>
           </div>
         ) : projects.length === 0 ? (
           <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
-            <div style={{fontSize:52,marginBottom:14}}>🏗</div>
+            <div style={{marginBottom:14,color:T.textMuted}}><Ico name="box" size={44} sw={1.4} /></div>
             <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>{t("ยังไม่มีโครงการ","No projects yet")}</div>
             <div style={{fontSize:13,marginBottom:20}}>{t('กด "โครงการใหม่" เพื่อเริ่มต้น','Press "New project" to start')}</div>
             {session?.role !== "accounting" && <button className="btn-primary" onClick={()=>setNewProjModal(true)}>+ {t("สร้างโครงการแรก","Create first project")}</button>}
@@ -3295,8 +3307,7 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
         ) : (
           <>
             <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
-              <input value={projSearch} onChange={e=>setProjSearch(e.target.value)} placeholder={t("🔍 ค้นหาโครงการ / ชื่อลูกค้า…","🔍 Search project / client…")}
-                style={{flex:1,minWidth:220,maxWidth:360,padding:"9px 14px",border:`1px solid ${T.cardBorder}`,borderRadius:10,fontSize:13,outline:"none"}}/>
+              <div style={{flex:1,minWidth:220,maxWidth:360}}><SearchInput value={projSearch} onChange={setProjSearch} placeholder={t("ค้นหาโครงการ / ชื่อลูกค้า…","Search project / client…")} width="100%"/></div>
               <span style={{fontSize:12,color:T.textMuted,fontWeight:500}}>
                 {projSearch.trim() ? `${t("พบ","Found")} ${shownProjects.length} ${t("จาก","of")} ${projects.length} ${t("โครงการ","projects")}` : `${projects.length} ${t("โครงการทั้งหมด","projects total")}`}
               </span>
@@ -3356,22 +3367,22 @@ function ProjectCard({ project, summary: sm, onOpen, onDelete }) {
   const ageRaw = Math.floor((Date.now() - new Date(project.createdAt)) / 86400000);
   const age = Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : null;
   return (
-    <div className="card-hover" onClick={onOpen} title={t("เปิดโครงการ","Open project")}
-      style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:24,cursor:"pointer",position:"relative"}}>
-      <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:T.headerGrad,borderRadius:"16px 16px 0 0"}}/>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,paddingTop:2}}>
-        <span style={{fontSize:11,letterSpacing:2,color:T.blue,fontWeight:650,textTransform:"uppercase"}}>PROJECT</span>
+    <div className="card-hover" onClick={onOpen} title={t("เปิดโครงการ","Open project")} data-project-card={project.id}
+      style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:22,cursor:"pointer",position:"relative"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:4}}>
+        <div style={{fontSize:18,fontWeight:650,color:T.textPrimary,lineHeight:1.3,minWidth:0}}>{project.name}</div>
         {onDelete && (
-          <button onClick={e=>{e.stopPropagation();onDelete();}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:14,padding:4,borderRadius:6,transition:"color 0.15s"}}
-            onMouseEnter={e=>e.target.style.color="#ef4444"} onMouseLeave={e=>e.target.style.color=T.textMuted}>🗑</button>
+          <button onClick={e=>{e.stopPropagation();onDelete();}} aria-label={t("ลบโครงการ","Delete project")} title={t("ลบโครงการ","Delete project")} className="icon-danger"
+            style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:6,borderRadius:8,display:"grid",placeItems:"center",flexShrink:0,marginTop:-4,marginRight:-6}}>
+            <Ico name="trash" size={17} />
+          </button>
         )}
       </div>
-      <div style={{fontSize:18,fontWeight:650,color:T.textPrimary,marginBottom:4,lineHeight:1.3}}>{project.name}</div>
-      {project.client && <div style={{fontSize:12,color:T.textSecondary,marginBottom:14}}>{project.client}</div>}
+      {project.client ? <div style={{fontSize:12,color:T.textSecondary,marginBottom:12}}>{project.client}</div> : <div style={{height:8}}/>}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
-        {project.area   && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.area} ft²</span>}
-        {project.panels && <span style={{background:T.blueLight,color:T.blue,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.panels} Panels</span>}
-        {project.currency && <span style={{background:"#f8fafc",color:T.textMuted,fontSize:11,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
+        {project.area   && <span style={{background:"#f1f5f9",color:T.textSecondary,fontSize:12,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.area} ft²</span>}
+        {project.panels && <span style={{background:"#f1f5f9",color:T.textSecondary,fontSize:12,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.panels} Panels</span>}
+        {project.currency && <span style={{background:"#f1f5f9",color:T.textMuted,fontSize:12,padding:"3px 10px",borderRadius:6,fontWeight:500}}>{project.currency}</span>}
       </div>
       <div className="proj-stats" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16,padding:"10px 12px",background:T.bg,borderRadius:10}}>
         {[
@@ -3385,8 +3396,16 @@ function ProjectCard({ project, summary: sm, onOpen, onDelete }) {
           </div>
         ))}
       </div>
+      {/* ต้องรีบดู — เห็นทุกโครงการจากหน้าเดียว (ของเข้าล่าช้า / หมวดเกินงบ) */}
+      {summary && (summary.late > 0 || summary.overCodes > 0) && (
+        <div data-proj-attention style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",margin:"-4px 0 14px"}}>
+          <Ico name="alert" size={15} color={T.red} />
+          {summary.late > 0 && <span className="att-chip" style={{cursor:"inherit"}}><b>{summary.late}</b> {t("ของเข้าล่าช้า","late incoming")}</span>}
+          {summary.overCodes > 0 && <span className="att-chip" style={{cursor:"inherit"}}><b>{summary.overCodes}</b> {t("หมวดเกินงบ","over budget")}</span>}
+        </div>
+      )}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div style={{fontSize:11,color:T.textMuted}}>{age === null ? "—" : age === 0 ? t("สร้างวันนี้","Created today") : `${age} ${t("วันที่แล้ว","days ago")}`}</div>
+        <div style={{fontSize:12,color:T.textMuted}}>{age === null ? "—" : age === 0 ? t("สร้างวันนี้","Created today") : `${age} ${t("วันที่แล้ว","days ago")}`}</div>
         <button onClick={e=>{e.stopPropagation();onOpen();}} className="btn-primary" style={{padding:"8px 18px",fontSize:12}}>{t("เปิดโครงการ","Open")} →</button>
       </div>
     </div>
@@ -3416,21 +3435,10 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
 
   return (
     <div style={{minHeight:"100vh",background:T.bg}}>
-      <div className="app-header" style={{background:T.headerGrad,padding:"18px 32px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-        <button onClick={onBack} title={t("กลับ","Back")} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",cursor:"pointer",borderRadius:8,padding:"6px 14px",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>← {t("กลับ","Back")}</button>
-        <div>
-          <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>TENDER COST SYSTEM</div>
-          <div style={{fontSize:16,fontWeight:650,color:"#fff",marginTop:2}}>{project.name}</div>
-        </div>
-        {project.area && (
-          <div style={{marginLeft:"auto",display:"flex",gap:8}}>
-            {[`${project.area} ft²`,`${project.panels} Panels`].map(v=>(
-              <span key={v} style={{background:"rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.9)",fontSize:12,padding:"4px 12px",borderRadius:8,fontWeight:500}}>{v}</span>
-            ))}
-          </div>
-        )}
-        <div style={{marginLeft:project.area?8:"auto"}}><LangToggle/></div>
-      </div>
+      <TopBar onBack={onBack} title={project.name} sub={t("เลือกแผนกที่จะทำงาน","Choose a department")}>
+        {project.area && <span className="hdr-meta" style={{fontSize:12,color:T.textMuted,whiteSpace:"nowrap"}}>{project.area} ft² · {project.panels} Panels</span>}
+        <LangToggle dark={false} />
+      </TopBar>
 
       <div style={{padding:"32px"}}>
         {editing ? (
@@ -3458,8 +3466,7 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
           {ROLES.map(r => (
             <button key={r.id} onClick={()=>onSelect(r.id)} className="card-hover"
               style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:18,padding:"28px 24px",cursor:"pointer",textAlign:"left",display:"flex",flexDirection:"column",gap:12,position:"relative",overflow:"hidden"}}>
-              <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:r.color}}/>
-              <div style={{width:44,height:44,borderRadius:12,background:r.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>{r.icon}</div>
+              <div style={{width:44,height:44,borderRadius:12,background:r.bg,color:r.color,display:"flex",alignItems:"center",justifyContent:"center"}}>{EMOJI_ICON[r.icon] ? <Ico name={EMOJI_ICON[r.icon]} size={22} /> : r.icon}</div>
               <div>
                 <div style={{fontSize:20,fontWeight:650,color:r.color}}>{r.label}</div>
                 <div style={{fontSize:11,color:T.textMuted,marginTop:2,letterSpacing:0.5}}>{r.sub}</div>
@@ -3546,7 +3553,7 @@ function CalcFab() {
   const open = useCalcOpen();
   return (
     <button onClick={() => CalcStore.set(!open)} title={t("เครื่องคิดเลข","Calculator")} aria-label={t("เครื่องคิดเลข","Calculator")} aria-pressed={open} data-calc-toggle
-      className="fab-btn" style={{ ...fabStyle(open), bottom:FAB_GAP }}>
+      className="fab-btn" style={{ ...fabStyle(open), bottom:BOTTOM(FAB_GAP) }}>
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <rect x="4.5" y="2.5" width="15" height="19" rx="2.5" stroke="#fff" strokeWidth="1.8"/>
         <rect x="7.5" y="5.5" width="9" height="3.5" rx="0.8" fill="#fff"/>
@@ -3568,7 +3575,7 @@ function ScrollTopFab() {
   const toTop = () => { try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); } };
   return (
     <button onClick={toTop} title={t("กลับบนสุดของหน้า","Back to top of page")} aria-label={t("กลับบนสุดของหน้า","Back to top of page")} data-scroll-top tabIndex={show ? 0 : -1}
-      className="fab-btn" style={{ ...fabStyle(false), bottom:FAB_GAP + FAB_SIZE + 12, opacity: show ? 1 : 0, pointerEvents: show ? "auto" : "none", transform: show ? "none" : "translateY(8px)" }}>
+      className="fab-btn" style={{ ...fabStyle(false), bottom:BOTTOM(FAB_GAP + FAB_SIZE + 12), opacity: show ? 1 : 0, pointerEvents: show ? "auto" : "none", transform: show ? "none" : "translateY(8px)" }}>
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
@@ -3590,7 +3597,7 @@ function TableTopButton() {
       const el = elRef.current;
       if (!el || !el.isConnected || el.scrollTop < 200) { setBox(null); return; }
       const r = el.getBoundingClientRect();
-      let visBottom = Math.min(r.top + el.clientTop + el.clientHeight, window.innerHeight);
+      let visBottom = Math.min(r.top + el.clientTop + el.clientHeight, window.innerHeight - bnavH());
       const foot = el.querySelector("tfoot");                          // แถวรวมที่ตรึงไว้ด้านล่าง → วางปุ่มเหนือแถวรวม
       const fcell = foot && foot.querySelector("td,th");                 // ใช้ตำแหน่ง "ช่อง" (ตรึงแบบ sticky) ไม่ใช่กล่อง tfoot
       if (fcell) { const fr = fcell.getBoundingClientRect(); if (fr.height && fr.top < visBottom) visBottom = fr.top; }
@@ -3662,8 +3669,8 @@ function CalculatorPopup({ selSum = null }) {
     const r = boxRef.current.getBoundingClientRect();
     const side = window.innerWidth >= r.width + FAB_SIZE + FAB_GAP * 2 + 8;   // มีที่ข้างปุ่มลอยไหม
     setPos(side
-      ? { x: window.innerWidth - r.width - FAB_SIZE - FAB_GAP - 12, y: Math.max(4, window.innerHeight - r.height - FAB_GAP) }
-      : { x: Math.max(4, window.innerWidth - r.width - 12), y: Math.max(4, window.innerHeight - r.height - FAB_SIZE - FAB_GAP - 12) });
+      ? { x: window.innerWidth - r.width - FAB_SIZE - FAB_GAP - 12, y: Math.max(4, window.innerHeight - bnavH() - r.height - FAB_GAP) }
+      : { x: Math.max(4, window.innerWidth - r.width - 12), y: Math.max(4, window.innerHeight - bnavH() - r.height - FAB_SIZE - FAB_GAP - 12) });
   }, [open, pos]);
   useEffect(() => { const el = exprRef.current; if (el) el.scrollLeft = el.scrollWidth; });   // สูตรยาว → เลื่อนให้เห็นท้ายสุด
   if (!open) return null;
@@ -3795,11 +3802,11 @@ function CalculatorPopup({ selSum = null }) {
       {/* แถบหัว: ลากย้ายได้ */}
       <div onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd}
         style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,cursor:"grab",touchAction:"none"}}>
-        <span style={{fontSize:12,fontWeight:700,color:T.textMuted,letterSpacing:0.5,flex:1}}>🧮 {t("เครื่องคิดเลข","Calculator")}</span>
+        <span style={{fontSize:12,fontWeight:700,color:T.textMuted,letterSpacing:0.5,flex:1}}><Ico name="calc" size={14} /> {t("เครื่องคิดเลข","Calculator")}</span>
         <button onClick={()=>setShowHist(v=>!v)} title={t("ประวัติการคำนวณ","History")} aria-label={t("ประวัติการคำนวณ","History")} tabIndex={-1}
-          style={{border:"none",background:showHist?"rgba(37,99,235,0.12)":"transparent",color:showHist?T.blue:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:14}}>🕘</button>
+          style={{border:"none",background:showHist?"rgba(37,99,235,0.12)":"transparent",color:showHist?T.blue:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:14,display:"inline-grid",placeItems:"center"}}><Ico name="clock" size={16} /></button>
         <button onClick={copy} title={t("คัดลอกผลลัพธ์","Copy result")} aria-label={t("คัดลอกผลลัพธ์","Copy result")} tabIndex={-1} disabled={result==null}
-          style={{border:"none",background:"transparent",color:copied?T.green:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:result==null?"default":"pointer",fontSize:copied?12:14,fontWeight:700}}>{copied ? t("คัดลอกแล้ว","Copied") : "📋"}</button>
+          style={{border:"none",background:"transparent",color:copied?T.green:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:result==null?"default":"pointer",fontSize:copied?12:14,fontWeight:700}}>{copied ? t("คัดลอกแล้ว","Copied") : <Ico name="copy" size={16} />}</button>
         <button onClick={()=>CalcStore.set(false)} title={t("ปิด (Esc)","Close (Esc)")} aria-label={t("ปิด","Close")} tabIndex={-1}
           style={{border:"none",background:"transparent",color:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:15,lineHeight:1}}>✕</button>
       </div>
@@ -3862,6 +3869,105 @@ function LangToggle({ dark = true }) {
   );
 }
 
+// จอมือถือ (≤640px) — ใช้สลับตาราง ↔ การ์ด และแสดงแถบแท็บด้านล่าง (ต้องเปลี่ยน "โครงหน้า" ไม่ใช่แค่ CSS)
+const PHONE_MQ = "(max-width: 640px)";
+function useIsPhone() {
+  const get = () => (typeof window !== "undefined" && window.matchMedia) ? window.matchMedia(PHONE_MQ).matches : false;
+  const [v, setV] = useState(get);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const m = window.matchMedia(PHONE_MQ); const f = () => setV(m.matches); f();
+    if (m.addEventListener) m.addEventListener("change", f); else if (m.addListener) m.addListener(f);
+    return () => { if (m.removeEventListener) m.removeEventListener("change", f); else if (m.removeListener) m.removeListener(f); };
+  }, []);
+  return v;
+}
+
+// แถบแท็บด้านล่าง (มือถือเท่านั้น) — เมนูหลักของแผนกอยู่ใต้นิ้วโป้ง แทนแท็บด้านบน
+function BottomNav({ items }) {
+  useLang();
+  useEffect(() => { document.body.classList.add("has-bnav"); return () => document.body.classList.remove("has-bnav"); }, []);
+  return (
+    <nav data-bottom-nav aria-label={t("เมนูหลัก","Main menu")}
+      style={{position:"fixed",left:0,right:0,bottom:0,zIndex:93,background:"#fff",borderTop:`1px solid ${T.cardBorder}`,display:"flex",
+        paddingBottom:"env(safe-area-inset-bottom, 0px)",boxShadow:"0 -4px 16px rgba(15,23,42,0.06)"}}>
+      {items.map(it => (
+        <button key={it.key} onClick={it.onClick} aria-current={it.on ? "page" : undefined} data-bnav={it.key}
+          style={{flex:1,minWidth:0,height:BNAV_H,border:"none",background:"none",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,
+            cursor:"pointer",color:it.on?T.blue:T.textSecondary,fontSize:11,fontWeight:it.on?700:500,position:"relative"}}>
+          {it.on && <span aria-hidden="true" style={{position:"absolute",top:0,left:"25%",right:"25%",height:3,borderRadius:"0 0 3px 3px",background:T.blue}}/>}
+          <Ico name={it.icon} size={20} />
+          <span style={{maxWidth:"100%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",padding:"0 4px"}}>{it.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+// ที่แสดงกล่องข้อความในแอป (uiAlert / uiConfirm / uiPrompt) — ทีละกล่อง ตามลำดับ
+function DialogHost() {
+  useLang();
+  const [q, setQ] = useState(DialogStore.q);
+  const [text, setText] = useState("");
+  const okRef = useRef(null), inRef = useRef(null), cancelRef = useRef(null);
+  useEffect(() => { DialogStore.subs.add(setQ); return () => DialogStore.subs.delete(setQ); }, []);
+  const d = q[0];
+  const matchOk = !d || d.kind !== "prompt" || !d.match || text.trim() === String(d.match).trim();
+  const close = (val) => {
+    if (!d) return;
+    const r = d.resolve; setText(""); DialogStore.shift();
+    r(d.kind === "alert" ? undefined : d.kind === "confirm" ? !!val : (val === null ? null : val));
+  };
+  // โฟกัสปุ่ม/ช่องในกล่องตอนเปิด แล้วคืนโฟกัสเดิมตอนปิด
+  useEffect(() => {
+    if (!d) return;
+    const prev = document.activeElement;
+    const f = setTimeout(() => { (d.kind === "prompt" ? inRef.current : d.danger && cancelRef.current ? cancelRef.current : okRef.current)?.focus(); }, 0);
+    return () => { clearTimeout(f); if (prev && prev.focus && prev.isConnected) try { prev.focus(); } catch {} };
+  }, [d]);
+  // จับปุ่มก่อนส่วนอื่นของแอป (Esc ในตาราง / เครื่องคิดเลข จะได้ไม่ทำงานซ้อน) + วนโฟกัสอยู่ในกล่อง
+  useEffect(() => {
+    if (!d) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); close(d.kind === "prompt" ? null : false); }
+      else if (e.key === "Enter" && !(e.target && e.target.tagName === "BUTTON")) { e.preventDefault(); e.stopImmediatePropagation(); if (matchOk) close(d.kind === "prompt" ? text : true); }
+      else if (e.key === "Tab") {
+        const els = [inRef.current, cancelRef.current, okRef.current].filter(x => x && !x.disabled);
+        if (!els.length) return;
+        const i = els.indexOf(document.activeElement);
+        e.preventDefault(); els[(i + (e.shiftKey ? -1 : 1) + els.length) % els.length].focus();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [d, text, matchOk]);
+  if (!d) return null;
+  const title = d.title || (d.kind === "alert" ? t("แจ้งเตือน","Notice") : d.kind === "prompt" ? t("ยืนยัน","Confirm") : t("ยืนยัน","Confirm"));
+  const okLabel = d.okLabel || t("ตกลง","OK");
+  return (
+    <div data-ui-dialog={d.kind} onMouseDown={e => { if (e.target === e.currentTarget && d.kind === "alert") close(); }}
+      style={{position:"fixed",inset:0,zIndex:400,background:"rgba(15,23,42,0.45)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div role={d.kind === "alert" ? "alertdialog" : "dialog"} aria-modal="true" aria-labelledby="ui-dlg-t" aria-describedby="ui-dlg-m"
+        style={{background:"#fff",borderRadius:16,width:"min(440px, 100%)",maxHeight:"calc(100vh - 32px)",overflowY:"auto",boxShadow:"0 24px 64px rgba(15,23,42,0.28)",padding:"20px 22px 18px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+          {(d.danger || d.kind === "alert") && <span style={{width:32,height:32,borderRadius:10,display:"grid",placeItems:"center",background:d.danger?T.redBg:T.amberBg,color:d.danger?T.red:T.amber,flexShrink:0}}><Ico name="alert" size={18} /></span>}
+          <h2 id="ui-dlg-t" style={{margin:0,fontSize:16,fontWeight:650,color:T.textPrimary}}>{title}</h2>
+        </div>
+        <div id="ui-dlg-m" data-ui-message style={{fontSize:14,lineHeight:1.6,color:T.textSecondary,whiteSpace:"pre-line",overflowWrap:"anywhere"}}>{String(d.message ?? "").replace(/^\u26A0\uFE0F?\s*/, "")}</div>
+        {d.kind === "prompt" && (
+          <input ref={inRef} data-ui-input value={text} onChange={e => setText(e.target.value)} placeholder={d.placeholder || ""} className="input-base"
+            aria-label={title} style={{marginTop:12}} />
+        )}
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:18,flexWrap:"wrap"}}>
+          {d.kind !== "alert" && <button ref={cancelRef} data-ui-cancel className="btn-ghost" onClick={() => close(d.kind === "prompt" ? null : false)}>{d.cancelLabel || t("ยกเลิก","Cancel")}</button>}
+          <button ref={okRef} data-ui-ok className="btn-primary" disabled={!matchOk} onClick={() => close(d.kind === "prompt" ? text : true)}
+            style={{...(d.danger ? {background:T.red} : {}), ...(matchOk ? {} : {opacity:0.5,cursor:"not-allowed"})}}>{okLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // หัวข้อส่วนของฟอร์ม (เลขวงกลม + ชื่อ + คำอธิบายสั้น) — ใช้ในฟอร์ม PO
 function FormStep({ n, title, hint, first = false }) {
   return (
@@ -3897,6 +4003,26 @@ function DateInput({ value, onChange, disabled, style, ...rest }) {
         </span>
       )}
     </span>
+  );
+}
+
+// แถบหัวสีขาวของหน้าที่ไม่ใช่หน้าแผนก (หน้ารายชื่อโครงการ / Admin / เลือกแผนก) — หน้าตาเดียวกับ Shell
+function TopBar({ onBack, title, sub, brand = false, children }) {
+  return (
+    <div className="app-header shell-bar" style={{background:"#fff",borderTop:`3px solid ${T.blue}`,borderBottom:`1px solid ${T.cardBorder}`,padding:"9px 28px",display:"flex",alignItems:"center",gap:12,minHeight:58}}>
+      {onBack && (
+        <button onClick={onBack} title={t("กลับหน้าก่อนหน้า","Go back")} aria-label={t("กลับ","Back")}
+          style={{border:`1px solid ${T.cardBorder}`,background:"#fff",color:T.textSecondary,cursor:"pointer",borderRadius:8,width:36,height:36,display:"grid",placeItems:"center",flexShrink:0}}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        </button>
+      )}
+      {brand && <span aria-hidden="true" style={{width:34,height:34,borderRadius:9,background:T.blue,color:"#fff",display:"grid",placeItems:"center",fontSize:13,fontWeight:800,letterSpacing:0.5,flexShrink:0}}>TC</span>}
+      <div style={{minWidth:0,flex:1}}>
+        <h1 style={{margin:0,fontSize:15,fontWeight:650,color:T.textPrimary,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{title}</h1>
+        {sub && <div className="crumb-txt" style={{fontSize:12,color:T.textMuted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{sub}</div>}
+      </div>
+      {children}
+    </div>
   );
 }
 
@@ -3990,9 +4116,10 @@ function Shell({ role, color, project, onBack, onHome, onDept, children, syncedA
 // ─── QS View ─────────────────────────────────────────────────────────────────
 function QSView({ project, updateProject, tenderCosts, saveTenders, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, runExportFn, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
+  const isPhone = useIsPhone();
   const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
-  const goTab   = (id) => { if (id !== tab) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; setTabHist(h => [...h, tab]); setTab(id); } };
-  const backTab = () => { if (tabHist.length) { if (!confirmLeaveIfDirty()) return; UnsavedGuard.dirty = false; const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); } else onBack(); };
+  const goTab   = (id) => { if (id !== tab) leaveIfDirty(() => { setTabHist(h => [...h, tab]); setTab(id); }); };
+  const backTab = () => { if (tabHist.length) leaveIfDirty(() => { const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); }); else onBack(); };
   // ปุ่ม "Export เดือนนี้" ของแท็บรายเดือน ถูกยกขึ้นมาไว้ข้างปุ่ม Export หลักด้านบน
   const monthlyExportRef = useRef(null);
   const registerMonthExport = useCallback(fn => { monthlyExportRef.current = fn; }, []);
@@ -4023,8 +4150,8 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
     return item.code;
   };
 
-  const handleDeleteExtraItem = (code) => {
-    if (!confirm(t("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย","Delete this item? All its amounts (baseline + every month) will be deleted too"))) return;
+  const handleDeleteExtraItem = async (code) => {
+    if (!(await uiConfirm(t("ลบรายการนี้? ยอดเงินทุกส่วนของรายการนี้ (ราคาเดิม + รายเดือนทุกเดือน) จะถูกลบด้วย","Delete this item? All its amounts (baseline + every month) will be deleted too"), { danger: true, okLabel: t("ลบ","Delete") }))) return false;
     const item = extraItems.find(e => e.code === code);
     const parent = item?.parentCode;
     const remaining = extraItems.filter(e => e.code !== code);
@@ -4063,8 +4190,8 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
   // Hide / restore a fixed Acc. Code (511010 ... etc). Hiding doesn't erase its stored
   // numbers — it's reversible — it just removes it from the QS entry list and from
   // downstream totals, in case a project doesn't use that code at all.
-  const handleHideAccount = (code) => {
-    if (!confirm(t("นำ Acc. Code นี้ออกจากรายการหลัก? (กู้คืนได้ภายหลัง ตัวเลขที่เคยกรอกไว้จะยังไม่หาย)","Remove this Acc. Code from the main list? (restorable later; entered numbers are kept)"))) return;
+  const handleHideAccount = async (code) => {
+    if (!(await uiConfirm(t("นำ Acc. Code นี้ออกจากรายการหลัก? (กู้คืนได้ภายหลัง ตัวเลขที่เคยกรอกไว้จะยังไม่หาย)","Remove this Acc. Code from the main list? (restorable later; entered numbers are kept)"), { okLabel: t("นำออก","Remove") }))) return;
     saveHiddenAccounts([...hiddenAccounts, code]);
   };
   const handleRestoreAccount = (code) => saveHiddenAccounts(hiddenAccounts.filter(c => c !== code));
@@ -4073,6 +4200,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
     <Shell role="qs" color={T.blue} project={project} onBack={backTab} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
       <div style={{padding:"20px 28px 0"}}>
         <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center",flexWrap:"wrap"}}>
+          {!isPhone && (
           <div className="seg-tabs" role="tablist">
           {[["baseline",t("ราคาเดิม (Baseline)","Baseline")],["monthly",t("รายการเพิ่มรายเดือน","Monthly additions")]].map(([id,label])=>(
             <button key={id} role="tab" aria-selected={tab===id} onClick={()=>goTab(id)} className={`seg-tab${tab===id?" on":""}`}>
@@ -4080,6 +4208,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
             </button>
           ))}
           </div>
+          )}
           <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
           {tab==="monthly" && (
             <button onClick={()=>{ const fn = monthlyExportRef.current; if (!fn) return; if (runExportFn) runExportFn(fn); else inThai(fn); }} className="btn-ghost"
@@ -4087,11 +4216,18 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, additions, s
               <Ico name="download" /> {t("Export เดือนนี้","Export this month")}
             </button>
           )}
+          {!isPhone && (
           <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6}}>
             <Ico name="download" /> Export Excel
           </button>
+          )}
         </div>
       </div>
+      {isPhone && <BottomNav items={[
+        { key:"baseline", icon:"ruler", label:t("ราคาเดิม (Baseline)","Baseline"), on:tab==="baseline", onClick:()=>goTab("baseline") },
+        { key:"monthly",  icon:"calendar", label:t("รายการเพิ่มรายเดือน","Monthly additions"), on:tab==="monthly", onClick:()=>goTab("monthly") },
+        { key:"export",   icon:"download", label:"Export", onClick:onExport },
+      ]} />}
       {tab === "baseline"
         ? <QSBaselineTab project={project} tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems} additions={additions}
                          onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
@@ -4151,8 +4287,9 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
       if (e.key !== "Escape" || e.defaultPrevented || !canCancel) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return; // กำลังพิมพ์ — ไม่ทิ้งข้อมูล
-      if (UnsavedGuard.dirty && !window.confirm(t("ยกเลิกการแก้ไข? ค่าที่พิมพ์ไว้แต่ยังไม่บันทึกจะหายไป","Cancel editing? Unsaved values will be lost"))) return;
-      e.preventDefault(); handleCancel();
+      e.preventDefault();
+      if (UnsavedGuard.dirty) { uiConfirm(t("ยกเลิกการแก้ไข? ค่าที่พิมพ์ไว้แต่ยังไม่บันทึกจะหายไป","Cancel editing? Unsaved values will be lost"), { danger: true, okLabel: t("ทิ้งการแก้ไข","Discard changes"), cancelLabel: t("แก้ต่อ","Keep editing") }).then(ok => { if (ok) handleCancel(); }); return; }
+      handleCancel();
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
@@ -4251,7 +4388,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
     const code = addDraft.code.trim();
     if (code) {
       const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
-      if (taken) { alert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
+      if (taken) { uiAlert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
     }
     onAddExtra({ name:addDraft.name, group:addDraft.group, code: code || undefined });
     setAddDraft({ code:"", name:"", group:GROUPS[0] }); setAddOpen(false);
@@ -4275,8 +4412,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   };
 
   const handleDeleteRow = (code) => {
-    onDeleteExtra(code);
-    setDraft(d => { const n = {...d}; delete n[code]; return n; });
+    Promise.resolve(onDeleteExtra(code)).then(ok => { if (ok === false) return; setDraft(d => { const n = {...d}; delete n[code]; return n; }); });
   };
 
   return (
@@ -4291,12 +4427,12 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
 
       {/* Filters + Add row + Save */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account Code / ชื่อ...","🔍 Search Account Code / name...")} width={240}/>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("ค้นหา Account Code / ชื่อ...","Search Account Code / name...")} width={240}/>
         <button onClick={()=>setHideEmpty(v=>!v)}
           title={t("ซ่อน/แสดงแถวที่ไม่มีค่า (ราคาเดิม = 0)","Hide/show empty rows (baseline = 0)")}
           style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",
             border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
-          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : `⚡ ${t("เฉพาะที่มีค่า","With value only")}`}
+          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : t("เฉพาะที่มีค่า","With value only")}
         </button>
         <GroupFilter selected={filter} onChange={setFilter}/>
         <div style={{flex:1}}/>
@@ -4309,7 +4445,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
           style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ {t("เพิ่มรายการหลักใหม่","Add new main item")}</button>
         {!editingUnlocked && (
           <span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.textMuted,background:"#f1f5f9",padding:"6px 12px",borderRadius:8,fontWeight:600}}>
-            🔒 {t("บันทึกแล้ว","Saved")}
+            <Ico name="lock" size={14} /> {t("บันทึกแล้ว","Saved")}
           </span>
         )}
         {editingUnlocked ? (
@@ -4324,7 +4460,7 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
             )}
           </>
         ) : (
-          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:140}}>
+          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{minWidth:140,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}>
             <Ico name="edit" /> {t("แก้ไข Tender Cost","Edit Tender Cost")}
           </button>
         )}
@@ -4665,8 +4801,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return;
       if (!canCancel) return;
-      if (UnsavedGuard.dirty && !window.confirm(t("ยกเลิกการแก้ไขเดือนนี้? ค่าที่พิมพ์ไว้แต่ยังไม่บันทึกจะหายไป","Cancel editing this month? Unsaved values will be lost"))) return;
-      e.preventDefault(); handleCancel();
+      e.preventDefault();
+      if (UnsavedGuard.dirty) { uiConfirm(t("ยกเลิกการแก้ไขเดือนนี้? ค่าที่พิมพ์ไว้แต่ยังไม่บันทึกจะหายไป","Cancel editing this month? Unsaved values will be lost"), { danger: true, okLabel: t("ทิ้งการแก้ไข","Discard changes"), cancelLabel: t("แก้ต่อ","Keep editing") }).then(ok => { if (ok) handleCancel(); }); return; }
+      handleCancel();
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
@@ -4778,17 +4915,16 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // สลับเดือน — ถ้ามีค่าที่พิมพ์ค้างยังไม่บันทึก ถามก่อน (เดิมสลับแล้วค่าหายเงียบ ๆ)
   const goMonth = (m) => {
     if (!m || m === month) return;
-    if (!confirmLeaveIfDirty()) return;
-    UnsavedGuard.dirty = false;
-    setMonth(m);
+    leaveIfDirty(() => setMonth(m));
   };
   const handleAddMonth = () => {
     if (!newMonth) return;
-    if (newMonth !== month && !confirmLeaveIfDirty()) return;
-    UnsavedGuard.dirty = false;
+    if (newMonth !== month) leaveIfDirty(addMonthNow); else { UnsavedGuard.dirty = false; addMonthNow(); }
+  };
+  const addMonthNow = async () => {
     if (months.includes(newMonth)) {
       // ห้ามซ้ำ — ถ้ามีเดือนนี้อยู่แล้ว แค่กระโดดไปที่เดือนนั้นแทนการสร้างซ้ำ
-      alert(t(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`, `${monthShortLabel(newMonth)} already exists`));
+      uiAlert(t(`มีเดือน ${monthShortLabel(newMonth)} อยู่แล้ว`, `${monthShortLabel(newMonth)} already exists`));
       setMonth(newMonth); setNewMonth("");
       return;
     }
@@ -4797,7 +4933,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const prevCols = prevMonth ? columnsOf(prevMonth) : [];
     const monthObj = {};
     if (prevCols.length) {
-      if (window.confirm(t(`คัดลอกคอลัมน์จากเดือน ${monthShortLabel(prevMonth)} มาที่เดือนใหม่ไหม?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = คัดลอกคอลัมน์ (ยอดเริ่มที่ว่าง) · Cancel = เริ่มเดือนใหม่แบบไม่มีคอลัมน์`, `Copy columns from ${monthShortLabel(prevMonth)} into the new month?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = copy columns (values start empty) · Cancel = start the new month with no columns`))) {
+      if (await uiConfirm(t(`คัดลอกคอลัมน์จากเดือน ${monthShortLabel(prevMonth)} มาที่เดือนใหม่ไหม?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = คัดลอกคอลัมน์ (ยอดเริ่มที่ว่าง) · Cancel = เริ่มเดือนใหม่แบบไม่มีคอลัมน์`, `Copy columns from ${monthShortLabel(prevMonth)} into the new month?\n(${prevCols.map(c=>c.name).join(", ")})\n\nOK = copy columns (values start empty) · Cancel = start the new month with no columns`), { okLabel: t("คัดลอกคอลัมน์","Copy columns"), cancelLabel: t("เริ่มแบบว่าง","Start blank") })) {
         monthObj.$columns = prevCols.map(c => ({ ...c }));
       } else {
         monthObj.$columns = []; // เริ่มใหม่แบบไม่มีคอลัมน์ (กัน fallback ไป global เดิม)
@@ -4809,8 +4945,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
   // ลบเดือน — เอาข้อมูลที่เพิ่มในเดือนนั้นออกทั้งหมด (คีย์ meta อย่าง $columns
   // ที่เป็นระดับโปรเจกต์ไม่ถูกแตะ) แล้วถ้าลบเดือนที่กำลังดูอยู่ก็ย้ายไปเดือนอื่น
-  const handleDeleteMonth = (m) => {
-    if (!window.confirm(t(`ลบเดือน ${monthShortLabel(m)} และข้อมูลที่เพิ่มในเดือนนี้ทั้งหมด?\n(ราคาเดิม/Baseline ไม่ได้รับผลกระทบ)`, `Delete ${monthShortLabel(m)} and all additions entered in this month?\n(Baseline is not affected)`))) return;
+  const handleDeleteMonth = async (m) => {
+    if (!(await uiConfirm(t(`ลบเดือน ${monthShortLabel(m)} และข้อมูลที่เพิ่มในเดือนนี้ทั้งหมด?\n(ราคาเดิม/Baseline ไม่ได้รับผลกระทบ)`, `Delete ${monthShortLabel(m)} and all additions entered in this month?\n(Baseline is not affected)`), { danger: true, okLabel: t("ลบเดือน","Delete month") }))) return;
     const next = { ...additions };
     delete next[m];
     saveAdditions(next);
@@ -4847,7 +4983,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const code = extraDraft.code.trim();
     if (code) {
       const taken = ACCOUNTS.some(a=>a.code===code) || extraItems.some(e=>e.code===code);
-      if (taken) { alert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
+      if (taken) { uiAlert(t(`Acc. Code "${code}" มีอยู่แล้ว กรุณาใช้รหัสอื่น`, `Acc. Code "${code}" already exists, please use another`)); return; }
     }
     onAddExtra({ name:extraDraft.name, group:extraDraft.group, code: code || undefined });
     setExtraDraft({ code:"", name:"", group:GROUPS[0] }); setAddExtraOpen(false);
@@ -4880,8 +5016,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   };
 
   const handleDeleteExtra = (code) => {
-    onDeleteExtra(code);
-    setDraftAdd(d => { const n = {...d}; delete n[code]; return n; });
+    Promise.resolve(onDeleteExtra(code)).then(ok => { if (ok === false) return; setDraftAdd(d => { const n = {...d}; delete n[code]; return n; }); });
   };
 
   // เพิ่ม "รายการ" (คอลัมน์ย่อย) เฉพาะเดือนที่กำลังดูอยู่ (ต่อเดือน ไม่ลามไปเดือนอื่น)
@@ -4911,8 +5046,8 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // ลบคอลัมน์ — เฉพาะเดือนนี้ และเป็นแค่ "ร่าง" เท่านั้น จะมีผลจริงเมื่อกด "บันทึก"
   // ถ้ากด "ยกเลิก" คอลัมน์และค่าที่กรอกไว้จะกลับคืนมา (ไม่โดนลบ) และคอลัมน์ที่ลบ
   // ไปแล้วจะไม่ถูกนำไปคิดยอด (เพราะยอด roll-up ตอนบันทึกจะไม่รวมคอลัมน์นั้น)
-  const handleRemoveColumn = (colId) => {
-    if (!confirm(t("ลบคอลัมน์นี้เฉพาะเดือนนี้?\n\n• จะมีผลจริงเมื่อกด \"บันทึก\"\n• กด \"ยกเลิก\" เพื่อคืนคอลัมน์และค่าที่กรอกไว้","Delete this column for this month only?\n\n• Takes effect when you press \"Save\"\n• Press \"Cancel\" to restore the column and entered values"))) return;
+  const handleRemoveColumn = async (colId) => {
+    if (!(await uiConfirm(t("ลบคอลัมน์นี้เฉพาะเดือนนี้?\n\n• จะมีผลจริงเมื่อกด \"บันทึก\"\n• กด \"ยกเลิก\" เพื่อคืนคอลัมน์และค่าที่กรอกไว้","Delete this column for this month only?\n\n• Takes effect when you press \"Save\"\n• Press \"Cancel\" to restore the column and entered values"), { danger: true, okLabel: t("ลบคอลัมน์","Delete column") }))) return;
     const nextCols = columns.filter(c => c.id !== colId);
     const nextDraft = { ...draftAdd };
     Object.keys(nextDraft).forEach(k => { if (k.endsWith(`:${colId}`)) delete nextDraft[k]; });
@@ -4927,7 +5062,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   // parent rows (with sub-items) show a roll-up total and are skipped. Blank
   // cells in the pasted block are left untouched so pasting one column can't wipe
   // the others. Values land in the draft; the user still presses "Save this month".
-  const handleGridPaste = (startRowIdx, startColIdx, raw) => {
+  const handleGridPaste = async (startRowIdx, startColIdx, raw) => {
     if (!editingUnlocked) return;
     const grid = String(raw ?? "")
       .replace(/\r\n?/g, "\n")
@@ -4940,9 +5075,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
     const viewChanged = filter.length > 0 || !!search.trim() || hideEmpty || !!sortKey;
     if (grid.length > 1 && viewChanged) {
       const first = displayRows[startRowIdx], last = displayRows[Math.min(startRowIdx + grid.length - 1, displayRows.length - 1)];
-      if (!window.confirm(t(
+      if (!(await uiConfirm(t(
         `ตอนนี้ตารางถูกกรอง/ค้นหา/เรียง/ซ่อนแถวว่างอยู่ — ค่า ${grid.length} แถวจะลงตามลำดับที่เห็นบนจอ\nแถวแรก → ${first?.code || "-"} · แถวสุดท้าย → ${last?.code || "-"}\n\nถ้าคัดลอกมาจากชีตที่เรียงตาม Acc. Code ให้ยกเลิก แล้วล้างตัวกรอง/การเรียงก่อนวาง\nวางต่อไหม?`,
-        `The table is filtered/searched/sorted or hiding empty rows — ${grid.length} rows will be pasted in on-screen order\nFirst row → ${first?.code || "-"} · last row → ${last?.code || "-"}\n\nIf you copied from a sheet in Acc. Code order, cancel and clear the filter/sort first.\nPaste anyway?`))) return;
+        `The table is filtered/searched/sorted or hiding empty rows — ${grid.length} rows will be pasted in on-screen order\nFirst row → ${first?.code || "-"} · last row → ${last?.code || "-"}\n\nIf you copied from a sheet in Acc. Code order, cancel and clear the filter/sort first.\nPaste anyway?`), { okLabel: t("วางเลย","Paste anyway") }))) return;
     }
     setDraftAdd(d => {
       const next = { ...d };
@@ -5160,7 +5295,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       {/* Trend chart — the whole project's cost growth over time, at a glance */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"18px 20px 8px",marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
-          <span style={{fontSize:13,fontWeight:650,color:T.textPrimary}}>📈 {t("แนวโน้มต้นทุนสะสม","Cumulative cost trend")}</span>
+          <span style={{fontSize:13,fontWeight:650,color:T.textPrimary}}><Ico name="trend" size={16} color={T.textSecondary} /> {t("แนวโน้มต้นทุนสะสม","Cumulative cost trend")}</span>
           <span style={{fontSize:12,color:T.textMuted}}>{t("รวมล่าสุดทั้งโปรเจกต์","Project latest total")}: <b style={{color:T.green,fontVariantNumeric:"tabular-nums",fontSize:15}}>฿{fmt0(grandTotal)}</b>{usdRate>0 && <b className="usd-sub" style={{color:T.green,fontVariantNumeric:"tabular-nums",fontSize:12,marginLeft:6}}>≈ ${fmt(grandTotal/usdRate)}</b>}</span>
         </div>
         <div style={{display:"flex",gap:16,marginBottom:6,fontSize:11,color:T.textMuted,flexWrap:"wrap",alignItems:"center"}}>
@@ -5192,7 +5327,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
         <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6,flex:1,minWidth:0}}>
           {/* Start (baseline) — read-only reference: what date the project began */}
           <div style={{flexShrink:0,textAlign:"left",padding:"10px 16px",borderRadius:12,border:`1.5px solid ${T.cardBorder}`,background:"#f8fafc",minWidth:140}}>
-            <div style={{fontSize:15,fontWeight:750,color:T.textSecondary,marginBottom:3,letterSpacing:0.2}}>🚩 {t("เริ่มต้น","Start")}</div>
+            <div style={{fontSize:15,fontWeight:750,color:T.textSecondary,marginBottom:3,letterSpacing:0.2}}>{t("เริ่มต้น","Start")}</div>
             <div style={{fontSize:15,fontWeight:650,color:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>{fmtK(baseTotal)}</div>
             <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{project?.createdAt ? new Date(project.createdAt).toLocaleDateString(_LANG==="en"?"en-US":"th-TH",{day:"numeric",month:"short",year:"2-digit"}) : t("ราคาเดิม","baseline")}</div>
           </div>
@@ -5217,7 +5352,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           })}
           {/* เพิ่มเดือน — มีป้ายบอก + แสดงเดือนที่เลือกเป็นคำอ่าน (เดิมเห็นแค่ช่องว่าง "-------") */}
           <div style={{flexShrink:0,display:"flex",flexDirection:"column",justifyContent:"center",gap:4,padding:"8px 12px",borderRadius:12,border:`1.5px dashed ${T.blue}`,background:T.blueLight}}>
-            <span style={{fontSize:12,color:T.blue,fontWeight:650,whiteSpace:"nowrap"}}>📅 {t("เพิ่มเดือนใหม่","Add a month")}{newMonth ? ` · ${monthShortLabel(newMonth)}` : ""}</span>
+            <span style={{fontSize:12,color:T.blue,fontWeight:650,whiteSpace:"nowrap"}}><Ico name="calendar" size={14} /> {t("เพิ่มเดือนใหม่","Add a month")}{newMonth ? ` · ${monthShortLabel(newMonth)}` : ""}</span>
             <div style={{display:"flex",alignItems:"center",gap:6}}>
               <input type="month" value={newMonth} onChange={e=>setNewMonth(e.target.value)} className="input-base" title={t("เลือกเดือนที่จะเพิ่ม","Pick the month to add")}
                 style={{border:`1px solid ${T.cardBorder}`,background:"#fff",padding:"6px 6px",width:136,fontSize:13,minHeight:32}}/>
@@ -5237,12 +5372,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {/* Toolbar: search + group filter + actions */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account Code / ชื่อ...","🔍 Search Account Code / name...")} width={220}/>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("ค้นหา Account Code / ชื่อ...","Search Account Code / name...")} width={220}/>
         <button onClick={()=>setHideEmpty(v=>!v)}
           title={t("ซ่อน/แสดงแถวที่ไม่มีค่า (รวมสะสม = 0)","Hide/show empty rows (total = 0)")}
           style={{flexShrink:0,display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",
             border:`1.5px solid ${hideEmpty?T.blue:T.cardBorder}`,background:hideEmpty?T.blue:T.card,color:hideEmpty?"#fff":T.textSecondary,whiteSpace:"nowrap"}}>
-          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : `⚡ ${t("เฉพาะที่มีค่า","With value only")}`}
+          {hideEmpty ? `✓ ${t("เฉพาะที่มีค่า","With value only")}${hiddenEmptyCount?` (${t("ซ่อน","hidden")} ${hiddenEmptyCount})`:""}` : t("เฉพาะที่มีค่า","With value only")}
         </button>
         <GroupFilter selected={filter} onChange={setFilter}/>
         <div style={{flex:1}}/>
@@ -5250,7 +5385,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
           style={!editingUnlocked?{opacity:0.4,cursor:"not-allowed"}:undefined}>+ {t("งานพิเศษ","Extra item")}</button>
         {!editingUnlocked && (
           <span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:T.textMuted,background:"#f1f5f9",padding:"6px 12px",borderRadius:8,fontWeight:600}}>
-            🔒 {t("บันทึกแล้ว","Saved")}
+            <Ico name="lock" size={14} /> {t("บันทึกแล้ว","Saved")}
           </span>
         )}
         {editingUnlocked ? (
@@ -5264,7 +5399,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             )}
           </>
         ) : (
-          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{background:T.amber,minWidth:170}}>
+          <button onClick={()=>setForceEdit(true)} className="btn-primary" style={{minWidth:170,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}>
             <Ico name="edit" /> {t("แก้ไขเดือนนี้","Edit this month")}
           </button>
         )}
@@ -5272,15 +5407,15 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
 
       {editingUnlocked && (
         <div style={{display:"flex",alignItems:"center",gap:8,margin:"-6px 2px 14px",fontSize:12,color:T.textMuted,flexWrap:"wrap"}}>
-          <span style={{background:T.greenBg,color:T.green,fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:6,whiteSpace:"nowrap"}}>📋 Excel</span>
+          <span style={{background:T.greenBg,color:T.green,fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:6,whiteSpace:"nowrap"}}>Excel</span>
           <span>{t("ลากคลุมเลือก · Shift+คลิก ขยายช่วง · Ctrl/Cmd+คลิก เลือก/ยกเลิกทีละช่อง · Ctrl/Cmd+C คัดลอก · Delete ล้าง · วางจาก Excel เติมทั้งบล็อก","Drag to select · Shift+click to extend · Ctrl/Cmd+click to toggle a cell · Ctrl/Cmd+C to copy · Delete to clear · paste from Excel to fill a block")}</span>
           <div style={{flex:1,minWidth:8}}/>
           <button onClick={selectAll} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>{t("เลือกทั้งหมด","Select all")}</button>
           {selCount>0 && (
             <>
               <span style={{background:T.blueLight,color:T.blue,fontWeight:700,fontSize:11,padding:"3px 9px",borderRadius:6,whiteSpace:"nowrap"}}>{t("เลือก","Selected")} {selCount}</span>
-              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>📋 {t("คัดลอก","Copy")}</button>
-              <button onClick={clearSelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap",color:T.red,borderColor:T.red}}>🗑 {t("ล้างที่เลือก","Clear")}</button>
+              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}><Ico name="copy" size={13} /> {t("คัดลอก","Copy")}</button>
+              <button onClick={clearSelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap",color:T.red,borderColor:T.red}}><Ico name="trash" size={13} /> {t("ล้างที่เลือก","Clear")}</button>
               <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
             </>
           )}
@@ -5304,14 +5439,14 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             </>);
           })()}
           <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
-          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🖍 {t("ไฮไลต์พื้น","Fill")}:</span>
+          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>{t("ไฮไลต์พื้น","Fill")}:</span>
           {["#FEF3C7","#D1FAE5","#FEE2E2","#DBEAFE","#E5E7EB"].map(bg=>(
             <button key={bg} onClick={()=>applyCellFmt({bg})} title={t("ใส่สีพื้นให้ช่องที่เลือก","Fill selected cells")}
               style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:bg,cursor:"pointer",padding:0}}/>
           ))}
-          <button onClick={()=>applyCellFmt({bg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีพื้น","Remove fill")}>⛔ {t("ล้างพื้น","No fill")}</button>
+          <button onClick={()=>applyCellFmt({bg:null})} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}} title={t("ล้างสีพื้น","Remove fill")}>{t("ล้างพื้น","No fill")}</button>
           <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
-          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>🎨 {t("สีตัวอักษร","Text")}:</span>
+          <span style={{fontWeight:700,color:T.textSecondary,whiteSpace:"nowrap"}}>{t("สีตัวอักษร","Text")}:</span>
           {[["#DC2626","แดง","red"],["#059669","เขียว","green"],["#2563EB","น้ำเงิน","blue"],["#0F172A","ดำ","black"]].map(([fg,nm,en])=>(
             <button key={fg} onClick={()=>applyCellFmt({fg})} title={t(`สีตัวอักษร ${nm}`,`Text color ${en}`)}
               style={{width:22,height:22,borderRadius:6,border:`1px solid ${T.cardBorder}`,background:"#fff",color:fg,cursor:"pointer",padding:0,fontWeight:800,fontSize:13,lineHeight:1}}>A</button>
@@ -5321,7 +5456,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
             <>
               <span style={{width:1,height:18,background:T.cardBorder,margin:"0 2px"}}/>
               <button onClick={selectAll} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>{t("เลือกทั้งหมด","Select all")}</button>
-              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}>📋 {t("คัดลอก","Copy")}</button>
+              <button onClick={copySelection} className="btn-ghost" style={{padding:"3px 10px",fontSize:11,whiteSpace:"nowrap"}}><Ico name="copy" size={13} /> {t("คัดลอก","Copy")}</button>
               <button onClick={deselectAll} className="btn-ghost" style={{padding:"3px 8px",fontSize:11,whiteSpace:"nowrap"}}>✕</button>
             </>
           )}
@@ -5370,11 +5505,11 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   </th>
                   <th rowSpan={2} style={{padding:"11px 16px",textAlign:"center",width:20,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>+</th>
                   <th colSpan={columns.length+1} style={{padding:"9px 16px",textAlign:"center",color:T.textMuted,fontWeight:650,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>
-                    ➕ {t("เพิ่มเดือนนี้","Add this month")} · {monthShortLabel(month)}
+                    + {t("เพิ่มเดือนนี้","Add this month")} · {monthShortLabel(month)}
                   </th>
                   <th rowSpan={2} style={{padding:"11px 16px",textAlign:"center",width:20,color:T.textMuted,borderBottom:`1px solid ${T.cardBorder}`}}>=</th>
                   <th rowSpan={2} style={{padding:"11px 16px",textAlign:"right",color:sortKey==="cum"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap"}}>
-                    <span onClick={()=>handleSort("cum")} style={{cursor:"pointer",userSelect:"none"}}>{t("✅ รวมสะสม","✅ Total")}{sortKey==="cum"?(sortDir===1?" ▲":" ▼"):""}</span>
+                    <span onClick={()=>handleSort("cum")} style={{cursor:"pointer",userSelect:"none"}}>{t("รวมสะสม","Total")}{sortKey==="cum"?(sortDir===1?" ▲":" ▼"):""}</span>
                   </th>
                   <th rowSpan={2} style={{width:20,borderBottom:`1px solid ${T.cardBorder}`}}></th>
                 </tr>
@@ -5410,9 +5545,9 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                   {label:"Account Name", key:"name", align:"left"},
                   {label:t("ยอดก่อนหน้า","Previous"), key:"before", align:"right"},
                   {label:"+", key:null, align:"center", width:20},
-                  {label:t("➕ เพิ่มเดือนนี้","➕ Add this month"), key:"add", align:"right"},
+                  {label:t("+ เพิ่มเดือนนี้","+ Add this month"), key:"add", align:"right"},
                   {label:"=", key:null, align:"center", width:20},
-                  {label:t("✅ รวมสะสม","✅ Total"), key:"cum", align:"right"},
+                  {label:t("รวมสะสม","Total"), key:"cum", align:"right"},
                   {label:"", key:null, width:20},
                 ].map(({label,key,align,width},idx)=>(
                   <th key={idx}
@@ -5555,7 +5690,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                           {k.addedInMonth && (
                             isNewThisMonth ? (
                               <span title={t("รายการนี้เพิ่งเพิ่มเข้ามาในเดือนนี้","Added this month")} style={{marginLeft:8,fontSize:12,background:T.green,color:"#fff",padding:"2px 8px",borderRadius:6,fontWeight:650,fontStyle:"normal",letterSpacing:0.2}}>
-                                ✨ {t("ใหม่เดือนนี้","New this month")}
+                                {t("ใหม่เดือนนี้","New this month")}
                               </span>
                             ) : (
                               <span title={t("เพิ่มเข้ามาระหว่างทาง ไม่ได้มีมาตั้งแต่ต้น — เดือนก่อนหน้านั้นจะไม่แสดงรายการนี้","Added later, not from the start — earlier months don't show it")} style={{marginLeft:8,fontSize:12,background:T.amberBg,color:T.amber,padding:"2px 8px",borderRadius:6,fontWeight:600,fontStyle:"normal"}}>
@@ -5767,7 +5902,7 @@ function AccountPicker({ value, onChange, options }) {
       {open && (
         <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:80,background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,boxShadow:"0 14px 34px rgba(15,23,42,0.2)",overflow:"hidden"}}>
           <div style={{padding:8,borderBottom:`1px solid ${T.cardBorder}`}}>
-            <input autoFocus value={q} onChange={e=>setQ(e.target.value)} onKeyDown={onSearchKey} placeholder={t("🔍 พิมพ์ค้นหา รหัส / ชื่อบัญชี · ↑↓ Enter","🔍 Type to search code / name · ↑↓ Enter")}
+            <input autoFocus value={q} onChange={e=>setQ(e.target.value)} onKeyDown={onSearchKey} placeholder={t("พิมพ์ค้นหา รหัส / ชื่อบัญชี · ↑↓ Enter","Type to search code / name · ↑↓ Enter")}
               className="input-base" style={{width:"100%",fontSize:13}} />
           </div>
           <div ref={listRef} role="listbox" className="mscroll" style={{maxHeight:260,overflowY:"auto"}}>
@@ -5827,7 +5962,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
   // PO ที่ปิดแล้ว (รับครบ+จ่ายครบ) แก้งวด/ยอด/วันรับได้เฉพาะ Admin — กันการ "ปลดล็อกตัวเอง"
   // ด้วยการล้างวันรับจริง แล้วค่อยลบ/แก้ PO ได้ และทุกการแก้งวดบันทึกลงประวัติ PO
   const setItemRounds = (itemId, rounds) => {
-    if (locked) { setCapWarn(t("🔒 PO นี้รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันรับได้เฉพาะ Admin","🔒 This PO is fully received & paid — only Admin can change amounts/dates")); return; }
+    if (locked) { setCapWarn(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันรับได้เฉพาะ Admin","This PO is fully received & paid — only Admin can change amounts/dates")); return; }
     const code = po.items.find(it => it.id===itemId)?.code || "";
     const next = { ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) };
     const msg  = t(`แก้งวดของเข้า ${code}`, `Edited delivery rounds ${code}`);
@@ -5863,11 +5998,11 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
     setItemRounds(itemId, [...it.rounds, { id:uid(), planDate:"", planAmount:"", actualAmount:"", actualDate:"" }]);
   };
   // ลบงวดส่งของ — ต้องเหลืออย่างน้อย 1 งวดเสมอ (ใช้แก้กรณีมีงวดเกิน/ซ้ำ)
-  const removeRound = (itemId, roundId) => {
+  const removeRound = async (itemId, roundId) => {
     const it = po.items.find(i=>i.id===itemId); if (!it) return;
     if ((it.rounds||[]).length <= 1) return;
     if (locked) { setItemRounds(itemId, it.rounds); return; } // แสดงคำเตือน 🔒 โดยไม่ถามยืนยันก่อน
-    if (!confirm(t("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)","Delete this round? (its entered amount/date will be removed)"))) return;
+    if (!(await uiConfirm(t("ลบงวดนี้? (ยอด/วันของเข้าที่กรอกในงวดนี้จะถูกลบ)","Delete this round? (its entered amount/date will be removed)"), { danger: true, okLabel: t("ลบงวด","Delete round") }))) return;
     setItemRounds(itemId, it.rounds.filter(r => r.id !== roundId));
   };
   const roundBadge = (r) => {
@@ -5898,7 +6033,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
 
         {locked && (
           <div style={{display:"flex",alignItems:"center",gap:6,background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:11,color:"#92400e"}}>
-            🔒 {t("รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)","Fully received & paid — actual amount/date still editable (delete PO and edit vendor/category/order: Admin only)")}
+            <Ico name="lock" size={14} /> {t("รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)","Fully received & paid — actual amount/date still editable (delete PO and edit vendor/category/order: Admin only)")}
           </div>
         )}
 
@@ -5914,7 +6049,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
         </div>
         {lastUpd && (
           <div style={{fontSize:11,color:T.textMuted,marginBottom:4}}>
-            🕓 {t("อัปเดตล่าสุด","Last updated")} {relativeTime(lastUpd.at)} {t("โดย","by")} <b style={{color:T.textSecondary}}>{lastUpd.user}</b>
+            <Ico name="clock" size={13} /> {t("อัปเดตล่าสุด","Last updated")} {relativeTime(lastUpd.at)} {t("โดย","by")} <b style={{color:T.textSecondary}}>{lastUpd.user}</b>
           </div>
         )}
 
@@ -5936,7 +6071,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
 
         {/* Per account-code: receiving in installments, with auto-pay + split */}
         <div style={{marginTop:12}}>
-          <div style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>📦 {t("ของเข้า / จ่ายเงิน (แบ่งงวดได้)","Incoming / payment (by rounds)")}</div>
+          <div style={{fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase",marginBottom:8}}>{t("ของเข้า / จ่ายเงิน (แบ่งงวดได้)","Incoming / payment (by rounds)")}</div>
           {items.map((it,ii)=>{
             const acc = accountOf(it.code);
             const ordered = itemOrdered(it), recv = itemReceived(it), remain = itemRemaining(it);
@@ -5966,7 +6101,8 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                           <span style={{background:bg,color:clr,fontSize:11,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
                           {!locked && it.rounds.length>1 && (
                             <button type="button" onClick={()=>removeRound(it.id,r.id)} title={t("ลบงวดนี้","Delete round")}
-                              style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:14,padding:"6px 8px",minWidth:32,minHeight:32,borderRadius:8,lineHeight:1}}>🗑</button>
+                              aria-label={t("ลบงวดนี้","Delete this round")} className="icon-danger"
+                              style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:"6px 8px",minWidth:32,minHeight:32,borderRadius:8,lineHeight:1,display:"inline-grid",placeItems:"center"}}><Ico name="trash" size={16} /></button>
                           )}
                         </div>
                       </div>
@@ -5983,7 +6119,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                         </label>
                       </div>
                       <div style={{marginTop:6,fontSize:11,color:T.textSecondary}}>
-                        💰 {t("วันครบกำหนดจ่าย","Payment due")}: <span style={{fontVariantNumeric:"tabular-nums",color:T.textPrimary}}>{payDate ? fmtDate(payDate) : "—"}</span>
+                        <Ico name="wallet" size={13} /> {t("วันครบกำหนดจ่าย","Payment due")}: <span style={{fontVariantNumeric:"tabular-nums",color:T.textPrimary}}>{payDate ? fmtDate(payDate) : "—"}</span>
                         <span style={{color:T.textMuted}}> ({po.paymentType==="cash"?t("เงินสด","Cash"):po.paymentType==="credit"?t(`เครดิต ${po.creditDays} วัน`,`Credit ${po.creditDays}d`):t("ยังไม่ระบุวิธีจ่าย","No method")})</span>
                         {late && <span style={{color:T.red}}> · {t("ของมาช้า","late arrival")}</span>}
                       </div>
@@ -6001,13 +6137,13 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                 </div>
                 {Math.round(overPlanned*100)>0 && (
                   <div style={{marginTop:8,fontSize:11,color:T.red,background:T.redBg,borderRadius:8,padding:"7px 10px",lineHeight:1.4}}>
-                    ⚠ {t("ยอดรวมทุกงวด","Total all rounds")} <b style={{fontVariantNumeric:"tabular-nums"}}>{fmt(planned)}</b> {t("เกินยอดสั่ง","exceeds the order")} <b style={{fontVariantNumeric:"tabular-nums"}}>{fmt(ordered)}</b> {t("อยู่","by")} {fmt(overPlanned)} — {t("กด 🗑 ลบงวดที่เกินออก","press 🗑 to remove the extra round")}
+                    ⚠ {t("ยอดรวมทุกงวด","Total all rounds")} <b style={{fontVariantNumeric:"tabular-nums"}}>{fmt(planned)}</b> {t("เกินยอดสั่ง","exceeds the order")} <b style={{fontVariantNumeric:"tabular-nums"}}>{fmt(ordered)}</b> {t("อยู่","by")} {fmt(overPlanned)} — {t("ลบงวดที่เกินออก (ปุ่มถังขยะ)","remove the extra round (trash button)")}
                   </div>
                 )}
                 {!locked && ordered>0 && remain>0.001 ? (
                   <button type="button" onClick={()=>splitRound(it.id)} className="btn-ghost"
                     style={{marginTop:8,padding:"6px 12px",fontSize:12,borderColor:T.amber,color:T.amber}}>
-                    ➕ {t("เพิ่มงวดของเข้า — เหลือรับอีก","Add round — remaining")} {fmt(remain)}
+                    + {t("เพิ่มงวดของเข้า — เหลือรับอีก","Add round — remaining")} {fmt(remain)}
                   </button>
                 ) : recv>0.001 && remain<=0.001 && ordered>0 ? (
                   <div style={{marginTop:8,fontSize:12,color:T.green}}>✓ {t("ของเข้าครบตามยอดสั่งแล้ว","Fully received")}</div>
@@ -6031,7 +6167,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             <button onClick={()=>setHistoryOpen(v=>!v)}
               style={{background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:11,fontWeight:650,color:T.textMuted,letterSpacing:0.6,textTransform:"uppercase"}}>
               <span style={{transition:"transform 0.15s",transform:historyOpen?"rotate(90deg)":"none",display:"inline-block"}}>▸</span>
-              📜 {t("ประวัติการแก้ไข","Edit history")} ({history.length})
+              <Ico name="clock" size={14} /> {t("ประวัติการแก้ไข","Edit history")} ({history.length})
             </button>
             {historyOpen && (
               <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:0}}>
@@ -6065,16 +6201,16 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
             }}
             disabled={!!overCapItem} className="btn-primary"
             title={overCapItem?t(`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`,`${overCapItem.code||"item"}: total across rounds exceeds order — fix before saving`):undefined}
-            style={{background:overCapItem?"#e2e8f0":T.green,color:overCapItem?"#94a3b8":"#fff",cursor:overCapItem?"not-allowed":"pointer"}}>{overCapItem?"⚠":"💾"} {t("บันทึก","Save")}</button>
-          {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title={t("แก้ผู้ขาย / หมวด / ยอดสั่ง","Edit vendor / category / order")}>✏️ {t("แก้ไข PO","Edit PO")}</button>}
+            style={overCapItem?{background:"#e2e8f0",color:"#94a3b8",cursor:"not-allowed"}:undefined}>{overCapItem && <Ico name="alert" size={15} />} {t("บันทึก","Save")}</button>
+          {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title={t("แก้ผู้ขาย / หมวด / ยอดสั่ง","Edit vendor / category / order")}><Ico name="edit" size={14} /> {t("แก้ไข PO","Edit PO")}</button>}
           {confirmDel ? (
             <span style={{display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,borderRadius:10,padding:"4px 6px 4px 12px"}}>
               <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>{t("ลบ PO นี้จริงไหม? ย้อนกลับไม่ได้","Delete this PO? Cannot be undone")}</span>
-              <button onClick={()=>{ setConfirmDel(false); onDelete(po.id, true); }} className="btn-primary" style={{background:T.red,padding:"5px 12px",fontSize:12}}>🗑 {t("ลบเลย","Delete")}</button>
+              <button onClick={()=>{ setConfirmDel(false); onDelete(po.id, true); }} className="btn-primary" style={{background:T.red,padding:"5px 12px",fontSize:12}}>{t("ลบเลย","Delete")}</button>
               <button onClick={()=>setConfirmDel(false)} className="btn-ghost" style={{padding:"5px 10px",fontSize:12}}>{t("ยกเลิก","Cancel")}</button>
             </span>
           ) : (
-            <button onClick={()=>setConfirmDel(true)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer"}}>🗑 {t("ลบ","Delete")}</button>
+            <button onClick={()=>setConfirmDel(true)} disabled={locked} className="btn-ghost" style={{color:locked?"#cbd5e1":T.red,borderColor:locked?"#e2e8f0":T.red,cursor:locked?"not-allowed":"pointer",display:"inline-flex",alignItems:"center",gap:6}}><Ico name="trash" size={15} />{t("ลบ","Delete")}</button>
           )}
           <div style={{flex:1}}/>
           <button onClick={onClose} className="btn-ghost">{t("ปิด","Close")}</button>
@@ -6211,7 +6347,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>📦 {t("รายการของเข้ารายเดือน (แผน + PO จริง)","Monthly incoming (plan + real PO)")}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>{t("รายการของเข้ารายเดือน (แผน + PO จริง)","Monthly incoming (plan + real PO)")}</div>
           <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
             {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
               <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
@@ -6220,7 +6356,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
             ))}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-            <SearchInput value={mSearch} onChange={setMSearch} placeholder={t("🔍 ค้นหา Acc. Code / ชื่อบัญชี","🔍 Search Acc. Code / account name")} width={260} big/>
+            <SearchInput value={mSearch} onChange={setMSearch} placeholder={t("ค้นหา Acc. Code / ชื่อบัญชี","Search Acc. Code / account name")} width={260} big/>
             <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownCodes.length}/{codes.length} {t("รายการ","items")}</span>
           </div>
           <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
@@ -6288,10 +6424,10 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
         </div>
       )}
 
-      <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary, marginBottom: 10 }}>📝 {t("จัดการแผน","Manage plans")}</div>
+      <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary, marginBottom: 10 }}>{t("จัดการแผน","Manage plans")}</div>
       {sorted.length === 0 ? (
         <div style={{ textAlign: "center", padding: "52px 0", color: T.textMuted }}>
-          <div style={{ fontSize:32,marginBottom:10 }}>📅</div>{t("ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม","No incoming plans — press “+ Add plan” to start")}
+          <div style={{ marginBottom:10,color:T.textMuted }}><Ico name="calendar" size={32} sw={1.5} /></div>{t("ยังไม่มีแผนของเข้า — กด “+ เพิ่มแผน” เพื่อเริ่ม","No incoming plans — press “+ Add plan” to start")}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -6302,7 +6438,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
             return (
               <div key={pl.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 18px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
-                  <span style={{ background: T.amberBg, color: T.amber, fontWeight: 650, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>📅 {t("ของเข้า","Incoming")} {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
+                  <span style={{ background: T.amberBg, color: T.amber, fontWeight: 650, fontSize: 12, padding: "4px 12px", borderRadius: 8 }}>{t("ของเข้า","Incoming")} {ds.length ? lbl(ds[0]) : lbl(pl.date)}{ds.length > 1 ? ` (+${ds.length - 1})` : ""}</span>
                   {pl.supplier?.name && <span style={{ fontSize: 12, color: T.textSecondary }}>· {pl.supplier.name}</span>}
                   <span style={{ fontSize: 12, color: T.textMuted }}>{items.length} {t("รายการ","items")}</span>
                   <span style={{ marginLeft: "auto", textAlign: "right" }}>
@@ -6352,6 +6488,9 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const [editingPlan, setEditingPlan] = useState(false); // true = กำลังแก้ "แผนของเข้า" (มาจากลิสต์แผน)
   const [payModal, setPayModal] = useState(null);        // {po, date} — ตอนตั้งสถานะ Paid ให้กรอกวันจ่ายเอง
   const [filter, setFilter] = useState("All");
+  // กรองเฉพาะ PO ที่มีปัญหา (กดจากชิป "ต้องรีบดู" หรือชิป "มีปัญหา") — ดูได้ในรายการ PO ทันที ไม่ต้องย้ายแท็บ
+  const [issueFilter, setIssueFilter] = useState(null);   // null | "any" | "late-incoming" | "late-payment"
+  const isPhone = useIsPhone();
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState(null);
   const [collapsed, setCollapsed] = useState({});
@@ -6419,11 +6558,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
   const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
 
-  const submit = () => {
+  const submit = async () => {
     setPoNoTouched(true);
     // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
     // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
-    if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { alert(t("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก","PO value cannot be negative — please fix before saving")); return; }
+    if (form.items.some(it=>it.code && (parseFloat(it.amount)||0) < 0)) { uiAlert(t("มูลค่า PO ต้องไม่ติดลบ กรุณาแก้ไขก่อนบันทึก","PO value cannot be negative — please fix before saving")); return; }
     // บรรทัดที่กรอกไม่ครบ — เดิมถูกทิ้งเงียบ ๆ ตอนบันทึก (ถ้ามีบรรทัดอื่นที่ครบ) ตอนนี้แจ้งก่อน
     const amtOf = (it) => parseFloat(it.amount) || 0;
     const lineNo = (it) => form.items.indexOf(it) + 1;
@@ -6434,13 +6573,13 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         ...noAmt.map(it => t(`บรรทัดที่ ${lineNo(it)} (${it.code}): ยังไม่กรอกมูลค่า หรือมูลค่าเป็น 0`, `Line ${lineNo(it)} (${it.code}): no value, or value is 0`)),
         ...noCode.map(it => t(`บรรทัดที่ ${lineNo(it)}: กรอกมูลค่าแล้วแต่ยังไม่เลือก Account Code`, `Line ${lineNo(it)}: has a value but no Account Code`)),
       ].join("\n");
-      alert(t("กรอกรายการไม่ครบ — แก้ไขหรือลบบรรทัดนั้นก่อนบันทึก:\n\n","Some lines are incomplete — fix or remove them before saving:\n\n") + msg);
+      uiAlert(t("กรอกรายการไม่ครบ — แก้ไขหรือลบบรรทัดนั้นก่อนบันทึก:\n\n","Some lines are incomplete — fix or remove them before saving:\n\n") + msg);
       return;
     }
     // Acc. Code ซ้ำในใบเดียวกัน — ถามก่อน (ปกติควรรวมเป็นบรรทัดเดียว แล้วแบ่งงวดของเข้าแทน)
     const codes = form.items.filter(it => it.code).map(it => it.code);
     const dups = [...new Set(codes.filter((c, i) => codes.indexOf(c) !== i))];
-    if (dups.length && !window.confirm(t(`Acc. Code ซ้ำในใบเดียวกัน: ${dups.join(", ")}\nปกติควรรวมเป็นบรรทัดเดียว — ยืนยันบันทึกแบบนี้?`, `Duplicate Acc. Code in this PO: ${dups.join(", ")}\nUsually these should be one line — save anyway?`))) return;
+    if (dups.length && !(await uiConfirm(t(`Acc. Code ซ้ำในใบเดียวกัน: ${dups.join(", ")}\nปกติควรรวมเป็นบรรทัดเดียว — ยืนยันบันทึกแบบนี้?`, `Duplicate Acc. Code in this PO: ${dups.join(", ")}\nUsually these should be one line — save anyway?`), { okLabel: t("บันทึกแบบนี้","Save as is") }))) return;
     const validItems = form.items.filter(it=>it.code && amtOf(it) > 0).map(it=>{
       const rs = (it.rounds && it.rounds.length ? it.rounds : [{id:uid()}]);
       return {
@@ -6455,16 +6594,16 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       })),
       };
     });
-    if (!validItems.length) { alert(t("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ","Please select an Account Code and enter at least one value")); return; }
+    if (!validItems.length) { uiAlert(t("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ","Please select an Account Code and enter at least one value")); return; }
     // กันยอดของเข้าจริงรวมทุกงวดเกินยอดสั่งของแต่ละรายการ (แจ้งเตือน + บันทึกไม่ได้)
     const overItem = validItems.find(it => {
       const o = parseFloat(it.amount)||0; if (!(o>0)) return false;
       const rc = it.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0);
       return Math.round(rc*100) > Math.round(o*100);
     });
-    if (overItem) { alert(t(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`,`⚠ ${overItem.code}: total received across rounds (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) exceeds ordered ${fmt(overItem.amount)} — fix before saving`)); return; }
+    if (overItem) { uiAlert(t(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`,`⚠ ${overItem.code}: total received across rounds (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) exceeds ordered ${fmt(overItem.amount)} — fix before saving`)); return; }
     // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
-    if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { alert(t("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก","A real PO needs a PO number before saving")); return; }
+    if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { uiAlert(t("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก","A real PO needs a PO number before saving")); return; }
     const payload = {
       date: form.date, status: form.status, notes: form.notes || "",
       supplier: { name: form.supplier.name.trim(), poNumber: (form.supplier.poNumber||"").trim() },
@@ -6502,7 +6641,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const updatePO = (updated) => {
     // เช็คสิทธิ์กับ "PO ที่บันทึกอยู่จริง" (ไม่ใช่ค่าที่กำลังจะแก้) — PO ที่ปิดแล้วแก้ได้เฉพาะ Admin
     const stored = poEntries.find(x=>x.id===updated.id);
-    if (stored && !canEditPO(stored, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
+    if (stored && !canEditPO(stored, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     savePO(poEntries.map(x=>x.id===updated.id?updated:x));
   };
 
@@ -6517,13 +6656,13 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     const updated = withHistory(patch, historyEntry(session, "status", label));
     savePO(poEntries.map(x=>x.id===po.id?updated:x));
   };
-  const changeStatus = (po, newStatus) => {
+  const changeStatus = async (po, newStatus) => {
     if (newStatus === po.status) return;
-    if (!canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
+    if (!canEditPO(po, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     // ตั้งเป็น "Paid" → เตือนถ้ายังไม่มีการรับของเลย แล้วให้กรอกวันจ่ายเองก่อน
     if (newStatus === "Paid") {
       const anyReceived = poRounds(po).some(r => roundReceived(r));
-      if (!anyReceived && !window.confirm(t("PO นี้ยังไม่มีการรับของเลย — ยืนยันว่าจ่ายแล้วจริง?","This PO has no received goods yet — confirm it is really paid?"))) return;
+      if (!anyReceived && !(await uiConfirm(t("PO นี้ยังไม่มีการรับของเลย — ยืนยันว่าจ่ายแล้วจริง?","This PO has no received goods yet — confirm it is really paid?"), { okLabel: t("ยืนยันจ่ายแล้ว","Yes, it is paid") }))) return;
       setPayModal({ po, date: po.paidDate || todayStr() });
       return;
     }
@@ -6531,7 +6670,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   };
 
   const openEdit = (p) => {
-    if (!canEditPO(p, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
+    if (!canEditPO(p, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     const P = migratePO(p);
     setForm({
       date: P.date, status: P.status, notes: P.notes || "",
@@ -6563,19 +6702,19 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const openNewPO   = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:false }); setDetailId(null); setView("add"); };
   const openEditPlan = (pl) => loadIntoForm(pl, true);   // แก้แผน (ติ๊กแผนอยู่)
   const startConvert = (pl) => loadIntoForm(pl, false);  // แปลงแผน → PO (เอาติ๊กออกให้แล้ว กดบันทึกก็เป็น PO)
-  const deletePlan = (id) => {
+  const deletePlan = async (id) => {
     const pl = (plans||[]).find(p=>p.id===id);
     const d = pl ? (poRounds(pl).map(r=>r.planDate).filter(Boolean).sort()[0] || pl.date || "") : "";
     const info = pl ? `${d||t("(ไม่มีวัน)","(no date)")}${pl.supplier?.name?` · ${pl.supplier.name}`:""} · ฿${fmt0(poItems(pl).reduce((s,it)=>s+(parseFloat(it.amount)||0),0))}` : "";
-    if (window.confirm(t(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`,`Delete this incoming plan?${info?`\n\n${info}`:""}\n\n(deletes the "plan" only — real PO unaffected)`))) { saveIncomingPlan(plans.filter(pl=>pl.id!==id)); return true; }
+    if ((await uiConfirm(t(`ลบแผนของเข้านี้?${info?`\n\n${info}`:""}\n\n(ลบเฉพาะ "แผน" — ไม่กระทบ PO จริง)`,`Delete this incoming plan?${info?`\n\n${info}`:""}\n\n(deletes the "plan" only — real PO unaffected)`), { danger: true, okLabel: t("ลบแผน","Delete plan") }))) { saveIncomingPlan(plans.filter(pl=>pl.id!==id)); return true; }
     return false;   // กดยกเลิก — ให้ผู้เรียกรู้ (ไม่ปิดฟอร์มทิ้ง)
   };
-  const deletePO = (id, confirmed=false) => {
+  const deletePO = async (id, confirmed=false) => {
     const po = poEntries.find(x=>x.id===id);
-    if (po && !canEditPO(po, session)) { alert(t("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin","This PO is fully received & paid — Admin only can delete")); return; }
+    if (po && !canEditPO(po, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin","This PO is fully received & paid — Admin only can delete")); return; }
     // ถามยืนยันก่อนลบ (ลบแล้วย้อนกลับไม่ได้) — ถ้า confirmed=true แปลว่ายืนยันในแอปมาแล้ว
     const label = po ? `${poSupplierName(po)}${poNumbersLabel(po)!=="—"?` · ${poNumbersLabel(po)}`:""} · ฿${fmt(poTotal(po))}` : "";
-    if (!confirmed && !window.confirm(t(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`,`Confirm deleting this PO?\n\n${label}\n\n⚠ This cannot be undone`))) return;
+    if (!confirmed && !(await uiConfirm(t(`ยืนยันการลบรายการ PO นี้?\n\n${label}\n\n⚠ ลบแล้วย้อนกลับไม่ได้`,`Confirm deleting this PO?\n\n${label}\n\n⚠ This cannot be undone`), { danger: true, okLabel: t("ลบ PO","Delete PO") }))) return;
     savePO(poEntries.filter(x=>x.id!==id)); setDetailId(null);
     if (editId === id) closeForm();   // ถ้าลบจากในฟอร์มแก้ไข ให้ปิดฟอร์มกลับหน้ารายการ
   };
@@ -6596,9 +6735,18 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     return () => window.removeEventListener("keydown", onEsc);
   }, [view]);
 
+  const issueOf = (p) => ({ inc: incomingStatus(p)==="late", pay: paymentStatus(p)==="late" && p.status!=="Paid" });
+  const matchesIssue = (p) => { if (!issueFilter) return true; const k = issueOf(p);
+    return issueFilter==="late-incoming" ? k.inc : issueFilter==="late-payment" ? k.pay : (k.inc || k.pay); };
+  const showIssues = (kind) => {
+    const next = issueFilter === kind ? null : kind;      // กดซ้ำ = ยกเลิกตัวกรอง
+    setIssueFilter(next); setFilter("All");
+    if (tab !== "list") goTab("list");
+    if (next) setTimeout(() => document.querySelector("[data-po-list-top]")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  };
   const filtered = poEntries.filter(p=>{
     const itemsText = poItems(p).map(it=>{ const acc=accountOf(it.code); return `${it.code} ${acc?.name||""}`; }).join(" ");
-    return (filter==="All"||p.status===filter)&&
+    return (filter==="All"||p.status===filter)&& matchesIssue(p) &&
       (search===""||[itemsText,poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(search.toLowerCase()));
   });
 
@@ -6620,7 +6768,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       {payModal && (
         <div onClick={()=>setPayModal(null)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,width:"min(380px,100%)",overflow:"hidden",boxShadow:"0 24px 60px rgba(15,23,42,0.3)"}}>
-            <div style={{background:"linear-gradient(135deg,#065f46,#10b981)",padding:"14px 20px",color:"#fff",fontWeight:650,fontSize:15}}>💵 {t("บันทึกการจ่ายเงิน","Record payment")}</div>
+            <div style={{padding:"16px 20px 4px",color:T.textPrimary,fontWeight:650,fontSize:16,display:"flex",alignItems:"center",gap:8}}><Ico name="wallet" size={18} color={T.textSecondary} />{t("บันทึกการจ่ายเงิน","Record payment")}</div>
             <div style={{padding:20,display:"flex",flexDirection:"column",gap:12}}>
               <div style={{fontSize:12,color:T.textSecondary}}>{poSupplierName(payModal.po)} · <b>฿{fmt(poTotal(payModal.po))}</b></div>
               <label style={{fontSize:12,color:T.textSecondary,display:"flex",flexDirection:"column",gap:5}}>
@@ -6630,14 +6778,21 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             </div>
             <div style={{display:"flex",justifyContent:"flex-end",gap:10,padding:"14px 20px",borderTop:`1px solid ${T.cardBorder}`}}>
               <button onClick={()=>setPayModal(null)} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
-              <button onClick={()=>{ if(!payModal.date){alert(t("เลือกวันที่จ่าย","Select a payment date"));return;} applyStatus(payModal.po,"Paid",payModal.date); setPayModal(null); }} className="btn-primary" style={{background:T.green}}>{t("บันทึกจ่ายแล้ว","Save as paid")}</button>
+              <button onClick={()=>{ if(!payModal.date){uiAlert(t("เลือกวันที่จ่าย","Select a payment date"));return;} applyStatus(payModal.po,"Paid",payModal.date); setPayModal(null); }} className="btn-primary">{t("บันทึกจ่ายแล้ว","Save as paid")}</button>
             </div>
           </div>
         </div>
       )}
+      {isPhone && view!=="add" && <BottomNav items={[
+        { key:"list",   icon:"clipboard", label:t("รายการ PO","PO List"), on:tab==="list", onClick:()=>goTab("list") },
+        { key:"inplan", icon:"calendar",  label:t("แผนของเข้า","Incoming plan"), on:tab==="inplan", onClick:()=>goTab("inplan") },
+        { key:"add",    icon:"plus",      label:t("เพิ่ม PO","Add PO"), onClick:openNewPO },
+        { key:"export", icon:"download",  label:"Export", onClick:onExport },
+      ]} />}
       <div style={{padding:"24px 28px"}}>
         {view!=="add" && (
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center",flexWrap:"wrap"}}>
+            {!isPhone && (
             <div className="seg-tabs" role="tablist">
             {[["list",t("รายการ PO","PO List")],["inplan",t("แผนของเข้า","Incoming plan")]].map(([id,label])=>(
               <button key={id} role="tab" aria-selected={tab===id} onClick={()=>goTab(id)} className={`seg-tab${tab===id?" on":""}`}>
@@ -6645,17 +6800,19 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               </button>
             ))}
             </div>
+            )}
             <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+            {!isPhone && (
             <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6}}>
               <Ico name="download" /> Export Excel
             </button>
+            )}
           </div>
         )}
         <div className="stat-grid has-lead" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
           <StatCard lead progress={tenderTotal>0 ? totalComm/tenderTotal*100 : null} label={t(`งบคงเหลือ (รวมเผื่อเศษ ${WASTE_LBL})`,`Budget remaining (incl. ${WASTE_LBL} wastage)`)} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${t("ใช้ไป","Used")} ${((totalComm/tenderTotal)*100).toFixed(1)}% ${t("ของงบ","of budget")} ฿${fmt0(tenderTotal)}`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
           <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} ${t("รายการ","items")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
           <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} ${t("รายการ","items")} · ${t("จ่ายอัตโนมัติ","auto-paid")}`} color={T.green} icon="✅" accent={T.greenBg}/>
-          <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t(`เดิม + เผื่อเศษ ${WASTE_LBL} + เพิ่มรายเดือนทุกเดือน`,`Baseline + ${WASTE_LBL} wastage + all monthly additions`)} color={T.blue} icon="📋" accent={T.blueLight}/>
         </div>
 
         {/* เรื่องที่ต้องรีบดู = ชิปนับจำนวน (เดิมเป็นแถบแดงเต็มความกว้าง) — กดแล้วไปดูเฉพาะรายการที่มีปัญหา */}
@@ -6663,12 +6820,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           <div role="group" aria-label={t("เรื่องที่ต้องรีบดู","Needs attention")} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:16}}>
             <span style={{fontSize:13,color:T.textSecondary,fontWeight:600,display:"inline-flex",alignItems:"center",gap:6}}><Ico name="alert" size={16} color={T.red} />{t("ต้องรีบดู","Needs attention")}</span>
             {lateIncomingCount>0 && (
-              <button className="att-chip" data-attention="late-incoming" onClick={()=>{ goTab("inplan"); setTrackingOnlyIssues(true); }}>
+              <button className="att-chip" data-attention="late-incoming" aria-pressed={issueFilter==="late-incoming"} onClick={()=>showIssues("late-incoming")}>
                 <b>{lateIncomingCount}</b> {t("ของเข้าล่าช้า","late incoming")}
               </button>
             )}
             {latePaymentCount>0 && (
-              <button className="att-chip" data-attention="late-payment" onClick={()=>{ goTab("inplan"); setTrackingOnlyIssues(true); }}>
+              <button className="att-chip" data-attention="late-payment" aria-pressed={issueFilter==="late-payment"} onClick={()=>showIssues("late-payment")}>
                 <b>{latePaymentCount}</b> {t("จ่ายเงินเกินกำหนด","overdue payments")}
               </button>
             )}
@@ -6727,13 +6884,15 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                 {form.items.map((it)=>{
                   const budget = budgetForCode(it.code);
                   const net = itemNet(it);
+                  // ยังไม่กรอก Take off → ยังคำนวณ "ต้องสั่งสุทธิ" ไม่ได้ (เดิมขึ้นแดง "เกิน" ทั้งที่ยังไม่ได้กรอก)
+                  const hasTakeoff = String(it.takeoff ?? "").trim() !== "" && (parseFloat(it.takeoff)||0) !== 0;
                   const amt = parseFloat(it.amount)||0;
                   return (
                   <div key={it.id} style={{border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:14,background:T.bg}}>
                     <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",marginBottom:12}}>
                       <AccountPicker value={it.code} onChange={code=>updateItemRow(it.id,"code",code)} options={pickerOptions} />
                       <button type="button" onClick={()=>removeItemRow(it.id)} disabled={form.items.length===1}
-                        style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1}}>🗑</button>
+                        style={{background:"none",border:"none",color:form.items.length===1?T.textMuted:T.red,cursor:form.items.length===1?"default":"pointer",padding:"4px 8px",fontSize:15,opacity:form.items.length===1?0.4:1,display:"inline-grid",placeItems:"center"}} aria-label={t("ลบบรรทัดนี้","Remove this line")}><Ico name="trash" size={17} /></button>
                     </div>
                     {/* แถวบน: Take off (กรอกเอง) · store · ต้องสั่งสุทธิ (อ่านอย่างเดียว) */}
                     <div className="po-item-grid" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
@@ -6746,9 +6905,15 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         <MoneyInput value={it.store} onChange={v=>updateItemRow(it.id,"store",v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
+                        {hasTakeoff ? <>
                         <span style={{fontSize:11,color:net<0?T.red:T.amber,fontWeight:500}}>{t("ต้องสั่งสุทธิ","Net to order")} {net<0?t("(เกิน)","(over)"):""}</span>
-                        <input className="input-base" readOnly tabIndex={-1} value={net<0?`-${fmtMoneyInput(Math.abs(net))}`:fmtMoneyInput(net)}
+                        <input className="input-base" readOnly tabIndex={-1} data-net value={net<0?`-${fmtMoneyInput(Math.abs(net))}`:fmtMoneyInput(net)}
                           style={{textAlign:"right",fontVariantNumeric:"tabular-nums",fontWeight:600,background:net<0?T.redBg:T.amberBg,color:net<0?T.red:T.amber,borderColor:"transparent"}}/>
+                        </> : <>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("ต้องสั่งสุทธิ","Net to order")}</span>
+                        <input className="input-base" readOnly tabIndex={-1} data-net value="–" title={t("กรอก Take off ก่อน จึงคำนวณได้","Enter Take off first")}
+                          style={{textAlign:"right",fontVariantNumeric:"tabular-nums",fontWeight:500,background:"#f1f5f9",color:T.textMuted,borderColor:"transparent"}}/>
+                        </>}
                       </label>
                     </div>
                     {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
@@ -6819,9 +6984,9 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               <button onClick={submit} className="btn-primary">{editingPlan && !form.isPlan ? t("แปลงเป็น PO จริง","Convert to real PO") : form.isPlan ? t("บันทึกแผน","Save plan") : (editId?t("บันทึก","Save"):t("เพิ่ม PO","Add PO"))}</button>
               <button onClick={closeForm} className="btn-ghost">{t("ยกเลิก","Cancel")}</button>
               {editId && (
-                <button onClick={()=>{ if (editingPlan) { if (deletePlan(editId)) closeForm(); } else deletePO(editId); }}
+                <button onClick={()=>{ if (editingPlan) { deletePlan(editId).then(ok => { if (ok) closeForm(); }); } else deletePO(editId); }}
                   style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,color:T.red,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-                  🗑 {editingPlan ? t("ลบแผนนี้","Delete this plan") : t("ลบ PO นี้","Delete this PO")}
+                  <Ico name="trash" size={15} /> {editingPlan ? t("ลบแผนนี้","Delete this plan") : t("ลบ PO นี้","Delete this PO")}
                 </button>
               )}
             </div>
@@ -6918,7 +7083,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPO} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
             {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
             <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
-              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14}}>🚚 {t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
+              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><Ico name="truck" size={18} color={T.textSecondary} />{t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
               <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
                 onStatusChange={changeStatus} session={session} usdRate={usdRate}
                 tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
@@ -6928,126 +7093,223 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-              <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Account, supplier, PO...","🔍 Search Account, supplier, PO...")} width={240}/>
-              <div style={{display:"flex",gap:5,flex:1,flexWrap:"wrap"}}>
-                {["All",...PO_STATUS].map(s=>(
-                  <button key={s} onClick={()=>setFilter(s)}
-                    style={{background:filter===s?T.amber:"transparent",border:`1.5px solid ${filter===s?T.amber:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:filter===s?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:500,transition:"all 0.15s",minHeight:32,whiteSpace:"nowrap",flexShrink:0}}>{poStatusLabel(s)}</button>
-                ))}
-              </div>
+              <SearchInput value={search} onChange={setSearch} placeholder={t("ค้นหา Account, supplier, PO...","Search Account, supplier, PO...")} width={isPhone?"100%":240}/>
+              {(() => {
+                // จำนวนต่อสถานะ (ตามคำค้นหา) — ชิปบอกตัวเลขในตัว ไม่ต้องกดดูก่อน
+                const q = search.toLowerCase();
+                const bySearch = poEntries.filter(p => q==="" || [poItems(p).map(it=>`${it.code} ${accountOf(it.code)?.name||""}`).join(" "),poSupplierText(p),poNumbersLabel(p)].join(" ").toLowerCase().includes(q));
+                const nIssue = bySearch.filter(p => { const k = issueOf(p); return k.inc || k.pay; }).length;
+                return (
+                  <div className="chip-scroll" role="group" aria-label={t("กรองตามสถานะ","Filter by status")} style={{display:"flex",gap:5,flex:1,flexWrap:"wrap"}}>
+                    {nIssue > 0 && (
+                      <button onClick={()=>showIssues("any")} aria-pressed={!!issueFilter} data-po-filter="issues"
+                        style={{background:issueFilter?T.red:T.redBg,border:`1.5px solid ${issueFilter?T.red:"#fecaca"}`,borderRadius:8,padding:"4px 11px",color:issueFilter?"#fff":T.red,fontSize:12,cursor:"pointer",fontWeight:600,minHeight:32,whiteSpace:"nowrap",flexShrink:0,display:"inline-flex",alignItems:"center",gap:5}}>
+                        <Ico name="alert" size={13} /> {t("มีปัญหา","Needs attention")} <span style={{fontVariantNumeric:"tabular-nums"}}>{nIssue}</span>
+                      </button>
+                    )}
+                    {["All",...PO_STATUS].map(st=>{ const n = st==="All" ? bySearch.length : bySearch.filter(p=>p.status===st).length; const on = filter===st; return (
+                      <button key={st} onClick={()=>setFilter(st)} aria-pressed={on} data-po-filter={st}
+                        style={{background:on?T.textPrimary:"transparent",border:`1.5px solid ${on?T.textPrimary:T.cardBorder}`,borderRadius:8,padding:"4px 11px",color:on?"#fff":T.textSecondary,fontSize:12,cursor:"pointer",fontWeight:500,transition:"all 0.15s",minHeight:32,whiteSpace:"nowrap",flexShrink:0}}>
+                        {poStatusLabel(st)} <span style={{opacity:0.75,fontVariantNumeric:"tabular-nums"}}>{n}</span>
+                      </button>
+                    ); })}
+                  </div>
+                );
+              })()}
               {filtered.length>0 && (
                 <button onClick={()=>{
                     const allCollapsed = Object.keys(groupTotals).every(c=>collapsed[c]);
                     const next = {}; Object.keys(groupTotals).forEach(c=>{ next[c] = !allCollapsed; });
                     setCollapsed(next);
                   }}
-                  className="btn-ghost" style={{padding:"7px 14px",fontSize:12}}>
-                  {Object.keys(groupTotals).length>0 && Object.keys(groupTotals).every(c=>collapsed[c]) ? `⬇️ ${t("ขยายทั้งหมด","Expand all")}` : `⬆️ ${t("ย่อทั้งหมด","Collapse all")}`}
+                  className="btn-ghost" style={{padding:"7px 14px",fontSize:12,display:"inline-flex",alignItems:"center",gap:6}}>
+                  {Object.keys(groupTotals).length>0 && Object.keys(groupTotals).every(c=>collapsed[c])
+                    ? <><Ico name="chevrons" size={14} />{t("ขยายทั้งหมด","Expand all")}</>
+                    : <><Ico name="chevrons" size={14} style={{transform:"rotate(180deg)"}} />{t("ย่อทั้งหมด","Collapse all")}</>}
                 </button>
               )}
-              <button onClick={openNewPO} className="btn-primary">+ {t("เพิ่ม PO","Add PO")}</button>
+              {!isPhone && <button onClick={openNewPO} className="btn-primary">+ {t("เพิ่ม PO","Add PO")}</button>}{/* มือถือ: ใช้ปุ่ม "เพิ่ม PO" ในแถบล่าง */}
             </div>
 
+            <div data-po-list-top style={{scrollMarginTop:12}} />
+            {issueFilter && (
+              <div data-issue-bar role="status" style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:T.redBg,border:"1px solid #fecaca",borderRadius:10,padding:"8px 12px",marginBottom:12,fontSize:13,color:T.red}}>
+                <Ico name="filter" size={15} />
+                <span style={{fontWeight:600}}>{t("กำลังแสดงเฉพาะ","Showing only")}: {issueFilter==="late-incoming" ? t("ของเข้าล่าช้า","late incoming") : issueFilter==="late-payment" ? t("จ่ายเงินเกินกำหนด","overdue payments") : t("PO ที่มีปัญหา (ของเข้าล่าช้า / จ่ายเกินกำหนด)","POs with problems (late incoming / overdue payment)")}</span>
+                <span style={{color:T.textSecondary}}>· {filtered.length} {t("ใบ","POs")}</span>
+                <button className="btn-ghost" onClick={()=>setIssueFilter(null)} style={{marginLeft:"auto",fontSize:12,padding:"4px 10px"}}>{t("แสดงทั้งหมด","Show all")}</button>
+              </div>
+            )}
             {filtered.length===0 ? (
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
-                <div style={{fontSize:32,marginBottom:12}}>📋</div>
+                <div style={{marginBottom:12,color:T.textMuted}}><Ico name="clipboard" size={32} sw={1.5} /></div>
                 <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{poEntries.length===0?t("ยังไม่มีรายการ","No items yet"):t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
                 <div style={{fontSize:12}}>{poEntries.length===0?t('กด "+ เพิ่ม PO" เพื่อเริ่มต้น','Press "+ Add PO" to start'):t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
               </div>
             ) : (
-              <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                {sortedGroupCodes.map(code => {
-                  const acc  = accountOf(code);
+              (() => {
+                // ข้อมูลของแต่ละกลุ่ม (Acc. Code) — ใช้ทั้งตารางเดียว (จอกว้าง) และการ์ด (มือถือ)
+                const groups = sortedGroupCodes.map(code => {
                   const rows = groupedFiltered[code].slice().sort((a,b)=> (b.po.date||"").localeCompare(a.po.date||""));
-                  const isCollapsed = !!collapsed[code];
-                  const groupTotal = rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0);
-                  // งบ + ยอดที่ต้องสั่งเพิ่ม (งบ − ของใน store − PO ที่สั่งแล้วของ code นี้ทั้งหมด)
                   const grpBudget = parseFloat(combinedBudget[code]) || 0;
                   const grpCommitted = poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
                   const grpStock = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
-                  const grpToOrder = grpBudget - grpStock - grpCommitted;
-                  return (
-                    <div key={code} style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
-                      <div onClick={()=>toggleGroup(code)} style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",flexWrap:"wrap"}}>
-                        <span style={{color:T.textMuted,fontSize:11,transition:"transform 0.15s",transform:isCollapsed?"rotate(-90deg)":"none"}}>▾</span>
-                        <span style={{color:T.blue,fontSize:12,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{code}</span>
-                        <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
-                        <span style={{flex:1}}/>
-                        <span style={{fontSize:11,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(grpBudget)}</b></span>
-                        <span style={{fontSize:11,color:grpToOrder<0?T.red:T.textMuted,fontWeight:grpToOrder<0?650:400}}>{grpToOrder<0 ? t("เกินงบ","Over budget") : t("ต้องสั่งเพิ่ม","To order")} <b style={{color:grpToOrder<0?T.red:T.amber,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(Math.abs(grpToOrder))}</b></span>
-                        <span style={{color:T.textMuted,fontSize:11}}>{rows.length} {t("รายการ","items")}</span>
-                        <span style={{color:T.amber,fontVariantNumeric:"tabular-nums",fontWeight:650,fontSize:13}}>{fmt(groupTotal)}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(groupTotal/usdRate)}</span>}</span>
-                      </div>
-                      {!isCollapsed && (
-                        <div className="hscroll"><table style={{width:"100%",minWidth:960,borderCollapse:"collapse",fontSize:13}}>
-                          <thead>
-                            <tr>
-                              {[["วันเปิด PO","Open date"],["Supplier","Supplier"],["PO No.","PO No."],["มูลค่า (THB)","Value (THB)"],["วันรับของ","Received"],["วันจ่าย","Pay date"],["การส่งของ / จ่ายเงิน","Delivery / Payment"],["สถานะ","Status"],["",""]].map(([h,he],hi)=>(
-                                <th key={hi} style={{padding:"9px 16px",textAlign:h==="มูลค่า (THB)"?"right":"left",color:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.6,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`}}>{t(h,he)}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {rows.map(({po:p,item},i)=>{
-                              const splitAcrossCodes = poItems(p).length>1;
-                              const inc = incomingStatus(p), pay = paymentStatus(p);
-                              const locked = !canEditPO(p, session);
-                              const receivedDates = poReceivedDates(p);
-                              const paidDate = poPaidDate(p);
+                  return { code, acc: accountOf(code), rows, isCollapsed: !!collapsed[code],
+                    total: rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0), budget: grpBudget, toOrder: grpBudget - grpStock - grpCommitted };
+                });
+                const grandTotal = filtered.reduce((s,p)=>s+poTotal(p),0);
+                const chip = (bg, clr, txt, key) => <span key={key} style={{background:bg,color:clr,fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{txt}</span>;
+                const recvText = (p) => { const d = poReceivedDates(p); return d.length===0 ? "" : d.length===1 ? fmtDate(d[0]) : `${fmtDate(d[0])} (+${d.length-1})`; };
+                const budgetNote = (g) => (
+                  <span style={{fontSize:12,color:T.textMuted,whiteSpace:"nowrap"}}>
+                    {t("งบ","Budget")} <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums",fontWeight:600}}>฿{fmt0(g.budget)}</b>
+                    {" · "}
+                    <span style={{color:g.toOrder<0?T.red:T.textMuted,fontWeight:g.toOrder<0?650:400}}>{g.toOrder<0 ? t("เกินงบ","Over budget") : t("ต้องสั่งเพิ่ม","To order")} <b style={{color:g.toOrder<0?T.red:T.amber,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(Math.abs(g.toOrder))}</b></span>
+                  </span>
+                );
+                const editBtn = (p, locked) => (
+                  <button onClick={e=>{ e.stopPropagation(); openEdit(p); }} disabled={locked} aria-label={t("แก้ไข","Edit")} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข (ลบได้ในหน้านี้)","Edit (delete available here)")}
+                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textSecondary,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:36,minHeight:36,borderRadius:8,display:"inline-grid",placeItems:"center"}}><Ico name="edit" size={17} /></button>
+                );
+
+                // ── มือถือ: การ์ด 1 ใบต่อ PO (ตาราง 960px ต้องเลื่อนซ้ายขวา)
+                if (isPhone) return (
+                  <div data-po-cards style={{display:"flex",flexDirection:"column",gap:14}}>
+                    {groups.map(g => (
+                      <section key={g.code} data-po-group={g.code}>
+                        <button onClick={()=>toggleGroup(g.code)} aria-expanded={!g.isCollapsed}
+                          style={{width:"100%",border:"none",background:"none",padding:"2px 2px 8px",display:"flex",alignItems:"baseline",gap:8,cursor:"pointer",textAlign:"left",flexWrap:"wrap"}}>
+                          <Ico name="chevrons" size={14} color={T.textMuted} style={{transform:g.isCollapsed?"rotate(-90deg)":"none",alignSelf:"center"}} />
+                          <b style={{color:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{g.code}</b>
+                          <span style={{fontSize:13,fontWeight:600,color:T.textPrimary,flex:1,minWidth:0}}>{g.acc?.name || "—"}</span>
+                          <span style={{fontSize:13,fontWeight:650,color:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>{fmt(g.total)}</span>
+                          <span style={{flexBasis:"100%",paddingLeft:22}}>{budgetNote(g)} <span style={{fontSize:12,color:T.textMuted}}>· {g.rows.length} {t("รายการ","items")}</span></span>
+                        </button>
+                        {!g.isCollapsed && (
+                          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                            {g.rows.map(({po:p,item}) => {
+                              const inc = incomingStatus(p), pay = paymentStatus(p), locked = !canEditPO(p, session);
+                              const rcv = recvText(p);
                               return (
-                              <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>openDetail(p)}
-                                style={{background:i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`,cursor:"pointer"}}
-                                onMouseEnter={e=>e.currentTarget.style.background="#fef9ec"}
-                                onMouseLeave={e=>e.currentTarget.style.background=i%2===0?T.card:"#fafbfd"}>
-                                <td style={{padding:"10px 16px",color:T.textMuted,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{fmtDate(p.date)}</td>
-                                <td style={{padding:"10px 16px",color:T.textPrimary,fontWeight:500}}>{itemSupplierName(p,item)}</td>
-                                <td style={{padding:"10px 16px",color:T.textMuted,fontVariantNumeric:"tabular-nums",fontSize:13,whiteSpace:"nowrap"}}>{poNumbersLabel(p)}</td>
-                                <td style={{padding:"10px 16px",textAlign:"right"}}>
+                                <div key={p.id+"-"+(item.id||item.code)} data-po-card role="button" tabIndex={0}
+                                  onClick={()=>openDetail(p)} onKeyDown={e=>{ if (e.key==="Enter") openDetail(p); }}
+                                  style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"12px 14px",cursor:"pointer"}}>
+                                  <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                                    <b style={{fontSize:14,color:T.textPrimary,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{poNumbersLabel(p)}</b>
+                                    <span style={{fontSize:15,fontWeight:700,color:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>฿{fmt(item.amount)}</span>
+                                  </div>
+                                  <div style={{fontSize:12,color:T.textSecondary,marginTop:2}}>{itemSupplierName(p,item) || "—"} · {fmtDate(p.date)}{poItems(p).length>1 && <> · {t("จาก","from")} {poItems(p).length} {t("รหัส","codes")}</>}</div>
+                                  {usdLine(parseFloat(item.amount)||0, usdRate)}
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:8}}>
+                                    {chip(INCOMING_BG[inc], INCOMING_CLR[inc], rcv ? `${incLabel(inc)} ${rcv}` : incLabel(inc), "i")}
+                                    {p.status!=="Paid" && chip(PAYMENT_BG[pay], PAYMENT_CLR[pay], payLabel(pay), "p")}
+                                    {p.paymentType && chip(PAYMENT_TYPE_BG[p.paymentType], PAYMENT_TYPE_CLR[p.paymentType], payTypeLabelT(p), "m")}
+                                  </div>
+                                  <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,fontSize:12,color:T.textMuted}} onClick={e=>e.stopPropagation()}>
+                                    <span style={{whiteSpace:"nowrap"}}>{t("จ่าย","Pay")}: <PayDateText po={p}/></span>
+                                    <span style={{flex:1}}/>
+                                    <StatusPicker status={p.status} onChange={st=>changeStatus(p,st)} disabled={locked} compact/>
+                                    {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")}><Ico name="lock" size={14} color={T.textMuted} /></span>}
+                                    {editBtn(p, locked)}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </section>
+                    ))}
+                    <div style={{display:"flex",justifyContent:"space-between",gap:12,padding:"2px 4px",color:T.textMuted,fontSize:12}}>
+                      <span>{filtered.length} {t("รายการทั้งหมด","items total")}</span>
+                      <span style={{color:T.textPrimary,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{fmt(grandTotal)}</span>
+                    </div>
+                  </div>
+                );
+
+                // ── จอกว้าง: ตารางเดียว หัวคอลัมน์ชุดเดียว แถวหัวกลุ่มต่อ Acc. Code (เดิมเป็นกล่องแยก หัวคอลัมน์ซ้ำทุกกล่อง)
+                const th = (align="left") => ({padding:"10px 14px",textAlign:align,color:T.textMuted,fontWeight:600,fontSize:12,borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap",background:"#fff",position:"sticky",top:0,zIndex:1});
+                const td = {padding:"10px 14px",verticalAlign:"top"};
+                return (
+                  <div data-po-table style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+                    <div className="hscroll"><table style={{width:"100%",minWidth:900,borderCollapse:"collapse",fontSize:13}}>
+                      <thead><tr>
+                        <th style={th()}>{t("PO / Supplier","PO / Supplier")}</th>
+                        <th style={th()}>{t("วันเปิด PO","Open date")}</th>
+                        <th style={th("right")}>{t("มูลค่า (THB)","Value (THB)")}</th>
+                        <th style={th()}>{t("ของเข้า","Delivery")}</th>
+                        <th style={th()}>{t("จ่ายเงิน","Payment")}</th>
+                        <th style={th()}>{t("สถานะ","Status")}</th>
+                        <th style={{...th(),width:52}}><span className="sr-only">{t("แก้ไข","Edit")}</span></th>
+                      </tr></thead>
+                      {groups.map(g => (
+                        <tbody key={g.code} data-po-group={g.code}>
+                          <tr className="po-grp" onClick={()=>toggleGroup(g.code)} aria-expanded={!g.isCollapsed} style={{background:"#f8fafc",cursor:"pointer",borderTop:`1px solid ${T.cardBorder}`,borderBottom:`1px solid ${T.cardBorder}`}}>
+                            <td colSpan={2} style={{padding:"10px 14px"}}>
+                              <span style={{display:"inline-flex",alignItems:"center",gap:8}}>
+                                <Ico name="chevrons" size={14} color={T.textMuted} style={{transform:g.isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s"}} />
+                                <b style={{color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{g.code}</b>
+                                <span style={{color:T.textPrimary,fontWeight:600}}>{g.acc?.name || "—"}</span>
+                                <span style={{color:T.textMuted,fontSize:12}}>· {g.rows.length} {t("รายการ","items")}</span>
+                              </span>
+                            </td>
+                            <td style={{padding:"10px 14px",textAlign:"right",fontVariantNumeric:"tabular-nums",fontWeight:650,color:T.textPrimary,whiteSpace:"nowrap"}}>
+                              {fmt(g.total)}{usdRate>0 && <div className="usd-sub" style={{color:T.green,fontWeight:600,fontSize:12}}>≈ ${fmt(g.total/usdRate)}</div>}
+                            </td>
+                            <td colSpan={4} style={{padding:"10px 14px"}}>{budgetNote(g)}</td>
+                          </tr>
+                          {!g.isCollapsed && g.rows.map(({po:p,item}) => {
+                            const inc = incomingStatus(p), pay = paymentStatus(p), locked = !canEditPO(p, session);
+                            const rcv = recvText(p);
+                            return (
+                              <tr key={p.id+"-"+(item.id||item.code)} onClick={()=>openDetail(p)} className="po-row"
+                                style={{borderBottom:`1px solid #f1f5f9`,cursor:"pointer"}}>
+                                <td style={td}>
+                                  <div style={{fontWeight:600,color:T.textPrimary,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>{poNumbersLabel(p)}</div>
+                                  <div style={{fontSize:12,color:T.textSecondary}}>{itemSupplierName(p,item) || "—"}</div>
+                                </td>
+                                <td style={{...td,color:T.textSecondary,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>{fmtDate(p.date)}</td>
+                                <td style={{...td,textAlign:"right"}}>
                                   <div style={{color:T.textPrimary,fontVariantNumeric:"tabular-nums",fontWeight:600}}>{fmt(item.amount)}</div>
                                   {usdLine(parseFloat(item.amount)||0, usdRate)}
-                                  {splitAcrossCodes && <div style={{fontSize:12,color:T.textMuted}}>{t("จาก","from")} {poItems(p).length} {t("รหัส · รวม","codes · total")} {fmt(poTotal(p))}</div>}
+                                  {poItems(p).length>1 && <div style={{fontSize:12,color:T.textMuted}}>{t("จาก","from")} {poItems(p).length} {t("รหัส · รวม","codes · total")} {fmt(poTotal(p))}</div>}
                                 </td>
-                                <td style={{padding:"10px 16px",fontSize:13,fontVariantNumeric:"tabular-nums",color:receivedDates.length?T.textPrimary:T.textMuted}}>
-                                  {receivedDates.length===0 ? "—" : receivedDates.length===1 ? fmtDate(receivedDates[0]) : `${fmtDate(receivedDates[0])} (+${receivedDates.length-1})`}
+                                <td style={td}>
+                                  {chip(INCOMING_BG[inc], INCOMING_CLR[inc], incLabel(inc))}
+                                  {rcv && <div style={{fontSize:12,color:T.textSecondary,marginTop:4,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>{t("รับ","In")} {rcv}</div>}
                                 </td>
-                                <td style={{padding:"10px 16px",fontSize:13,fontVariantNumeric:"tabular-nums",color:paidDate?T.green:T.textMuted,fontWeight:paidDate?600:450}}>
-                                  <PayDateText po={p}/>
-                                </td>
-                                <td style={{padding:"10px 16px"}}>
+                                <td style={td}>
                                   <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                                    <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{incLabel(inc)}</span>
-                                    {p.status!=="Paid" && (
-                                      <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{payLabel(pay)}</span>
-                                    )}
-                                    {p.paymentType && (
-                                      <span style={{background:PAYMENT_TYPE_BG[p.paymentType],color:PAYMENT_TYPE_CLR[p.paymentType],fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{payTypeLabelT(p)}</span>
-                                    )}
+                                    {p.status!=="Paid" && chip(PAYMENT_BG[pay], PAYMENT_CLR[pay], payLabel(pay), "p")}
+                                    {p.paymentType && chip(PAYMENT_TYPE_BG[p.paymentType], PAYMENT_TYPE_CLR[p.paymentType], payTypeLabelT(p), "m")}
                                   </div>
+                                  <div style={{fontSize:12,marginTop:4,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",color:poPaidDate(p)?T.green:T.textSecondary,fontWeight:poPaidDate(p)?600:400}}><PayDateText po={p}/></div>
                                 </td>
-                                <td style={{padding:"10px 16px"}}>
+                                <td style={td} onClick={e=>e.stopPropagation()}>
                                   <div style={{display:"flex",alignItems:"center",gap:4}}>
-                                    <StatusPicker status={p.status} onChange={s=>changeStatus(p,s)} disabled={locked} compact/>
-                                    {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
+                                    <StatusPicker status={p.status} onChange={st=>changeStatus(p,st)} disabled={locked} compact/>
+                                    {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}><Ico name="lock" size={14} color={T.textMuted} /></span>}
                                   </div>
                                   {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
                                 </td>
-                                <td style={{padding:"10px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                                  <button onClick={()=>openEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข (ลบได้ในหน้านี้)","Edit (delete available here)")}
-                                    style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8}}>✏️</button>
-                                </td>
+                                <td style={{...td,whiteSpace:"nowrap",textAlign:"right"}} onClick={e=>e.stopPropagation()}>{editBtn(p, locked)}</td>
                               </tr>
-                            );})}
-                          </tbody>
-                        </table></div>
-                      )}
-                    </div>
-                  );
-                })}
-                <div style={{display:"flex",justifyContent:"flex-end",gap:16,padding:"4px 18px",color:T.textMuted,fontSize:12}}>
-                  <span>{filtered.length} {t("รายการทั้งหมด","items total")}</span>
-                  <span style={{color:T.amber,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{fmt(filtered.reduce((s,p)=>s+poTotal(p),0))}{usdRate>0 && <span className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12,marginLeft:6}}>≈ ${fmt(filtered.reduce((s,p)=>s+poTotal(p),0)/usdRate)}</span>}</span>
-                </div>
-              </div>
+                            );
+                          })}
+                        </tbody>
+                      ))}
+                      <tfoot>
+                        <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
+                          <td colSpan={2} style={{padding:"12px 14px",color:T.textMuted,fontSize:13}}>{filtered.length} {t("รายการทั้งหมด","items total")}</td>
+                          <td style={{padding:"12px 14px",textAlign:"right",fontVariantNumeric:"tabular-nums",fontWeight:700,color:T.textPrimary,whiteSpace:"nowrap"}}>
+                            {fmt(grandTotal)}{usdRate>0 && <div className="usd-sub" style={{color:T.green,fontWeight:650,fontSize:12}}>≈ ${fmt(grandTotal/usdRate)}</div>}
+                          </td>
+                          <td colSpan={4}/>
+                        </tr>
+                      </tfoot>
+                    </table></div>
+                  </div>
+                );
+              })()
             )}
           </>
         )}
@@ -7218,13 +7480,13 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
         <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",alignItems:"center",gap:4}}>
             <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
-            {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
+            {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}><Ico name="lock" size={14} color={T.textMuted} /></span>}
           </div>
           {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
         </td>
         <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
           <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
-            style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8}}>✏️</button>
+            style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8,display:"inline-grid",placeItems:"center"}} aria-label={t("แก้ไข","Edit")}><Ico name="edit" size={16} /></button>
         </td>
       </tr>
     );
@@ -7249,10 +7511,10 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
   return (
     <div>
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-        <SearchInput value={search} onChange={setSearch} placeholder={t("🔍 ค้นหา Acc. Code, supplier, PO...","🔍 Search Acc. Code, supplier, PO...")} width={240}/>
+        <SearchInput value={search} onChange={setSearch} placeholder={t("ค้นหา Acc. Code, supplier, PO...","Search Acc. Code, supplier, PO...")} width={240}/>
         <button onClick={()=>setOnlyIssues(v=>!v)}
           style={{background:onlyIssues?T.red:"transparent",border:`1.5px solid ${onlyIssues?T.red:T.cardBorder}`,borderRadius:8,padding:"7px 14px",color:onlyIssues?"#fff":T.textSecondary,fontSize:13,cursor:"pointer",fontWeight:600}}>
-          ⚠️ {t("แสดงเฉพาะรายการล่าช้า","Show late only")}
+          <Ico name="alert" size={14} /> {t("แสดงเฉพาะรายการล่าช้า","Show late only")}
         </button>
         <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
           style={{padding:"7px 12px",border:`1.5px solid ${statusFilter!=="all"?T.amber:T.cardBorder}`,borderRadius:8,fontSize:13,fontWeight:600,color:statusFilter!=="all"?T.amber:T.textSecondary,background:"#fff",cursor:"pointer"}}>
@@ -7276,7 +7538,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
 
       {filteredEntries.length===0 ? (
         <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
-          <div style={{fontSize:32,marginBottom:12}}>🚚</div>
+          <div style={{marginBottom:12,color:T.textMuted}}><Ico name="truck" size={32} sw={1.5} /></div>
           <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
           <div style={{fontSize:13}}>{t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
         </div>
@@ -7391,13 +7653,13 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                           <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
                             <div style={{display:"flex",alignItems:"center",gap:4}}>
                               <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
-                              {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}>🔒</span>}
+                              {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}><Ico name="lock" size={14} color={T.textMuted} /></span>}
                             </div>
                             {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
                           </td>
                           <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
                             <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
-                              style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8}}>✏️</button>
+                              style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8,display:"inline-grid",placeItems:"center"}} aria-label={t("แก้ไข","Edit")}><Ico name="edit" size={16} /></button>
                           </td>
                         </tr>
                       );
@@ -7559,7 +7821,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
         ))}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-        <SearchInput value={aSearch} onChange={setASearch} placeholder={t("🔍 ค้นหา Acc. Code / ชื่อบัญชี","🔍 Search Acc. Code / account name")} width={260} big/>
+        <SearchInput value={aSearch} onChange={setASearch} placeholder={t("ค้นหา Acc. Code / ชื่อบัญชี","Search Acc. Code / account name")} width={260} big/>
         <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownRows.length}/{rows.length} {t("รายการ","items")}</span>
       </div>
       <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
@@ -7567,8 +7829,8 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
           <thead>
             <tr>
               <th colSpan={6} style={{ ...hCell("#eef2f7"), textAlign: "left" }}>{t("ต้นทุน / งบประมาณ","Cost / Budget")}</th>
-              <th colSpan={mgM.length + 1} style={hCell(bMg)}>📦 {t("ของเข้า (รับ/PO/แผน)","Incoming (Recv/PO/Plan)")}</th>
-              <th colSpan={payM.length + 1} style={hCell(bPy)}>💰 {t("แผนจ่ายเงิน","Payment plan")}</th>
+              <th colSpan={mgM.length + 1} style={hCell(bMg)}>{t("ของเข้า (รับ/PO/แผน)","Incoming (Recv/PO/Plan)")}</th>
+              <th colSpan={payM.length + 1} style={hCell(bPy)}>{t("แผนจ่ายเงิน","Payment plan")}</th>
               <th colSpan={2} style={hCell(bPO)}>{t("สรุป PO","PO summary")}</th>
             </tr>
             <tr>
@@ -7639,11 +7901,13 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const setCurrency  = (fields) => setCurOverride(o => ({ ...o, ...fields }));
   const usdRate = effRate(curProject);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [view, setView] = useState("dashboard");
+  const isPhone = useIsPhone();
   const [viewHist, setViewHist] = useState([]);   // ประวัติแท็บที่ดูมาก่อน — ปุ่มกลับจะย้อนทีละหน้า
   const goView = (v) => { if (v !== view) { setViewHist(h => [...h, view]); setView(v); } };
   const backView = () => { if (viewHist.length) { const h = [...viewHist]; const prev = h.pop(); setViewHist(h); setView(prev); } else onBack(); };
   const [sortKey, setSortKey] = useState(null);  // "code" | "name" | "group" | "budget" | "committed" | "pct" | null
   const [sortDir, setSortDir] = useState(1);
+  const [accShow, setAccShow] = useState(null);   // ตารางงบ: "focus" = เฉพาะหมวดที่ต้องดู · "all" · null = อัตโนมัติ (มีหมวดต้องดู → focus)
   const [payListOpen, setPayListOpen] = useState(false);   // เปิดรายการ "ต้องจ่ายใคร" (แยกตาม Supplier) ใต้แผง "ต้องจ่าย"
   useEffect(() => { setPayListOpen(false); }, [view]);   // เปลี่ยนแท็บ → พับรายการ ไม่ให้ดันตารางของแท็บใหม่ลงล่าง
 
@@ -7703,8 +7967,12 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
     if (sortKey === key) setSortDir(d => -d);
     else { setSortKey(key); setSortDir(1); }
   };
+  // หมวดที่ต้องดู = เกินงบ · ใช้ ≥80% · มี PO แต่ไม่มีงบ — แสดงก่อน (ตารางเต็มมีหลายสิบแถว ส่วนใหญ่ยังไม่มี PO)
+  const needsLook = (a) => a.over || (a.budget>0 && a.committed/a.budget>=0.8) || (a.budget<=0 && a.committed>0);
+  const lookCount = accountData.filter(needsLook).length;
+  const accMode = accShow || (lookCount>0 ? "focus" : "all");
   const displayAccountData = (() => {
-    if (!sortKey) return accountData;
+    if (!sortKey) return accMode==="focus" ? accountData.filter(needsLook).sort((a,b)=>pctUsedOf(b)-pctUsedOf(a)) : accountData;
     const arr = [...accountData];
     arr.sort((a, b) => {
       let av, bv;
@@ -7718,7 +7986,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
       if (typeof av === "string") return av.localeCompare(bv) * sortDir;
       return (av - bv) * sortDir;
     });
-    return arr;
+    return accMode==="focus" ? arr.filter(needsLook) : arr;
   })();
 
   // ─── แผนจ่ายเงินรายเดือน (Payment forecast) ──────────────────────────────
@@ -7768,16 +8036,23 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
       <div style={{padding:"24px 28px"}}>
         {/* Tabs + Export */}
         <div style={{display:"flex",gap:8,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
-          <div className="seg-tabs" role="tablist">
+          {!isPhone && <div className="seg-tabs" role="tablist">
           {[["dashboard",t("ภาพรวมงบ","Budget overview"),t("ภาพรวม: งบประมาณ vs ที่ผูกพันแล้ว (PO) ทั้งโครงการ","Overview: budget vs committed (PO) for the whole project")],["matrix",t("ตารางรวมเดือน","Monthly matrix"),t("ตารางรวม: ต้นทุน + Incoming Plan / Actual Received / Payment Plan รายเดือน (เฉพาะเดือนที่มีข้อมูล)","Matrix: cost + Incoming/Received/Payment per month (only months with data)")]].map(([v,l,tip])=>(
             <button key={v} role="tab" aria-selected={view===v} onClick={()=>goView(v)} title={tip} className={`seg-tab${view===v?" on":""}`}>{l}</button>
           ))}
-          </div>
+          </div>}
           <div style={{marginLeft:"auto"}}><CurrencyControl project={curProject} updateProject={setCurrency}/></div>
+          {!isPhone && (
           <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6}}>
             <Ico name="download" /> Export Excel
           </button>
+          )}
         </div>
+        {isPhone && <BottomNav items={[
+          { key:"dashboard", icon:"chart", label:t("ภาพรวมงบ","Budget overview"), on:view==="dashboard", onClick:()=>goView("dashboard") },
+          { key:"matrix",    icon:"grid",  label:t("ตารางรวมเดือน","Monthly matrix"), on:view==="matrix", onClick:()=>goView("matrix") },
+          { key:"export",    icon:"download", label:"Export", onClick:onExport },
+        ]} />}
 
         {/* ต้องจ่าย — งานหลักของบัญชีจึงอยู่บนสุด: ยอดเดือนนี้/เดือนหน้า + รายการที่ต้องจ่ายเรียงตามวันครบกำหนด
             (เดิมเป็นแถบเหลืองไล่สี กดแล้วค่อยเห็นรายการ) · "ดูทั้งหมดแยกตาม Supplier" เปิดรายการเต็มด้านล่าง */}
@@ -7922,7 +8197,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                 <div role="group" aria-label={t("เรื่องที่ต้องรีบดู","Needs attention")} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:20}}>
                   <span style={{fontSize:13,color:T.textSecondary,fontWeight:600,display:"inline-flex",alignItems:"center",gap:6}}><Ico name="alert" size={16} color={T.red} />{t("ต้องรีบดู","Needs attention")}</span>
                   <button className="att-chip" data-attention="over-budget" title={t("เรียงตารางตามส่วนต่าง","Sort by variance")}
-                    onClick={()=>{ setSortKey("variance"); setSortDir(1); document.querySelector("[data-acc-table]")?.scrollIntoView({behavior:"smooth",block:"start"}); }}>
+                    onClick={()=>{ setAccShow("focus"); setSortKey("variance"); setSortDir(1); document.querySelector("[data-acc-table]")?.scrollIntoView({behavior:"smooth",block:"start"}); }}>
                     <b>{overCount}</b> {t("หมวดเกินงบ","categories over budget")}
                   </button>
                 </div>
@@ -7963,6 +8238,14 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               </div>
             </div>
             <div data-acc-table style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden",marginTop:20,scrollMarginTop:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",padding:"14px 16px",borderBottom:`1px solid ${T.cardBorder}`}}>
+              <h2 style={{margin:0,fontSize:15,fontWeight:650,color:T.textPrimary}}>{t("งบรายหมวด","Budget by code")}</h2>
+              <div className="seg-tabs" role="tablist" aria-label={t("แสดงหมวด","Show codes")}>
+                <button role="tab" data-acc-show="focus" aria-selected={accMode==="focus"} className={`seg-tab${accMode==="focus"?" on":""}`} onClick={()=>setAccShow("focus")}>{t("ต้องดู","Needs a look")} <span style={{fontWeight:500,color:T.textMuted}}>{lookCount}</span></button>
+                <button role="tab" data-acc-show="all" aria-selected={accMode==="all"} className={`seg-tab${accMode==="all"?" on":""}`} onClick={()=>setAccShow("all")}>{t("ทั้งหมด","All")} <span style={{fontWeight:500,color:T.textMuted}}>{accountData.length}</span></button>
+              </div>
+              <span style={{fontSize:12,color:T.textMuted}}>{accMode==="focus" ? t("เกินงบ · ใช้ไป 80% ขึ้นไป · มี PO แต่ไม่มีงบ — เรียงจากใช้งบมากสุด","Over · 80%+ used · PO without budget — most used first") : t("ทุกหมวดที่มีงบหรือมี PO","Every code with budget or PO")}</span>
+            </div>
             <div className="hscroll"><table style={{width:"100%",minWidth:680,borderCollapse:"collapse",fontSize:13}}>
               <thead>
                 <tr style={{background:"#f8fafc"}}>
@@ -7982,6 +8265,11 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                 </tr>
               </thead>
               <tbody>
+                {displayAccountData.length===0 && (
+                  <tr><td colSpan={6} style={{padding:"28px 16px",textAlign:"center",color:T.textMuted,fontSize:13}}>
+                    {t("ไม่มีหมวดที่เกินงบหรือใกล้เต็ม","No codes over or near budget")} · <button className="btn-ghost" style={{fontSize:12,padding:"4px 10px"}} onClick={()=>setAccShow("all")}>{t("ดูทั้งหมด","Show all")}</button>
+                  </td></tr>
+                )}
                 {displayAccountData.map((a,i)=>{
                   const variance = a.budget - a.committed;
                   return (
@@ -8005,7 +8293,11 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               </tbody>
               <tfoot>
                 <tr style={{background:"#f8fafc",borderTop:`2px solid ${T.cardBorder}`}}>
-                  <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>{accountData.length} {t("รายการ","items")}</td>
+                  <td colSpan={3} style={{padding:"12px 16px",color:T.textMuted,fontSize:13}}>
+                    {accMode==="focus"
+                      ? <>{t(`แสดง ${displayAccountData.length} จาก ${accountData.length} หมวด`,`Showing ${displayAccountData.length} of ${accountData.length}`)} · {t("ยอดรวมทุกหมวด","totals for all codes")} <button className="btn-ghost" data-acc-showall style={{fontSize:12,padding:"3px 10px",marginLeft:6}} onClick={()=>setAccShow("all")}>{t("ดูทั้งหมด","Show all")}</button></>
+                      : <>{accountData.length} {t("รายการ","items")}</>}
+                  </td>
                   <td style={{padding:"12px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:650,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.budget,0))}{usdLine(accountData.reduce((s,a)=>s+a.budget,0), usdRate)}</td>
                   <td style={{padding:"12px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:T.amber,fontWeight:650,fontSize:14}}>{fmt(accountData.reduce((s,a)=>s+a.committed,0))}{usdLine(accountData.reduce((s,a)=>s+a.committed,0), usdRate)}</td>
                   {(() => {
