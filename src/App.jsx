@@ -1960,9 +1960,14 @@ export default function App() {
     const attempt = () => { mark(); return (prev !== undefined ? ssMerge(key, prev, value) : ssOrThrow(key, value)); };
     return attempt()
       .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
-      .catch(() => new Promise(res => setTimeout(res, 900)).then(attempt)
+      .catch(e0 => (e0?.code === "42501" ? Promise.reject(e0) : new Promise(res => setTimeout(res, 900)).then(attempt))   // ไม่มีสิทธิ์ → ลองซ้ำก็ไม่ผ่าน
         .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
-        .catch(e => { console.warn("บันทึกไม่สำเร็จ (ลองใหม่แล้ว):", key, e); setSyncError(t("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต","⚠ Save failed — your latest change may not be saved. Please retry / check your connection")); }));
+        .catch(e => {
+          console.warn("บันทึกไม่สำเร็จ:", key, e);
+          setSyncError(e?.code === "42501"
+            ? t("⚠ บัญชีนี้ไม่มีสิทธิ์บันทึกส่วนนี้ — การแก้ล่าสุดไม่ถูกบันทึก (รีเฟรชหน้าเพื่อดูค่าจริง แล้วติดต่อแอดมิน)","⚠ This account isn't allowed to save this part — your latest change was not saved (refresh to see the real data, then contact an admin)")
+            : t("⚠ บันทึกไม่สำเร็จ — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก กรุณาลองใหม่/ตรวจเน็ต","⚠ Save failed — your latest change may not be saved. Please retry / check your connection"));
+        }));
   };
   const commit = useCallback((key, next, prev, setState, label) => {
     undoRef.current.push({ key, value: prev, setState, label });
