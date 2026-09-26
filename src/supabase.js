@@ -161,8 +161,13 @@ function _mergeById(base, prev, next, f = "id") {
     const base0 = prevMap.get(item[f]);
     out.push(!mine || _same(mine, base0) ? item : base0 ? mergeForWrite(item, base0, mine) : mine);
   }
-  for (const item of next) if (!seen.has(item[f]) && !prevMap.has(item[f])) out.push(item); // ตัวที่เราเพิ่มใหม่
-  return out;
+  // ตัวที่เราเพิ่มใหม่: ถ้าเราเพิ่ม "ไว้หน้า" (เช่นประวัติ PO ล่าสุดอยู่บนสุด) → วางไว้หน้าเหมือนเดิม
+  // ไม่งั้นต่อท้าย (เดิมต่อท้ายเสมอ → ประวัติใหม่ไปอยู่ท้ายแล้วโดนตัดทิ้งตอนตัดเหลือ 40)
+  const isNew = (x) => !seen.has(x[f]) && !prevMap.has(x[f]);
+  let lead = 0; while (lead < next.length && isNew(next[lead])) lead++;
+  if (lead === next.length) lead = 0;   // ไม่มีตัวเดิมให้อ้างอิงตำแหน่ง (เช่นเริ่มจากว่าง) → ต่อท้าย
+  const front = next.slice(0, lead), tail = next.slice(lead).filter(isNew);
+  return [...front, ...out, ...tail];
 }
 // array ของสตริง (เช่น hidden codes) → รวมแบบเซต: ของล่าสุด − ที่เราเอาออก + ที่เราเพิ่ม
 function _mergeSet(base, prev, next) {
@@ -182,7 +187,7 @@ function _mergeLog(base, prev, next) {
   const A = new Set(added.map(key));
   return [...added, ...base.filter(x => !A.has(key(x)))];   // ความยาวถูกตัดเหลือ 40 ในแอปตอนบันทึกครั้งถัดไป
 }
-const _objArr = (a) => Array.isArray(a) && a.every(x => _isObj(x) && !("id" in x));
+const _objArr = (a) => Array.isArray(a) && a.every(x => _isObj(x) && !("id" in x) && !("code" in x));   // แบบ "บันทึกประวัติ" (ไม่ใช่รายการที่มีรหัส)
 // object → รวมตาม field; ถ้า field เป็น object ทั้ง 3 ฝั่ง (เช่นเดือนใน additions) รวมลึกลงไปอีกชั้น
 // เพื่อให้ 2 คนแก้คนละ Account Code ในเดือนเดียวกันไม่ทับกัน
 function _mergeByKey(base, prev, next) {
@@ -190,7 +195,13 @@ function _mergeByKey(base, prev, next) {
   for (const k of Object.keys(prev)) if (!(k in next)) delete out[k];          // field ที่เราลบ
   for (const k of Object.keys(next)) {
     if (k in prev && _same(next[k], prev[k])) continue;                          // ไม่ได้แตะ → คงของล่าสุด
-    out[k] = (k in prev) && k in base ? mergeForWrite(base[k], prev[k], next[k]) : next[k];
+    if (k in prev && k in base) { out[k] = mergeForWrite(base[k], prev[k], next[k]); continue; }
+    // ทั้ง 2 เครื่องเพิ่ม field ใหม่ชื่อเดียวกันพร้อมกัน (เช่นเดือนใหม่ / $columns ชุดแรก) → รวมจาก "ว่าง"
+    // (เดิมของเราทับของอีกเครื่องทั้งก้อน)
+    if (!(k in prev) && k in base && base[k] && next[k] && typeof base[k] === "object" && Array.isArray(base[k]) === Array.isArray(next[k])) {
+      out[k] = mergeForWrite(base[k], Array.isArray(next[k]) ? [] : {}, next[k]); continue;
+    }
+    out[k] = next[k];
   }
   return out;
 }
@@ -202,18 +213,24 @@ export function mergeForWrite(server, prev, next) {
   if (_codeArr(server) && _codeArr(prev) && _codeArr(next)) return _mergeById(server, prev, next, "code");
   if (_strArr(server) && _strArr(prev) && _strArr(next)) return _mergeSet(server, prev, next);
   if (_isObj(server) && _isObj(prev) && _isObj(next))  return _mergeByKey(server, prev, next);
-  if (_objArr(server) && _objArr(prev) && _objArr(next) && prev.length) return _mergeLog(server, prev, next);
+  if (_objArr(server) && _objArr(prev) && _objArr(next)) return _mergeLog(server, prev, next);
   return next;                                                  // ชนิดไม่รู้จัก / ค่าเดี่ยว → ของเราชนะ
 }
 
-export const ssMerge = async (key, prev, next, _tries = 0) => {
-  const cur = await _sgRaw(key);
-  let toWrite = next;
-  if (cur) {
+// opts.normalize(value) — ใช้เฉพาะตอน "มีการรวม" เกิดขึ้น เพื่อคำนวณค่าที่ได้จากค่าอื่นใหม่ (เช่นยอดแม่ = ผลรวมลูก)
+// คืนค่าที่เขียนลงจริง — ให้หน้าจอแสดงงานของเครื่องอื่นที่ถูกรวมเข้ามาด้วย
+export const ssMerge = async (key, prev, next, opts = {}) => {
+  const tries = opts._tries || 0;
+  const again = () => ssMerge(key, prev, next, { ...opts, _tries: tries + 1 });
+  const combine = (row) => {
+    if (!row) return next;
     let server = null;
-    try { server = JSON.parse(cur.value); } catch { server = null; }
-    toWrite = mergeForWrite(server, prev, next);   // มีคนอื่นแก้ระหว่างทาง → รวมแทนการทับ
-  }
+    try { server = JSON.parse(row.value); } catch { server = null; }
+    const m = mergeForWrite(server, prev, next);   // มีคนอื่นแก้ระหว่างทาง → รวมแทนการทับ
+    return m !== next && opts.normalize ? opts.normalize(m) : m;
+  };
+  const cur = await _sgRaw(key);
+  const toWrite = combine(cur);
   const payload = { key, value: JSON.stringify(toWrite), updated_at: new Date().toISOString() };
   if (cur) {
     // อัปเดตเฉพาะถ้า updated_at ยังไม่เปลี่ยนจากที่เพิ่งอ่าน (กันเขียนซ้อน)
@@ -222,34 +239,37 @@ export const ssMerge = async (key, prev, next, _tries = 0) => {
     const { data, error } = await q.select("key");
     if (error) throw error;
     if (!data || data.length === 0) {
-      // อัปเดตได้ 0 แถว มี 2 สาเหตุ: (ก) มีคนเขียนแทรก (updated_at เปลี่ยน) → ลองใหม่
+      // อัปเดตได้ 0 แถว มี 3 สาเหตุ: (ก) มีคนเขียนแทรก (updated_at เปลี่ยน) → ลองใหม่
       // (ข) RLS ไม่ให้สิทธิ์ — DB ไม่ส่ง error แต่คืน 0 แถวเงียบ ๆ → แจ้งว่าไม่มีสิทธิ์ทันที
+      // (ค) แถวถูกลบไประหว่างทาง (เช่นแอดมินลบโครงการ) → ไม่สร้างกลับขึ้นมาใหม่
       const chk = await _sgRaw(key);
-      if (chk && (!cur.updated_at || chk.updated_at === cur.updated_at)) {
+      if (!chk) {
+        const e = new Error("ข้อมูลนี้ถูกลบไปแล้ว (row deleted: " + key + ")");
+        e.code = "GONE";
+        throw e;
+      }
+      if (!cur.updated_at || chk.updated_at === cur.updated_at) {
         const e = new Error("ไม่มีสิทธิ์บันทึกข้อมูลนี้ (permission denied: " + key + ")");
         e.code = "42501";
         throw e;
       }
-      if (_tries < 4) return ssMerge(key, prev, next, _tries + 1); // มีคนเขียนแทรก → ลองใหม่
+      if (tries < 4) return again(); // มีคนเขียนแทรก → ลองใหม่
       // ยอมแพ้เรื่อง guard updated_at แต่ "ยังรวมไม่ทับ" — อ่านค่าล่าสุดอีกรอบแล้ว
       // merge การแก้ของเรา (prev→next) ลงบนของล่าสุด ก่อนเขียน กันงานคนอื่นหายเงียบ ๆ
-      const fresh = await _sgRaw(key);
-      let merged = next;
-      if (fresh) {
-        let server = null; try { server = JSON.parse(fresh.value); } catch { server = null; }
-        merged = mergeForWrite(server, prev, next);
-      }
+      const merged = combine(await _sgRaw(key));
       const { error: e2 } = await supabase.from("kv_store")
         .upsert({ key, value: JSON.stringify(merged), updated_at: new Date().toISOString() });
       if (e2) throw e2;
+      return merged;
     }
-  } else {
-    const { error } = await supabase.from("kv_store").insert(payload);
-    if (error) {
-      if (_tries < 4) return ssMerge(key, prev, next, _tries + 1); // อาจมีคนเพิ่งสร้าง → ลองใหม่
-      throw error;
-    }
+    return toWrite;
   }
+  const { error } = await supabase.from("kv_store").insert(payload);
+  if (error) {
+    if (tries < 4) return again(); // อาจมีคนเพิ่งสร้าง → ลองใหม่
+    throw error;
+  }
+  return toWrite;
 };
 
 export const sd = async (key) => {
