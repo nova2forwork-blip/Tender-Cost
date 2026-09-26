@@ -195,6 +195,14 @@ export const ssMerge = async (key, prev, next, _tries = 0) => {
     const { data, error } = await q.select("key");
     if (error) throw error;
     if (!data || data.length === 0) {
+      // อัปเดตได้ 0 แถว มี 2 สาเหตุ: (ก) มีคนเขียนแทรก (updated_at เปลี่ยน) → ลองใหม่
+      // (ข) RLS ไม่ให้สิทธิ์ — DB ไม่ส่ง error แต่คืน 0 แถวเงียบ ๆ → แจ้งว่าไม่มีสิทธิ์ทันที
+      const chk = await _sgRaw(key);
+      if (chk && (!cur.updated_at || chk.updated_at === cur.updated_at)) {
+        const e = new Error("ไม่มีสิทธิ์บันทึกข้อมูลนี้ (permission denied: " + key + ")");
+        e.code = "42501";
+        throw e;
+      }
       if (_tries < 4) return ssMerge(key, prev, next, _tries + 1); // มีคนเขียนแทรก → ลองใหม่
       // ยอมแพ้เรื่อง guard updated_at แต่ "ยังรวมไม่ทับ" — อ่านค่าล่าสุดอีกรอบแล้ว
       // merge การแก้ของเรา (prev→next) ลงบนของล่าสุด ก่อนเขียน กันงานคนอื่นหายเงียบ ๆ
