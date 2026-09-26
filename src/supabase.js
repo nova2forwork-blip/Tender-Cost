@@ -107,6 +107,15 @@ export const sgOrThrow = async (key) => {
   if (error) throw error;
   return data ? JSON.parse(data.value) : null;
 };
+// อ่านหลายคีย์ในคำขอเดียว (หน้ารายการโครงการใช้สรุปตัวเลขของทุกโครงการ) — คืน { key: value }
+export const sgMany = async (keys) => {
+  if (!keys.length) return {};
+  const { data, error } = await supabase.from("kv_store").select("key, value").in("key", keys);
+  if (error) throw error;
+  const out = {};
+  for (const r of data || []) { try { out[r.key] = JSON.parse(r.value); } catch { /* ข้ามค่าที่อ่านไม่ได้ */ } }
+  return out;
+};
 export const ssOrThrow = async (key, value) => {
   const { error } = await supabase
     .from("kv_store").upsert({ key, value: JSON.stringify(value), updated_at: new Date().toISOString() });
@@ -134,21 +143,25 @@ const _same   = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
 // array ของ object ที่มี id ทุกตัว — นับ [] ว่าเข้าข่ายด้วย (เดิมต้องไม่ว่าง ทำให้
 // "โครงการยังไม่มี PO แล้ว 2 เครื่องเพิ่ม PO พร้อมกัน" ตกไปทาง LWW → PO เครื่องแรกหาย)
 const _idArr  = (a) => Array.isArray(a) && a.every(x => _isObj(x) && "id" in x);
+const _codeArr = (a) => Array.isArray(a) && a.every(x => _isObj(x) && typeof x.code === "string" && !("id" in x)) && new Set(a.map(x => x.code)).size === a.length;
 const _strArr = (a) => Array.isArray(a) && a.every(x => typeof x === "string" || typeof x === "number");
 
-function _mergeById(base, prev, next) {
-  const nextMap = new Map(next.map(x => [x.id, x]));
-  const prevMap = new Map(prev.map(x => [x.id, x]));
-  const removed = new Set(prev.filter(x => !nextMap.has(x.id)).map(x => x.id)); // ตัวที่เราลบ
+// f = ช่องที่ใช้ระบุตัว: "id" (PO/โครงการ/แผน) หรือ "code" (รายการเพิ่ม extra / รหัสบัญชี)
+function _mergeById(base, prev, next, f = "id") {
+  const nextMap = new Map(next.map(x => [x[f], x]));
+  const prevMap = new Map(prev.map(x => [x[f], x]));
+  const removed = new Set(prev.filter(x => !nextMap.has(x[f])).map(x => x[f])); // ตัวที่เราลบ
   const out = [], seen = new Set();
   for (const item of base) {
-    if (removed.has(item.id)) continue;                          // เราลบ → เอาออก
-    seen.add(item.id);
-    const mine = nextMap.get(item.id);
-    // เราแก้ตัวนี้จริง (ต่างจากตอนเริ่ม) → ใช้ของเรา / ไม่ได้แตะ → คงของล่าสุดบนเซิร์ฟเวอร์
-    out.push(mine && !_same(mine, prevMap.get(item.id)) ? mine : item);
+    if (removed.has(item[f])) continue;                          // เราลบ → เอาออก
+    seen.add(item[f]);
+    const mine = nextMap.get(item[f]);
+    // ไม่ได้แตะ → คงของล่าสุดบนเซิร์ฟเวอร์ / เราแก้ → รวมลงไปทีละช่อง (ถ้ามีตั้งต้น) เช่น 2 คนแก้คนละงวด
+    // ของ PO ใบเดียวกัน หรือคนละช่องของโครงการเดียวกัน → ได้ครบทั้งคู่; ช่องเดียวกัน → ของเราชนะ
+    const base0 = prevMap.get(item[f]);
+    out.push(!mine || _same(mine, base0) ? item : base0 ? mergeForWrite(item, base0, mine) : mine);
   }
-  for (const item of next) if (!seen.has(item.id) && !prevMap.has(item.id)) out.push(item); // ตัวที่เราเพิ่มใหม่
+  for (const item of next) if (!seen.has(item[f]) && !prevMap.has(item[f])) out.push(item); // ตัวที่เราเพิ่มใหม่
   return out;
 }
 // array ของสตริง (เช่น hidden codes) → รวมแบบเซต: ของล่าสุด − ที่เราเอาออก + ที่เราเพิ่ม
@@ -158,6 +171,18 @@ function _mergeSet(base, prev, next) {
   for (const x of next) if (!P.has(x) && !out.includes(x)) out.push(x);
   return out;
 }
+// array ของ object ที่ไม่มี id แต่ของใหม่ถูก "ต่อหน้า" (เช่นประวัติการแก้ PO ล่าสุดอยู่บน)
+// → เอารายการที่เราเพิ่มวางหน้า ของล่าสุดบนเซิร์ฟเวอร์ต่อท้าย (ประวัติของทั้ง 2 เครื่องไม่หาย)
+function _mergeLog(base, prev, next) {
+  const key = (x) => JSON.stringify(x);
+  const P = new Set(prev.map(key));
+  const added = next.filter(x => !P.has(key(x)));
+  if (!added.length) return base;                                   // เราไม่ได้เพิ่มอะไร → ของล่าสุด
+  if (!added.every((x, i) => key(x) === key(next[i]))) return next;   // ไม่ใช่แบบต่อหน้า → ของเราชนะ
+  const A = new Set(added.map(key));
+  return [...added, ...base.filter(x => !A.has(key(x)))];   // ความยาวถูกตัดเหลือ 40 ในแอปตอนบันทึกครั้งถัดไป
+}
+const _objArr = (a) => Array.isArray(a) && a.every(x => _isObj(x) && !("id" in x));
 // object → รวมตาม field; ถ้า field เป็น object ทั้ง 3 ฝั่ง (เช่นเดือนใน additions) รวมลึกลงไปอีกชั้น
 // เพื่อให้ 2 คนแก้คนละ Account Code ในเดือนเดียวกันไม่ทับกัน
 function _mergeByKey(base, prev, next) {
@@ -174,8 +199,10 @@ export function mergeForWrite(server, prev, next) {
   if (server == null || _same(server, prev)) return next;       // ไม่มีใครแก้แทรก → เขียนของเราได้เลย
   if (prev == null) return next;                                // ไม่มีจุดตั้งต้น → รวมไม่ได้ (LWW)
   if (_idArr(server) && _idArr(prev) && _idArr(next))  return _mergeById(server, prev, next);
+  if (_codeArr(server) && _codeArr(prev) && _codeArr(next)) return _mergeById(server, prev, next, "code");
   if (_strArr(server) && _strArr(prev) && _strArr(next)) return _mergeSet(server, prev, next);
   if (_isObj(server) && _isObj(prev) && _isObj(next))  return _mergeByKey(server, prev, next);
+  if (_objArr(server) && _objArr(prev) && _objArr(next) && prev.length) return _mergeLog(server, prev, next);
   return next;                                                  // ชนิดไม่รู้จัก / ค่าเดี่ยว → ของเราชนะ
 }
 
