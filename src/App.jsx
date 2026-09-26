@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
-import { supabase, sg, ss, sgOrThrow, ssOrThrow, ssMerge, sd, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
+import { supabase, sg, sgOrThrow, ssOrThrow, ssMerge, sdOrThrow, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
 import {
   ROLE_LABELS, getSession, setSession, clearSession, verifyLogin,
@@ -1748,6 +1748,7 @@ export default function App() {
   const activeIdRef = useRef(null); activeIdRef.current = activeId;   // ใช้กันผลโหลดของโครงการเก่ามาทับ
   const [projReadyId, setProjReadyId] = useState(null);  // ข้อมูลใน state ตอนนี้เป็นของโครงการไหน (null = ยังไม่มี)
   const [projLoadErr, setProjLoadErr] = useState("");    // โหลดข้อมูลโครงการไม่สำเร็จ
+  const [listLoadErr, setListLoadErr] = useState(false);  // โหลดรายการโครงการไม่สำเร็จ (อย่าโชว์ "ยังไม่มีโครงการ" หลอก ๆ)
   const [role,     setRole]     = useState(null);
   const [tenderCosts, setTCosts]= useState({});
   const [additions,   setAdditions]  = useState({});
@@ -1804,7 +1805,7 @@ export default function App() {
   const fetchProjectData = useCallback(async (id) => {
     // ดึง 6 ส่วนพร้อมกัน (เดิมทีละส่วน ช้ากว่า 6 เท่า)
     const [tc, po, ad, ex, hid, inp] = await Promise.all(
-      ["tenders","po","additions","extra","hidden","inplan"].map(k => sg(`tcs-${k}-${id}`)));
+      ["tenders","po","additions","extra","hidden","inplan"].map(k => sgOrThrow(`tcs-${k}-${id}`)));   // OrThrow: โหลดพลาดต้องขึ้นปุ่ม "ลองใหม่" ไม่ใช่โชว์โครงการว่าง
     // ผู้ใช้สลับไปโครงการอื่นระหว่างรอ → ทิ้งผลลัพธ์ของโครงการเก่า (กันข้อมูลโครงการ A ทับโครงการ B)
     if (activeIdRef.current !== id) return;
     setTCosts(tc || {});
@@ -1818,15 +1819,21 @@ export default function App() {
   }, []);
 
   const fetchProjects = useCallback(async () => {
-    const list = await sg("tcs-projects");
+    const list = await sgOrThrow("tcs-projects");
     if (list) setProjects(list);
   }, []);
   // โหลดรายการบัญชีที่แอดมินแก้ (ใช้ร่วมทุกโครงการ) แล้วทับ ACCOUNTS ในที่
   const fetchAccounts = useCallback(async () => {
-    const list = await sg("tcs-accounts");
+    const list = await sgOrThrow("tcs-accounts");
     if (Array.isArray(list) && list.length) { applyAccountList(list); setAccountsRev(v => v + 1); }
   }, []);
 
+  const loadList = async () => {
+    setListLoadErr(false);
+    try { await fetchAccounts(); await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
+    catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setListLoadErr(true); }
+    finally { setLoaded(true); }   // กันจอโหลดค้างเสมอ แม้ดึงข้อมูลพลาด
+  };
   // โหลดรายการโครงการ "หลังล็อกอินเสร็จ" — สำคัญมากตอนใช้ RLS: ถ้าอ่านก่อน
   // Supabase แนบ token จะโดน DB ปฏิเสธแล้วขึ้น 0 โครงการ ทั้งที่มีสิทธิ์อ่าน
   // ผูกกับ session ไว้ พอล็อกอินเสร็จ (session มีค่า) จะดึงข้อมูลใหม่อัตโนมัติ
@@ -1835,18 +1842,14 @@ export default function App() {
       // ออกจากระบบ (กดเอง หรือ token หมดอายุ) → ล้างหน้าจอ/ข้อมูลทั้งหมด ให้คนถัดไปที่ล็อกอินเริ่มที่หน้า
       // รายการโครงการเสมอ (เดิมค้างหน้าเก่า เช่นหน้า Admin → จอว่าง, หรือเห็นรายการโครงการของคนก่อน)
       UnsavedGuard.dirty = false;
-      setScreen("home"); setRole(null); setActiveId(null); setProjReadyId(null); setProjLoadErr("");
+      setScreen("home"); setRole(null); setActiveId(null); setProjReadyId(null); setProjLoadErr(""); setListLoadErr(false);
       setProjects([]); setTCosts({}); setPO([]); setAdditions({}); setExtraItems([]); setHiddenAccounts([]); setIncomingPlan([]);
       undoRef.current = []; redoRef.current = [];
       setLoaded(true); return;
     }
     setLoaded(false);   // ล็อกอินใหม่ → แสดง "กำลังโหลด" จนได้รายการโครงการ (ไม่โชว์ "ยังไม่มีโครงการ" หลอก ๆ)
-    (async () => {
-      try { await fetchAccounts(); await fetchProjects(); setSyncedAt(new Date()); setSyncError(""); }
-      catch (e) { console.warn("โหลดรายการโครงการไม่สำเร็จ:", e); setSyncError(t("โหลดข้อมูลไม่สำเร็จ — ตรวจสอบเน็ตแล้วรีเฟรชหน้า","Couldn't load data — check your connection and refresh")); }
-      finally { setLoaded(true); }   // กันจอโหลดค้างเสมอ แม้ดึงข้อมูลพลาด
-    })();
-  }, [fetchProjects, fetchAccounts, session]);
+    loadList();
+  }, [fetchProjects, fetchAccounts, session]); // eslint-disable-line
 
   // เปิดโครงการ: ล้างข้อมูลของโครงการก่อนหน้าทิ้งก่อน แล้วค่อยโหลด — ระหว่างโหลดหน้าแผนกแสดง "กำลังโหลด"
   // (เดิมยังโชว์ตัวเลขโครงการเก่าใต้ชื่อโครงการใหม่ และถ้ากด Export ตอนนั้นจะได้ข้อมูลผิดโครงการ)
@@ -1954,7 +1957,7 @@ export default function App() {
     // ที่วิ่งกลับมา (ซึ่งมาหลังเขียนเสร็จ) ยังอยู่ในกรอบเวลา แล้วถูกข้าม ไม่ดึงมาทับตัวเอง
     const mark = () => { lastWriteRef.current[key] = Date.now(); };
     mark();
-    const attempt = () => { mark(); return (prev !== undefined ? ssMerge(key, prev, value) : ss(key, value)); };
+    const attempt = () => { mark(); return (prev !== undefined ? ssMerge(key, prev, value) : ssOrThrow(key, value)); };
     return attempt()
       .then(() => { mark(); setSyncedAt(new Date()); setSyncError(""); })
       .catch(() => new Promise(res => setTimeout(res, 900)).then(attempt)
@@ -2199,7 +2202,7 @@ export default function App() {
     if (activeId === id) setActiveId(null);
     // 2) ลบข้อมูลย่อยทุกส่วน — ส่วนไหนพลาดแจ้งเตือน (ไม่ปล่อยเงียบ) ข้อมูลเก่ากู้ได้ที่ Admin → กู้คืนข้อมูล
     const keys = ["tenders","po","additions","extra","hidden","inplan"].map(k => `tcs-${k}-${id}`);
-    const results = await Promise.allSettled(keys.map(k => sd(k)));
+    const results = await Promise.allSettled(keys.map(k => sdOrThrow(k)));
     const failed = keys.filter((_, i) => results[i].status === "rejected");
     if (failed.length) {
       console.warn("ลบข้อมูลย่อยของโครงการไม่ครบ:", failed);
@@ -2318,7 +2321,7 @@ export default function App() {
       )}
       <ErrorBoundary>
       {screen === "home" && (
-        <HomeScreen projects={projects} saveProjects={saveProjects} openProject={openProject}
+        <HomeScreen projects={projects} loadErr={listLoadErr} onRetryLoad={() => { setLoaded(false); loadList(); }} saveProjects={saveProjects} openProject={openProject}
           deleteProject={deleteProject} newProjModal={newProjModal} setNewProjModal={setNewProjModal}
           syncedAt={syncedAt} syncing={syncing} session={session} onLogout={handleLogout}
           onOpenAdmin={() => setScreen("admin")} />
@@ -2640,7 +2643,7 @@ function AdminAccountsTab() {
     try {
       if (nRen) { setMsg(t("กำลังย้ายข้อมูลข้ามทุกโครงการ…","Migrating data across all projects…")); await migrateAccountCodes(renameMap); }
       const list = clean.map(r => ({ code: r.code, name: r.name, group: r.group }));
-      await ss("tcs-accounts", list);
+      await ssOrThrow("tcs-accounts", list);   // OrThrow: บันทึกพลาดต้องแจ้ง (เดิมเงียบแล้วรีเฟรชหน้าเหมือนสำเร็จ)
       applyAccountList(list);
       setMsg(t("✓ บันทึกเรียบร้อย กำลังรีเฟรช…","✓ Saved, refreshing…"));
       setTimeout(() => { if (typeof window !== "undefined") window.location.reload(); }, 700);
@@ -3027,7 +3030,7 @@ function CurrencyControl({ project, updateProject }) {
 }
 
 // ─── Home Screen ──────────────────────────────────────────────────────────────
-function HomeScreen({ projects, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
+function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject, deleteProject, newProjModal, setNewProjModal, syncedAt, syncing, session, onLogout, onOpenAdmin }) {
   const [draft, setDraft] = useState({ name:"", area:"", panels:"", client:"", currency:"THB", usdRate:"" });
   const [projSearch, setProjSearch] = useState("");
   const shownProjects = projects.filter(p => {
@@ -3095,7 +3098,13 @@ function HomeScreen({ projects, saveProjects, openProject, deleteProject, newPro
 
       {/* Body */}
       <div style={{padding:"28px 32px"}}>
-        {projects.length === 0 ? (
+        {projects.length === 0 && loadErr ? (
+          <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
+            <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
+            <div style={{fontSize:15,fontWeight:600,color:T.textPrimary,marginBottom:14}}>{t("โหลดรายการโครงการไม่สำเร็จ — ตรวจเน็ตแล้วกดลองใหม่","Couldn't load the project list — check your connection and retry")}</div>
+            <button className="btn-primary" onClick={onRetryLoad}>{t("ลองใหม่","Retry")}</button>
+          </div>
+        ) : projects.length === 0 ? (
           <div style={{textAlign:"center",padding:"80px 0",color:T.textMuted}}>
             <div style={{fontSize:52,marginBottom:14}}>🏗</div>
             <div style={{fontSize:17,fontWeight:600,color:T.textSecondary,marginBottom:8}}>{t("ยังไม่มีโครงการ","No projects yet")}</div>
