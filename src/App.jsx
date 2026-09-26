@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Fragment, Component } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, Fragment, Component } from "react";
 import * as XLSX from "xlsx-js-style";
 import { supabase, sg, sgOrThrow, sgMany, ssOrThrow, ssMerge, sdOrThrow, loadKvSnapshots, restoreKvSnapshot } from "./supabase.js";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend, CartesianGrid } from "recharts";
@@ -553,6 +553,8 @@ const GLOBAL_CSS = `
   * { scrollbar-color: #94a3b8 #eef2f7; scrollbar-width: auto; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  .calc-pop button:active { transform: scale(0.96); }
+  @media (max-width: 640px) { .calc-toggle-lbl { display: none; } }
   .card-hover { transition: box-shadow 0.18s, transform 0.18s; }
   .card-hover:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.12); transform: translateY(-2px); }
   .btn-primary { background: ${T.blue}; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, box-shadow 0.15s; }
@@ -1873,7 +1875,7 @@ export default function App() {
     if (!session) {
       // ออกจากระบบ (กดเอง หรือ token หมดอายุ) → ล้างหน้าจอ/ข้อมูลทั้งหมด ให้คนถัดไปที่ล็อกอินเริ่มที่หน้า
       // รายการโครงการเสมอ (เดิมค้างหน้าเก่า เช่นหน้า Admin → จอว่าง, หรือเห็นรายการโครงการของคนก่อน)
-      UnsavedGuard.dirty = false;
+      UnsavedGuard.dirty = false; CalcStore.set(false);
       setScreen("home"); setRole(null); setActiveId(null); setProjReadyId(null); setProjLoadErr(""); setListLoadErr(false);
       setProjects([]); setTCosts({}); setPO([]); setAdditions({}); setExtraItems([]); setHiddenAccounts([]); setIncomingPlan([]);
       undoRef.current = []; redoRef.current = [];
@@ -2124,6 +2126,7 @@ export default function App() {
       return d.lastY > window.innerHeight-EDGE || d.lastY < EDGE;
     };
     const onDown = (e) => {
+      if (e.target instanceof Element && e.target.closest("[data-calc],[data-calc-toggle]")) return;   // ใช้เครื่องคิดเลข → คงการเลือกไว้ (ใส่ผลรวมที่เลือกได้)
       clearHilite(); setSelStats(null); setMarquee(null); selCellsRef.current = []; // คลิกที่ไหนก็ล้างไฮไลต์เดิม
       if (e.button !== 0) return;
       const t = e.target;
@@ -2305,6 +2308,7 @@ export default function App() {
         <div style={{position:"fixed",left:marquee.left,top:marquee.top,width:marquee.width,height:marquee.height,
           background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
       )}
+      {session && <CalculatorPopup selSum={selStats ? selStats.sum : null} />}
       {selStats && (
         <div style={{position:"fixed",right:20,bottom:20,zIndex:96,display:"flex",alignItems:"center",gap:0,
           background:"#1e293b",color:"#e2e8f0",borderRadius:10,padding:"8px 4px",boxShadow:"0 8px 28px rgba(15,23,42,0.28)",
@@ -3113,6 +3117,7 @@ function HomeScreen({ projects, loadErr, onRetryLoad, saveProjects, openProject,
             <div style={{fontSize:12,color:"rgba(255,255,255,0.6)",marginTop:2}}>QS · {t("จัดซื้อ · บัญชี","Procurement · Accounting")} — Real-time sync</div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+            <CalcToggle/>
             <LangToggle/>
             <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
             {session?.role === "admin" && (
@@ -3336,6 +3341,253 @@ function RoleSelect({ project, updateProject, onSelect, onBack }) {
 }
 
 // ─── ปุ่มสลับภาษา ไทย / EN ────────────────────────────────────────────────────
+// ─── เครื่องคิดเลข (ป๊อปอัพลอย ลากย้ายได้ ไม่บังการทำงาน) ─────────────────────────
+// คำนวณแบบปลอดภัย (ไม่ใช้ eval): + − × ÷ วงเล็บ ทศนิยม และ % แบบเครื่องคิดเลข
+//   100+7% = 107 · 100−10% = 90 · 200×15% = 30 · 50% = 0.5
+const calcEval = (src) => {
+  const s = String(src ?? "").replace(/,/g, "").replace(/×/g, "*").replace(/÷/g, "/").replace(/[−–]/g, "-").replace(/\s+/g, "");
+  if (!s) return { ok: false, empty: true };
+  let i = 0;
+  const peek = () => s[i];
+  const num = () => {
+    const m = /^(\d+\.?\d*|\.\d+)/.exec(s.slice(i));
+    if (!m) throw new Error("num");
+    i += m[0].length; return parseFloat(m[0]);
+  };
+  // factor → { v, pct }  (pct = ค่านี้เป็น "เปอร์เซ็นต์" ล้วน ๆ ไว้คิดแบบ a ± b%)
+  const factor = () => {
+    const c = peek();
+    if (c === "-") { i++; const f = factor(); return { v: -f.v, pct: f.pct }; }
+    if (c === "+") { i++; return factor(); }
+    let v;
+    if (c === "(") { i++; v = expr().v; if (peek() !== ")") throw new Error("paren"); i++; }
+    else v = num();
+    if (peek() === "%") { i++; return { v: v / 100, pct: true }; }
+    return { v, pct: false };
+  };
+  const term = () => {
+    let f = factor(), v = f.v, pct = f.pct;
+    while (peek() === "*" || peek() === "/") {
+      const op = s[i++]; const r = factor(); pct = false;
+      if (op === "*") v *= r.v; else { if (r.v === 0) throw new Error("div0"); v /= r.v; }
+    }
+    return { v, pct };
+  };
+  const expr = () => {
+    let { v } = term();
+    while (peek() === "+" || peek() === "-") {
+      const op = s[i++]; const r = term();
+      const d = r.pct ? v * r.v : r.v;               // 100+7% → 100 + 100×7%
+      v = op === "+" ? v + d : v - d;
+    }
+    return { v };
+  };
+  try {
+    const { v } = expr();
+    if (i !== s.length || !isFinite(v)) return { ok: false };
+    return { ok: true, v: Math.round(v * 1e8) / 1e8 };
+  } catch (e) { return { ok: false, div0: e.message === "div0" }; }
+};
+const fmtCalc = (v) => Number(v).toLocaleString("en-US", { maximumFractionDigits: 4 });
+// แสดงสูตรให้อ่านง่าย: ใส่ , หลักพัน · × ÷ − แทน * / -
+const prettyExpr = (s) => String(s).replace(/\d+(\.\d*)?/g, (m) => { const [a, b] = m.split("."); return Number(a).toLocaleString("en-US") + (b !== undefined ? "." + b : ""); })
+  .replace(/\*/g, " × ").replace(/\//g, " ÷ ").replace(/([\d%)])-/g, "$1 − ").replace(/\+/g, " + ");
+
+const CalcStore = { open: false, subs: new Set(), set(v) { this.open = v; this.subs.forEach(f => f(v)); } };
+const useCalcOpen = () => {
+  const [o, setO] = useState(CalcStore.open);
+  useEffect(() => { CalcStore.subs.add(setO); return () => { CalcStore.subs.delete(setO); }; }, []);
+  return o;
+};
+function CalcToggle({ dark = true }) {
+  useLang();
+  const open = useCalcOpen();
+  return (
+    <button onClick={() => CalcStore.set(!open)} title={t("เครื่องคิดเลข","Calculator")} aria-pressed={open} data-calc-toggle
+      style={{background: open ? "#fff" : dark ? "rgba(255,255,255,0.15)" : "#fff", border:`1px solid ${dark ? "rgba(255,255,255,0.3)" : T.cardBorder}`, borderRadius:8, padding:"5px 11px", minHeight:32, fontSize:15, color: open ? T.blue : dark ? "#fff" : T.textPrimary, cursor:"pointer", display:"inline-flex", alignItems:"center", gap:6, whiteSpace:"nowrap", fontWeight:700}}>
+      🧮<span className="calc-toggle-lbl" style={{fontSize:13}}>{t("คิดเลข","Calc")}</span>
+    </button>
+  );
+}
+
+function CalculatorPopup({ selSum = null }) {
+  useLang();
+  const open = useCalcOpen();
+  const [expr, setExpr] = useState("");
+  const [done, setDone] = useState(null);            // { expr, v } หลังกด =
+  const [err, setErr] = useState("");
+  const [hist, setHist] = useState([]);              // ประวัติ 10 รายการล่าสุด (เฉพาะรอบนี้)
+  const [showHist, setShowHist] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [pos, setPos] = useState(null);              // null = มุมขวาล่าง / {x,y} หลังลากย้าย
+  const boxRef = useRef(null);
+  const drag = useRef(null);
+
+  const exprRef = useRef(null);
+  useEffect(() => { if (open) setTimeout(() => boxRef.current?.focus(), 0); }, [open]);
+  // วางตำแหน่งด้วย top/left เสมอ (เปิดครั้งแรกที่มุมขวาล่าง) — เวลาความสูงเปลี่ยน ปุ่มจะไม่เลื่อนหนีนิ้ว/เมาส์
+  useLayoutEffect(() => {
+    if (!open || pos || !boxRef.current) return;
+    const r = boxRef.current.getBoundingClientRect();
+    setPos({ x: Math.max(4, window.innerWidth - r.width - 20), y: Math.max(4, window.innerHeight - r.height - 80) });
+  }, [open, pos]);
+  useEffect(() => { const el = exprRef.current; if (el) el.scrollLeft = el.scrollWidth; });   // สูตรยาว → เลื่อนให้เห็นท้ายสุด
+  if (!open) return null;
+
+  const preview = calcEval(expr);
+  const OPS = "+-*/";
+  const press = (k) => {
+    setErr(""); setCopied(false);
+    if (k === "AC") { setExpr(""); setDone(null); return; }
+    if (k === "⌫") { if (done) { setDone(null); return; } setExpr(e => e.slice(0, -1)); return; }
+    if (k === "=") {
+      const r = calcEval(expr);
+      if (!r.ok) { if (!r.empty) setErr(r.div0 ? t("หารด้วย 0 ไม่ได้","Can't divide by 0") : t("สูตรไม่ครบ","Incomplete formula")); return; }
+      setDone({ expr, v: r.v }); setHist(h => [{ expr, v: r.v }, ...h].slice(0, 10));
+      setExpr(String(r.v)); return;
+    }
+    // หลังกด = : พิมพ์ตัวเลขต่อ = เริ่มใหม่ · พิมพ์เครื่องหมายต่อ = ใช้ผลลัพธ์เดิมต่อ
+    let base = expr;
+    if (done) { setDone(null); if (/[\d.(]/.test(k)) base = ""; }
+    if (OPS.includes(k)) {
+      if (!base && k !== "-") return;
+      if (OPS.includes(base.slice(-1))) base = base.slice(0, -1);   // กดเครื่องหมายซ้ำ → แทนตัวเดิม
+      setExpr(base + k); return;
+    }
+    if (k === ".") { const seg = base.split(/[+\-*/()%]/).pop(); if (seg.includes(".")) return; setExpr(base + (seg === "" ? "0." : ".")); return; }
+    if (k === "%") { if (!/[\d)]$/.test(base)) return; setExpr(base + "%"); return; }
+    setExpr(base + k);
+  };
+  const insertNumber = (v) => {
+    const n = String(Math.round(v * 100) / 100);
+    setDone(null); setErr("");
+    setExpr(e => (!e || /[+\-*/(]$/.test(e)) ? e + (n.startsWith("-") && e ? `(${n})` : n) : e + "+" + n);
+  };
+  const result = done ? done.v : preview.ok ? preview.v : null;
+  const copy = async () => {
+    if (result == null) return;
+    const txt = String(Math.round(result * 100) / 100);
+    try { await navigator.clipboard.writeText(txt); } catch { /* บางเบราว์เซอร์ไม่อนุญาต */ }
+    setCopied(true); setTimeout(() => setCopied(false), 1500);
+  };
+  const onKey = (e) => {
+    e.stopPropagation();                                 // ไม่ให้ไปโดนคีย์ลัดของหน้า (Undo, Esc ปิดฟอร์ม)
+    const k = e.key;
+    if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "c" && !String(window.getSelection?.() || "")) { e.preventDefault(); copy(); return; }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const map = { "Enter": "=", "=": "=", "Backspace": "⌫", "Delete": "AC", "x": "*", "X": "*", ",": "" };
+    if (k === "Escape") { e.preventDefault(); CalcStore.set(false); return; }
+    if (k.toLowerCase() === "c") { e.preventDefault(); press("AC"); return; }
+    const m = k in map ? map[k] : k;
+    if (m === "") { e.preventDefault(); return; }
+    if (/^[0-9.+\-*/%()=⌫]$/.test(m) || m === "AC" || m === "⌫") { e.preventDefault(); press(m); }
+  };
+  const onPaste = (e) => {
+    const txt = (e.clipboardData?.getData("text") || "").replace(/[^\d.,+\-*/×÷%()−]/g, "").replace(/,/g, "");
+    if (!txt) return;
+    e.preventDefault(); setDone(null); setErr(""); setExpr(x => x + txt.replace(/×/g, "*").replace(/÷/g, "/").replace(/−/g, "-"));
+  };
+  // ลากย้ายจากแถบหัว
+  const onDragStart = (e) => {
+    if (e.button !== 0 || e.target.closest("button")) return;
+    const r = boxRef.current.getBoundingClientRect();
+    drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top, w: r.width, h: r.height };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const onDragMove = (e) => {
+    const d = drag.current; if (!d) return;
+    const x = Math.min(Math.max(4, e.clientX - d.dx), window.innerWidth - d.w - 4);
+    const y = Math.min(Math.max(4, e.clientY - d.dy), window.innerHeight - d.h - 4);
+    setPos({ x, y });
+  };
+  const onDragEnd = () => { drag.current = null; };
+  const clampIn = (p) => { const r = boxRef.current?.getBoundingClientRect(); if (!r || !p) return p; return { x: Math.min(Math.max(4, p.x), Math.max(4, window.innerWidth - r.width - 4)), y: Math.min(Math.max(4, p.y), Math.max(4, window.innerHeight - r.height - 4)) }; };
+
+  const KEYS = [
+    ["AC","⌫","%","/"],
+    ["7","8","9","*"],
+    ["4","5","6","-"],
+    ["1","2","3","="],
+    ["0",".","+"],
+  ];
+  const label = { "/": "÷", "*": "×", "-": "−" };
+  const keyStyle = (k) => {
+    const op = OPS.includes(k) || k === "%";
+    const base = { height:46, borderRadius:14, border:"1px solid rgba(255,255,255,0.9)", background:"rgba(255,255,255,0.9)",
+      boxShadow:"0 1px 2px rgba(15,23,42,0.06), inset 0 1px 0 rgba(255,255,255,0.8)", fontSize:18, fontWeight:600, color:T.textPrimary,
+      cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", justifyContent:"center", userSelect:"none", transition:"transform .06s, background .12s" };
+    if (k === "=") return { ...base, gridRow:"span 2", height:"auto", fontSize:24, color:"#fff", border:"none", background:"linear-gradient(180deg,#3b82f6 0%,#1d4ed8 100%)", boxShadow:"0 6px 16px rgba(37,99,235,0.35)" };
+    if (k === "AC") return { ...base, color:"#dc2626", fontSize:15, fontWeight:700 };
+    if (k === "⌫") return { ...base, color:T.textSecondary, fontSize:16 };
+    if (op) return { ...base, color:T.blue, background:"rgba(219,234,254,0.95)", fontSize:20 };
+    return base;
+  };
+  const cp = clampIn(pos);
+  const place = cp ? { left: cp.x, top: cp.y } : { right: 20, bottom: 80, visibility: "hidden" };
+
+  return (
+    <div ref={boxRef} data-calc tabIndex={-1} onKeyDown={onKey} onPaste={onPaste} role="dialog" aria-label={t("เครื่องคิดเลข","Calculator")}
+      className="calc-pop"
+      style={{position:"fixed", ...place, zIndex:250, width:292, maxWidth:"calc(100vw - 24px)", outline:"none",
+        background:"rgba(246,249,253,0.93)", backdropFilter:"blur(18px) saturate(160%)", WebkitBackdropFilter:"blur(18px) saturate(160%)",
+        border:"1px solid rgba(255,255,255,0.7)", borderRadius:24, boxShadow:"0 24px 60px rgba(15,23,42,0.28), inset 0 1px 0 rgba(255,255,255,0.6)",
+        padding:14, animation:"fadeIn 0.15s ease"}}>
+      {/* แถบหัว: ลากย้ายได้ */}
+      <div onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd}
+        style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,cursor:"grab",touchAction:"none"}}>
+        <span style={{fontSize:12,fontWeight:700,color:T.textMuted,letterSpacing:0.5,flex:1}}>🧮 {t("เครื่องคิดเลข","Calculator")}</span>
+        <button onClick={()=>setShowHist(v=>!v)} title={t("ประวัติการคำนวณ","History")} tabIndex={-1}
+          style={{border:"none",background:showHist?"rgba(37,99,235,0.12)":"transparent",color:showHist?T.blue:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:14}}>🕘</button>
+        <button onClick={copy} title={t("คัดลอกผลลัพธ์","Copy result")} tabIndex={-1} disabled={result==null}
+          style={{border:"none",background:"transparent",color:copied?T.green:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:result==null?"default":"pointer",fontSize:copied?12:14,fontWeight:700}}>{copied ? t("คัดลอกแล้ว","Copied") : "📋"}</button>
+        <button onClick={()=>CalcStore.set(false)} title={t("ปิด (Esc)","Close (Esc)")} tabIndex={-1}
+          style={{border:"none",background:"transparent",color:T.textMuted,borderRadius:8,minWidth:32,height:30,cursor:"pointer",fontSize:15,lineHeight:1}}>✕</button>
+      </div>
+
+      {/* จอแสดงผล */}
+      <div style={{textAlign:"right",padding:"4px 6px 10px"}}>
+        <div data-calc-expr ref={exprRef} style={{fontSize:14,color:T.textSecondary,fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap",overflowX:"auto",overflowY:"hidden",height:22,lineHeight:"20px",scrollbarWidth:"none"}}>
+          {done ? prettyExpr(done.expr) : (expr ? prettyExpr(expr) : " ")}
+        </div>
+        <div data-calc-result style={{fontSize: err ? 20 : result != null && fmtCalc(result).length > 16 ? 20 : result != null && fmtCalc(result).length > 11 ? 25 : 32, fontWeight:750, color: err ? T.red : done ? T.textPrimary : result != null ? T.textSecondary : T.textMuted,
+          fontFamily:"'JetBrains Mono',monospace",letterSpacing:-0.5,height:42,lineHeight:"42px",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+          {err ? err : result != null ? `=${fmtCalc(result)}` : "0"}
+        </div>
+      </div>
+
+      {selSum != null && (
+        <button onClick={()=>insertNumber(selSum)} tabIndex={-1} title={t("ใส่ผลรวมของช่องที่ลากเลือกในตาราง","Insert the sum of the cells selected in the table")}
+          style={{width:"100%",marginBottom:8,border:"1px dashed rgba(37,99,235,0.45)",background:"rgba(219,234,254,0.55)",color:T.blue,borderRadius:12,padding:"7px 10px",fontSize:12.5,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+          Σ {t("ใส่ผลรวมที่เลือก","Insert selected sum")} · {fmtCalc(Math.round(selSum*100)/100)}
+        </button>
+      )}
+
+      {showHist ? (
+        <div style={{maxHeight:258,overflowY:"auto",display:"flex",flexDirection:"column",gap:6}}>
+          {hist.length === 0 && <div style={{fontSize:12.5,color:T.textMuted,textAlign:"center",padding:"30px 0"}}>{t("ยังไม่มีประวัติ","No history yet")}</div>}
+          {hist.map((h, i) => (
+            <button key={i} tabIndex={-1} onClick={()=>{ setExpr(String(h.v)); setDone(null); setShowHist(false); }}
+              style={{textAlign:"right",border:"1px solid rgba(255,255,255,0.75)",background:"rgba(255,255,255,0.6)",borderRadius:12,padding:"8px 10px",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>
+              <div style={{fontSize:12,color:T.textMuted}}>{prettyExpr(h.expr)}</div>
+              <div style={{fontSize:15,fontWeight:700,color:T.textPrimary}}>={fmtCalc(h.v)}</div>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+          {KEYS.flat().map(k => (
+            <button key={k} tabIndex={-1} onMouseDown={e=>e.preventDefault()} onClick={()=>press(k)} style={keyStyle(k)}
+              aria-label={k === "⌫" ? t("ลบทีละตัว","Backspace") : k === "AC" ? t("ล้าง","Clear") : undefined}>
+              {label[k] || k}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{fontSize:11,color:T.textMuted,textAlign:"center",marginTop:8}}>{t("พิมพ์จากคีย์บอร์ดได้ · 100+7% = 107 · Esc ปิด","Keyboard works · 100+7% = 107 · Esc to close")}</div>
+    </div>
+  );
+}
+
 function LangToggle({ dark = true }) {
   useLang();
   const on  = dark ? "#fff" : T.textPrimary;
@@ -3372,6 +3624,7 @@ function Shell({ role, color, project, onBack, onHome, onDept, children, syncedA
           <div style={{fontSize:11,letterSpacing:3,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",fontWeight:600}}>{labels[role]}</div>
           <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{project.name}</div>
         </div>
+        <CalcToggle/>
         <LangToggle/>
         <SyncBadge syncing={syncing} syncedAt={syncedAt}/>
         {project.area && (
