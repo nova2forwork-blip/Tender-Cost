@@ -338,3 +338,36 @@ export const restoreKvSnapshot = async (row) => {
     .upsert({ key: row.key, value: row.value, updated_at: new Date().toISOString() });
   if (error) throw error;
 };
+
+// ── เวอร์ชันที่แต่ละคนเปิดอยู่ (คีย์ tcs-seen-<user id> — ต้องรัน tender-cost-version.sql ก่อน) ──
+// บันทึกเฉพาะเมื่อเวอร์ชัน/บิลด์เปลี่ยน หรือบันทึกล่าสุดเกิน 6 ชม. (กันเขียนถี่จนประวัติบวม)
+// ถ้ายังไม่ได้รัน SQL สิทธิ์จะไม่ผ่าน → เงียบ ไม่กระทบการใช้งาน
+export const recordSeen = async (info) => {
+  try {
+    const { data } = await supabase.auth.getUser();
+    const uid = data?.user?.id;
+    if (!uid) return false;
+    const key = `tcs-seen-${uid}`;
+    const cur = await sg(key);
+    const fresh = cur && cur.build === info.build && cur.version === info.version && cur.name === info.name
+      && Date.now() - new Date(cur.at || 0).getTime() < 6 * 3600e3;
+    if (fresh) return true;
+    const { error } = await supabase.from("kv_store")
+      .upsert({ key, value: JSON.stringify({ ...info, at: new Date().toISOString() }), updated_at: new Date().toISOString() });
+    return !error;
+  } catch (e) {
+    console.warn("recordSeen error", e);
+    return false;
+  }
+};
+// อ่านทุกคน (หน้า Admin)
+export const loadSeen = async () => {
+  try {
+    const { data, error } = await supabase.from("kv_store").select("key, value, updated_at").like("key", "tcs-seen-%");
+    if (error) throw error;
+    return (data || []).map(r => { let v = r.value; try { v = typeof v === "string" ? JSON.parse(v) : v; } catch { v = {}; } return { key: r.key, ...(v || {}), updated_at: r.updated_at }; });
+  } catch (e) {
+    console.warn("loadSeen error", e);
+    return [];
+  }
+};
