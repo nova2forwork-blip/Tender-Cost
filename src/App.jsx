@@ -1,9 +1,9 @@
 // Tender Cost — ตัวหลักของแอป: โหลด/บันทึกข้อมูล, สลับหน้า, สิทธิ์ตามแผนก
 // ไฟล์ย่อยทั้งหมดต้องอยู่โฟลเดอร์เดียวกับไฟล์นี้: core.jsx excel.js ui.jsx home.jsx admin.jsx qs.jsx procurement.jsx accounting.jsx
 import { useCallback, useEffect, useRef, useState } from "react";
-import { sdOrThrow, sgOrThrow, ssMerge, ssOrThrow, supabase } from "./supabase.js";
+import { recordSeen, sdOrThrow, sgOrThrow, ssMerge, ssOrThrow, supabase } from "./supabase.js";
 import { clearSession, getSession, setSession } from "./auth.js";
-import { BOTTOM, FAB_GAP, FAB_SIZE, GLOBAL_CSS, T, UnsavedGuard, applyAccountList, fmt, inThai, leaveIfDirty, rollupAdditions, rollupTenders, setExtraRegistry, t, uiAlert, uiPrompt, useLang } from "./core.jsx";
+import { BOTTOM, FAB_GAP, FAB_SIZE, GLOBAL_CSS, T, appBuild, buildFromHtml, UnsavedGuard, applyAccountList, fmt, inThai, leaveIfDirty, rollupAdditions, rollupTenders, setExtraRegistry, t, uiAlert, uiPrompt, useLang } from "./core.jsx";
 import { buildTSV, exportAccountingExcel, exportProcurementExcel, exportQSExcel } from "./excel.js";
 import { CalcFab, CalcStore, CalculatorPopup, DialogHost, ErrorBoundary, Ico, Loader, ScrollTopFab, TableTopButton, effRate } from "./ui.jsx";
 import { HomeScreen, LoginScreen, RoleSelect } from "./home.jsx";
@@ -17,6 +17,23 @@ export default function App() {
   const [session,  setSessionState] = useState(null);   // โหลดแบบ async ด้านล่าง
   const [authReady, setAuthReady]   = useState(false);  // true เมื่อเช็ค session เสร็จ
   const [screen,   setScreen]   = useState("home");
+  // ── เวอร์ชันใหม่บนเซิร์ฟเวอร์: เช็กตอนเปิดแอป / ทุก 5 นาที / ตอนกลับมาที่แท็บ ─────────
+  // ถ้าไฟล์ JS บนเซิร์ฟเวอร์ (index-XXXX.js) ไม่ใช่ตัวที่เปิดอยู่ = มีการ deploy ใหม่ → แสดงแถบให้รีเฟรช
+  // ทุกคนจะได้ใช้เวอร์ชันเดียวกัน (เดิมแท็บที่เปิดค้างไว้ใช้โค้ดเก่าไปเรื่อย ๆ จนกว่าจะรีเฟรชเอง)
+  const [newBuild, setNewBuild] = useState("");
+  const [updateLater, setUpdateLater] = useState(false);
+  useEffect(() => {
+    const cur = appBuild().build;
+    if (!cur || cur === "dev") return;
+    let stop = false;
+    const fetchIndex = () => window.__fetchIndex ? window.__fetchIndex() : fetch(`/?_v=${Date.now()}`, { cache: "no-store" }).then(r => r.ok ? r.text() : "");   // __fetchIndex = ชุดทดสอบ
+    const check = async () => { try { const b = buildFromHtml(await fetchIndex()); if (!stop && b && b !== cur) { setNewBuild(b); setUpdateLater(false); } } catch { /* ออฟไลน์ — ลองใหม่รอบหน้า */ } };
+    const onVis = () => { if (document.visibilityState === "visible") check(); };
+    check();
+    const iv = setInterval(check, 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { stop = true; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
   const [projects, setProjects] = useState([]);
   const [accountsRev, setAccountsRev] = useState(0); // bump เมื่อรายการบัญชี (ACCOUNTS) ถูกแก้ → re-render ทั้งแอป
   const [activeId, setActiveId] = useState(null);
@@ -514,6 +531,18 @@ export default function App() {
   const activeProject = projects.find(p => p.id === activeId) || { name:"", area:"", panels:"" };
   const updateProject = (fields) => saveProjects(projects.map(p => p.id === activeId ? {...p,...fields} : p));
 
+  // บันทึกว่าผู้ใช้คนนี้เปิดเวอร์ชันไหนอยู่ (Admin → "เวอร์ชันที่ใช้") — เงียบถ้ายังไม่ได้รัน SQL สิทธิ์
+  useEffect(() => { if (session?.id) recordSeen({ name: session.name || "", role: session.role || "", ...appBuild() }); }, [session?.id]); // eslint-disable-line
+
+  const updateBanner = newBuild && !updateLater ? (
+    <div data-update-banner role="status" style={{position:"fixed",left:"50%",top:12,transform:"translateX(-50%)",zIndex:300,maxWidth:"94vw",
+      background:"#1e3a8a",color:"#fff",borderRadius:12,padding:"10px 14px",boxShadow:"0 10px 30px rgba(15,23,42,0.3)",fontSize:13,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+      <span style={{flex:1,minWidth:200}}>{t("มีเวอร์ชันใหม่ของแอป — รีเฟรชเพื่อใช้เวอร์ชันเดียวกับทุกคน","A new version is available — refresh so everyone uses the same version")} <span style={{opacity:0.7,fontVariantNumeric:"tabular-nums"}}>(build {newBuild})</span></span>
+      <button data-update-now onClick={() => leaveIfDirty(() => window.location.reload())} style={{background:"#fff",color:"#1e3a8a",border:"none",borderRadius:8,padding:"6px 14px",fontWeight:700,cursor:"pointer",fontSize:13}}>{t("รีเฟรชเลย","Refresh now")}</button>
+      <button onClick={() => setUpdateLater(true)} style={{background:"none",color:"#c7d2fe",border:"none",cursor:"pointer",fontSize:12}}>{t("ภายหลัง","Later")}</button>
+    </div>
+  ) : null;
+
   if (!authReady) {
     return (
       <>
@@ -528,6 +557,7 @@ export default function App() {
       <>
         <style>{GLOBAL_CSS}</style>
         <LoginScreen onLogin={handleLogin} />
+        {updateBanner}
         <DialogHost />
       </>
     );
@@ -570,6 +600,7 @@ export default function App() {
           background:"rgba(37,99,235,0.06)",border:"none",zIndex:97,pointerEvents:"none"}}/>
       )}
       {session && <><TableTopButton /><ScrollTopFab /><CalcFab /><CalculatorPopup selSum={selStats ? selStats.sum : null} /></>}
+      {updateBanner}
       <DialogHost />
       {selStats && (
         <div style={{position:"fixed",right:FAB_GAP + FAB_SIZE + 12,bottom:BOTTOM(20),zIndex:96,maxWidth:`calc(100vw - ${FAB_GAP + FAB_SIZE + 24}px)`,display:"flex",alignItems:"center",gap:0,
