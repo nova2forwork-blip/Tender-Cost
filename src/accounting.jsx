@@ -341,7 +341,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   const payRemainOf = (l) => Math.max(0, (l.amount||0) - (l.paidAmount||0));
   const payMethodOf = (l) => l.isCash ? t("เงินสด","Cash") : t(`เครดิต ${l.term} วัน`, `Credit ${l.term}d`);
   const payStatusOf = (l) => !l.received
-    ? [t("ของยังไม่เข้า (ตามแผน)","Goods not in yet (plan)"), T.textSecondary, "#f1f5f9"]
+    ? (l.short ? [t("ยอดรับยังไม่ครบ","Received less than ordered"), T.amber, T.amberBg] : [t("ของยังไม่เข้า (ตามแผน)","Goods not in yet (plan)"), T.textSecondary, "#f1f5f9"])
     : (l.payDate && l.payDate < payToday ? [t("เลยกำหนด","Overdue"), T.red, T.redBg] : [t("รอจ่าย","To pay"), T.amber, T.amberBg]);
 
   const pieData = PO_STATUS.map(s=>({name:poStatusLabel(s),value:poEntries.filter(p=>p.status===s).reduce((sum,p)=>sum+poTotal(p),0),color:STATUS_CLR[s]})).filter(d=>d.value>0);
