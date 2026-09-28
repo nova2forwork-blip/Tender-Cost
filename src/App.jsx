@@ -831,7 +831,7 @@ const STATUS_PILL = [
   [/(completed|complete|เสร็จ|จ่ายแล้ว|รับของแล้ว|รับครบ|ปิดงาน|ปิด|อนุมัติ|approved|done|paid)/i, { bg:"D1FAE5", fg:"065F46" }],
   [/(in\s*progress|progress|กำลัง|ระหว่าง|บางส่วน|partial|สั่งซื้อ|สั่ง|รอรับ|รอจ่าย|pending|รอ)/i,        { bg:"FEF3C7", fg:"92400E" }],
   [/(ยังไม่กำหนด|unset|ไม่ระบุ)/i,                                                                  { bg:"E5E7EB", fg:"374151" }], // ยังไม่ตั้งค่า = เทา (ไม่ใช่แดงแบบเกินกำหนด)
-  [/(to\s*do|todo|ร่าง|ยังไม่|ค้างจ่าย|ค้าง|เกินกำหนด|overdue|ยกเลิก|cancel|reject)/i,               { bg:"FEE2E2", fg:"991B1B" }],
+  [/(to\s*do|todo|ร่าง|ยังไม่|ค้างจ่าย|ค้าง|เกินกำหนด|เกินงบ|ไม่มีงบ|overdue|ยกเลิก|cancel|reject)/i,               { bg:"FEE2E2", fg:"991B1B" }],
 ];
 function statusPill(val) {
   const s = String(val == null ? "" : val);
@@ -1683,7 +1683,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     if (budget<=0 && committed<=0) return;
     const variance = budget - committed;
     const pctUsed  = budget>0 ? committed/budget : (committed>0 ? 9.99 : 0);
-    const status   = committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
+    const status   = committed>0 && budget<=0 ? "ไม่มีงบ" : committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
     rows1.push(U
       ? [a.code, a.name, a.group, budget, toUsd(budget,rate), committed, toUsd(committed,rate), variance, pctUsed, status]
       : [a.code, a.name, a.group, budget, committed, variance, pctUsed, status]);
@@ -8314,20 +8314,23 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                 )}
                 {displayAccountData.map((a,i)=>{
                   const variance = a.budget - a.committed;
+                  // มี PO แต่ไม่มีงบ → ส่วนต่างแสดงเป็นลบเต็มจำนวน (เดิมขึ้นแค่คำว่า "ไม่มีงบ" ทำให้บวกคอลัมน์แล้วไม่เท่าแถวรวม)
+                  const noBudget = a.budget<=0 && a.committed>0;
                   return (
-                    <tr key={a.code} style={{background:a.over?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
+                    <tr key={a.code} data-acc-row={a.code} style={{background:(a.over||noBudget)?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
                       <td style={{padding:"10px 16px",color:T.blue,fontVariantNumeric:"tabular-nums",fontSize:13,fontWeight:500}}>{a.code}</td>
                       <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
                       <td style={{padding:"10px 16px"}}>
                         {(i===0 || displayAccountData[i-1]?.group!==a.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>}
                       </td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:a.over?T.red:T.amber,fontWeight:a.over?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:a.budget<=0&&a.committed>0?T.textMuted:variance<0?T.red:T.textSecondary,fontWeight:a.budget<=0&&a.committed>0?500:variance<0?650:500}}>
-                        {a.over ? <span data-word="over" style={{background:T.redBg,color:T.red,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t("เกินงบ","Over")}</span>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:(a.over||noBudget)?T.red:T.amber,fontWeight:(a.over||noBudget)?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?650:500}}>
+                        {noBudget ? <span data-word="nobudget" title={t("มี PO แต่ QS ยังไม่ได้ลงงบของรหัสนี้ — ทั้งยอดนับเป็นส่วนเกิน","Has POs but no QS budget for this code — the whole amount counts as over")} style={{background:T.redBg,color:T.red,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t("ไม่มีงบ","No budget")}</span>
+                          : a.over ? <span data-word="over" style={{background:T.redBg,color:T.red,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t("เกินงบ","Over")}</span>
                           : (a.budget>0 && a.committed/a.budget>=0.8) ? <span data-word="near" style={{background:T.amberBg,color:T.amber,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t(`ใช้ ${Math.round(a.committed/a.budget*100)}%`,`${Math.round(a.committed/a.budget*100)}% used`)}</span> : null}
-                        {a.budget<=0&&a.committed>0 ? t("ไม่มีงบ","No budget") : (a.budget>0||a.committed>0?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—")}
-                        {(a.budget>0||a.committed>0)&&!(a.budget<=0&&a.committed>0)&&usdLine(Math.abs(variance), usdRate)}
+                        {(a.budget>0||a.committed>0)?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—"}
+                        {(a.budget>0||a.committed>0)&&usdLine(Math.abs(variance), usdRate)}
                       </td>
                     </tr>
                   );
