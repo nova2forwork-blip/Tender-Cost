@@ -398,15 +398,36 @@ const poPayLines = (p) => {
         out.push({ itemIdx, code: it.code||"", incoming, incomingType: r.actualDate?"จริง":(r.planDate?"แผน":""),
           payDate: dueOf(incoming), amount, received, paid, paidAmount: paid ? amount : 0 });
       });
-    } else if (itemAmt > 0) {
-      // ยอดงวดไม่ตรง (หรือไม่มีงวด) → ยุบเหลือบรรทัดเดียว ใช้ยอด item เป็นหลัก
-      // จ่ายบางส่วน: เก็บ paidAmount ไว้ให้ยอด "คงเหลือต้องจ่าย" หักออกถูกต้อง
+    } else if (itemAmt > 0 && manualPaid) {
+      // ตั้ง Paid เอง = จ่ายครบทั้งรายการ → แถวเดียว
       const actualDates = rounds.map(r=>r.actualDate).filter(Boolean).sort();
       const planDates   = rounds.map(r=>r.planDate).filter(Boolean).sort();
       const incoming = actualDates[0] || planDates[0] || "";
-      const paidAmt  = manualPaid ? itemAmt : Math.min(rounds.filter(r=>roundReceived(r) && roundPaid(P,r)).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0), itemAmt);
       out.push({ itemIdx, code: it.code||"", incoming, incomingType: actualDates.length?"จริง":(planDates.length?"แผน":""),
-        payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: paidAmt >= itemAmt-0.5, paidAmount: paidAmt });
+        payDate: dueOf(incoming), amount: itemAmt, received: rounds.some(roundReceived), paid: true, paidAmount: itemAmt });
+    } else if (itemAmt > 0) {
+      // ยอดงวดรวมไม่ตรงกับยอดรายการ (ส่วนใหญ่เพราะยอดรับของยังไม่ครบ หรือมีงวดซ้ำยอดเต็ม)
+      // (1) งวดที่ "รับของแล้ว" → แถวละงวด ตามวันรับจริง (จ่ายแล้ว / รอจ่าย) รวมกันไม่เกินยอดรายการ (กันนับซ้ำ)
+      // (2) ส่วนที่ยังไม่ได้รับของ → แถว "รอรับของ" แยก ไม่นับเป็นเกินกำหนดจ่าย
+      // (เดิมยุบทั้งก้อนเป็นแถวเดียวตามวันรับครั้งแรก → ของที่ยังไม่มาขึ้น "เกินกำหนดจ่าย" เต็มยอด)
+      let left = itemAmt;
+      const recv = rounds.filter(roundReceived).sort((a,b)=>a.actualDate.localeCompare(b.actualDate));
+      recv.forEach(r => {
+        const amount = Math.round(Math.min(parseFloat(r.actualAmount)||0, left)*100)/100;
+        if (amount <= 0.005) return;
+        left -= amount;
+        const paid = roundPaid(P, r);
+        out.push({ itemIdx, code: it.code||"", incoming: r.actualDate, incomingType: "จริง",
+          payDate: dueOf(r.actualDate), amount, received: true, paid, paidAmount: paid ? amount : 0 });
+      });
+      left = Math.round(left*100)/100;
+      if (left > 0.005) {
+        const next = rounds.filter(r=>!roundReceived(r)).map(r=>r.actualDate||r.planDate).filter(Boolean).sort();
+        const incoming = next[0] || "";
+        out.push({ itemIdx, code: it.code||"", incoming, incomingType: incoming ? "แผน" : "",
+          payDate: dueOf(incoming), amount: left, received: false, paid: false, paidAmount: 0,
+          short: recv.length > 0 });   // short = รับของมาแล้วบางส่วน แต่ยอดรับรวมยังไม่ถึงยอดรายการ
+      }
     }
   });
   const today = todayStr();
@@ -456,6 +477,109 @@ const poStageLabel = (k) => ({
 // only an admin can still edit or delete it, so the paper trail for a closed
 // PO can't quietly change after the fact.
 const isPOLocked = (p) => incomingStatus(p)==="received" && paymentStatus(p)==="paid";
+
+// ─── ตรวจข้อมูล PO ที่น่าสงสัย (เตือนเท่านั้น ไม่บังคับ) ───────────────────────
+// มาจากการตรวจข้อมูลจริง (Barrington B, 28/9/69): PO เลขซ้ำ · ยอดเดียวกันลง 2 รหัส · ปีผิด (2025 แทน 2026) ·
+// วันเปิด PO ไม่ตรงเดือนในเลข PO · ยอดรับของไม่ครบแต่ไม่มีงวดรอ · ทศนิยมเกิน 2 ตำแหน่ง · ชื่อ Supplier สะกดหลายแบบ
+const normPoNo = (s) => String(s || "").trim().toLowerCase().replace(/[\s.,;:]+$/, "");
+// วรรณยุกต์/สระลอยที่ไม่มีพยัญชนะไทยนำหน้า (เช่น "๋Jame") = พิมพ์ติดมา → ตัดทิ้งตอนเทียบ
+const THAI_ORPHAN_MARKS = /(^|[^\u0E01-\u0E4E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g;
+const normSupplier = (s) => String(s || "").normalize("NFKC").replace(THAI_ORPHAN_MARKS, "$1").toLowerCase()
+  .replace(/\b(co|ltd|limited|company|inc|corp|plc)\b\.?/g, "").replace(/บริษัท|จำกัด|\(มหาชน\)/g, "")
+  .replace(/[^a-z0-9\u0E01-\u0E4E]/g, "");
+const editDistance = (a, b) => {
+  if (Math.abs(a.length - b.length) > 2) return 3;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+};
+const suppliersLookAlike = (a, b) => {
+  const x = normSupplier(a), y = normSupplier(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (Math.min(x.length, y.length) < 4) return false;
+  if (x.startsWith(y) || y.startsWith(x)) return true;
+  return editDistance(x, y) <= (Math.max(x.length, y.length) >= 8 ? 2 : 1);
+};
+const hasOrphanMarks = (s) => { THAI_ORPHAN_MARKS.lastIndex = 0; const r = THAI_ORPHAN_MARKS.test(String(s || "")); THAI_ORPHAN_MARKS.lastIndex = 0; return r; };
+// จำนวน PO ต่อชื่อ Supplier (สะกดตามที่กรอก)
+const supplierCounts = (pos = []) => { const c = {}; pos.forEach(p => { const n = (poSupplier(p).name || "").trim(); if (n) c[n] = (c[n] || 0) + 1; }); return c; };
+// ชื่อที่ "น่าจะหมายถึง" — คืนชื่อที่ใช้บ่อยกว่าชื่อที่พิมพ์ (ถ้าไม่มีคืน null)
+const similarSupplier = (name, counts = {}) => {
+  const raw = String(name || "").trim(); if (!raw) return null;
+  const mine = counts[raw] || 0;
+  let best = null;
+  Object.entries(counts).forEach(([k, n]) => {
+    if (k === raw || hasOrphanMarks(k) || !suppliersLookAlike(raw, k)) return;
+    if (n > mine || (n === mine && k < raw)) { if (!best || n > best.count) best = { name: k, count: n }; }
+  });
+  return best;
+};
+const moreThan2dp = (v) => { const s = String(v ?? "").trim(); const m = s.match(/\.(\d+)$/); return !!m && m[1].replace(/0+$/, "").length > 2; };
+const monthsBetween = (a, b) => (parseInt(b.slice(0, 4), 10) * 12 + parseInt(b.slice(5, 7), 10)) - (parseInt(a.slice(0, 4), 10) * 12 + parseInt(a.slice(5, 7), 10));
+// วันที่ในงวด "ห่างจากวันเปิด PO ผิดปกติ" — ก่อนวันเปิดเกิน 60 วัน หรือหลังเกิน 18 เดือน (มักพิมพ์ปีผิด)
+const FAR_BEFORE = 60, FAR_AFTER = 540;
+const farFromPODate = (poDate, d) => {
+  if (!poDate || !d || !/^\d{4}-\d{2}-\d{2}/.test(poDate) || !/^\d{4}-\d{2}-\d{2}/.test(d)) return false;
+  return d < addDays(poDate, -FAR_BEFORE) || d > addDays(poDate, FAR_AFTER);
+};
+// บริบทของทั้งโครงการ (สร้างครั้งเดียว) — เลข PO → id ที่ใช้ · จำนวนต่อชื่อ Supplier
+const poDataContext = (pos = []) => {
+  const byNo = {};
+  pos.forEach(p => { const k = normPoNo(poSupplier(p).poNumber); if (k) (byNo[k] = byNo[k] || []).push(p.id); });
+  return { byNo, counts: supplierCounts(pos), today: todayStr() };
+};
+// รายการเรื่องที่ควรตรวจของ PO หนึ่งใบ → [{ kind, msg }]
+const poDataIssues = (p, ctx = poDataContext([])) => {
+  const P = migratePO(p), out = [];
+  const add = (kind, th, en) => out.push({ kind, msg: t(th, en) });
+  const no = (poSupplier(P).poNumber || "").trim();
+  const others = (ctx.byNo[normPoNo(no)] || []).filter(id => id !== P.id);
+  if (no && others.length) add("dup-no", `เลข PO ${no} ซ้ำกับอีก ${others.length} ใบ`, `PO no. ${no} is also used by ${others.length} other PO(s)`);
+  if (/[.,;:]$/.test(no)) add("po-no-punct", `เลข PO "${no}" มีเครื่องหมายติดท้าย`, `PO no. "${no}" ends with punctuation`);
+  const m = no.match(/^(\d{2})(\d{2})-\d+$/);
+  if (m && P.date && +m[2] >= 1 && +m[2] <= 12) {
+    const noMonth = `20${m[1]}-${m[2]}`;
+    if (Math.abs(monthsBetween(noMonth, P.date.slice(0, 7))) >= 3)
+      add("po-no-month", `เลข PO ขึ้นต้น ${m[1]}${m[2]} (${monthShortLabel(noMonth)}) แต่วันเปิด PO เป็น ${monthShortLabel(P.date.slice(0, 7))} — วันเปิด PO ถูกไหม`,
+        `PO no. starts ${m[1]}${m[2]} (${monthShortLabel(noMonth)}) but the PO date is ${monthShortLabel(P.date.slice(0, 7))} — is the PO date right?`);
+  }
+  const items = poItems(P);
+  const amtKey = (it) => Math.round((parseFloat(it.amount) || 0) * 100);
+  items.forEach((it, i) => items.forEach((jt, j) => {
+    if (j <= i || amtKey(it) < 100000 || amtKey(it) !== amtKey(jt)) return;
+    add("same-amount", `รายการ ${it.code || "?"} และ ${jt.code || "?"} ยอดเท่ากัน ${fmt(parseFloat(it.amount))} — ลงซ้ำหรือเปล่า`,
+      `Lines ${it.code || "?"} and ${jt.code || "?"} have the same amount ${fmt(parseFloat(it.amount))} — entered twice?`);
+  }));
+  const far = [];
+  items.forEach(it => (it.rounds || []).forEach(r => [r.planDate, r.actualDate].forEach(d => { if (farFromPODate(P.date, d)) far.push(`${it.code || "?"} ${d}`); })));
+  if (far.length) add("far-date", `วันที่ห่างจากวันเปิด PO (${P.date}) ผิดปกติ: ${[...new Set(far)].join(", ")} — ปีหรือเดือนถูกไหม`,
+    `Date far from the PO date (${P.date}): ${[...new Set(far)].join(", ")} — is the year/month right?`);
+  const today = ctx.today || todayStr();
+  items.forEach(it => {
+    const rs = it.rounds || [];
+    const noAmt = rs.filter(r => r.actualDate && r.actualDate <= today && !((parseFloat(r.actualAmount) || 0) > 0));
+    if (noAmt.length) add("no-amount", `${it.code || "?"}: มีวันรับของ ${noAmt.map(r => r.actualDate).join(", ")} แต่ยังไม่กรอกยอดรับ`,
+      `${it.code || "?"}: received on ${noAmt.map(r => r.actualDate).join(", ")} but no amount entered`);
+    const ordered = itemOrdered(it), recv = itemReceived(it);
+    const waiting = rs.filter(r => !roundReceived(r) && (r.planDate || r.actualDate));
+    const lastRecv = rs.filter(roundReceived).map(r => r.actualDate).sort().pop();
+    if (recv > 0 && recv < ordered - 0.5 && !waiting.length && lastRecv && lastRecv < addDays(today, -30))
+      add("short", `${it.code || "?"}: รับของแล้ว ${fmt(recv)} จาก ${fmt(ordered)} — ขาด ${fmt(ordered - recv)} และไม่มีงวดที่รออยู่ (ลืมกรอกยอดรับ?)`,
+        `${it.code || "?"}: received ${fmt(recv)} of ${fmt(ordered)} — ${fmt(ordered - recv)} short with no round pending (amount not entered?)`);
+  });
+  if (items.some(it => moreThan2dp(it.amount) || (it.rounds || []).some(r => moreThan2dp(r.actualAmount) || moreThan2dp(r.planAmount))))
+    add("decimals", "มียอดทศนิยมเกิน 2 ตำแหน่ง — ปัดให้ตรงกับใบแจ้งหนี้", "An amount has more than 2 decimals — round it to match the invoice");
+  if (hasOrphanMarks(poSupplier(P).name)) add("supplier-mark", `ชื่อ Supplier "${(poSupplier(P).name || "").trim()}" มีวรรณยุกต์/สระติดมาข้างหน้า`, `Supplier "${(poSupplier(P).name || "").trim()}" has a stray Thai mark`);
+  const sim = similarSupplier(poSupplier(P).name, ctx.counts);
+  if (sim) add("supplier", `ชื่อ Supplier "${(poSupplier(P).name || "").trim()}" ใกล้กับ "${sim.name}" (ใช้ใน ${sim.count} ใบ) — ใช้ชื่อเดียวกันไหม`,
+    `Supplier "${(poSupplier(P).name || "").trim()}" looks like "${sim.name}" (used on ${sim.count} POs) — same company?`);
+  return out;
+};
 const canEditPO  = (p, session) => !isPOLocked(p) || session?.role==="admin";
 
 const deliveryStatus = (d) => {
@@ -828,4 +952,4 @@ const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [],
   return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length, late, overCodes };
 };
 
-export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
+export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
