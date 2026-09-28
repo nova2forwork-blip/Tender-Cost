@@ -1,9 +1,9 @@
 // Tender Cost — แผนกจัดซื้อ (รายการ PO, ฟอร์ม PO, แผนของเข้า, ติดตาม)
 import { useEffect, useState } from "react";
-import { ACCOUNTS, DEFAULT_CREDIT_DAYS, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, incLabel, incomingStatus, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
+import { ACCOUNTS, DEFAULT_CREDIT_DAYS, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
-function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
+function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
   const [confirmDel, setConfirmDel] = useState(false); // ยืนยันลบในแอป (กันกรณี window.confirm ถูกบล็อกใน webview)
@@ -111,6 +111,13 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
           </div>
         )}
 
+        {issues.length > 0 && (
+          <div data-po-issues role="status" style={{background:T.amberBg,border:"1px solid #fde68a",borderRadius:10,padding:"8px 12px",margin:"8px 0 2px",fontSize:12,color:"#92400e",lineHeight:1.5}}>
+            <div style={{fontWeight:650,display:"flex",alignItems:"center",gap:6}}><Ico name="alert" size={14} />{t("ข้อมูลที่ควรตรวจ","Worth checking")}</div>
+            {issues.map((x,i) => <div key={i} data-issue-kind={x.kind}>• {x.msg}</div>)}
+          </div>
+        )}
+
         {/* Status is a live dropdown here too — the most natural place to
             update it right after reviewing everything else on the PO. */}
         <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap",alignItems:"center"}}>
@@ -190,6 +197,7 @@ function PODetailModal({ po: rawPo, onClose, onEdit, onDelete, onStatusChange, o
                           <span style={{fontSize:12,color:T.textSecondary}}>{t("วันของเข้าจริง","Actual date")}</span>
                           <DateInput value={r.actualDate} disabled={locked}
                             onChange={e=>updateRound(it.id,r.id,"actualDate",e.target.value)}/>
+                          {farFromPODate(po.date, r.actualDate) && <span data-date-warn style={{fontSize:11,color:T.red}}>{t(`ห่างจากวันเปิด PO (${fmtDate(po.date)}) มาก — ปีถูกไหม`,`Far from the PO date (${fmtDate(po.date)}) — right year?`)}</span>}
                         </label>
                       </div>
                       <div style={{marginTop:6,fontSize:11,color:T.textSecondary}}>
@@ -619,6 +627,22 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
   const formTotal = form.items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
 
+  // ─── ตรวจข้อมูลที่น่าสงสัย (เตือน ไม่บังคับ) ───────────────────────────────
+  // ทั้งโครงการ: ใช้กับชิป "ข้อมูลที่ควรตรวจ" และกล่องในหน้ารายละเอียด PO
+  const dataCtx = poDataContext(poEntries);
+  const dataIssuesOf = (p) => poDataIssues(p, dataCtx);
+  const dataIssueCount = poEntries.filter(p => dataIssuesOf(p).length > 0).length;
+  // ในฟอร์ม: เทียบกับ PO อื่น (ไม่รวมใบที่กำลังแก้)
+  const otherPOs = poEntries.filter(p => editingPlan || p.id !== editId);
+  const formCounts = supplierCounts(otherPOs);
+  const supplierOptions = Object.entries(supplierCounts(poEntries)).sort((a,b)=>b[1]-a[1]).map(([n])=>n).filter(n => !/^[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]/.test(n));
+  const supSuggest = similarSupplier(form.supplier.name, formCounts);
+  const dupNoPOs = (() => { const k = (form.supplier.poNumber||"").trim().toLowerCase().replace(/[\s.,;:]+$/,""); return k ? otherPOs.filter(p => poNumbersLabel(p) !== "—" && poNumbersLabel(p).trim().toLowerCase().replace(/[\s.,;:]+$/,"") === k) : []; })();
+  const FORM_KINDS = ["po-no-punct","po-no-month","same-amount","far-date","decimals","supplier-mark"];
+  const formIssues = poDataIssues({ id:"__form", date: form.date, status: form.status, supplier: form.supplier,
+    // ส่ง items ทั้งหมด (บรรทัดว่างไม่ทำให้เตือน) — ถ้า items ว่าง migratePO จะมองเป็น PO แบบเก่า
+    items: form.items }, poDataContext(otherPOs)).filter(x => FORM_KINDS.includes(x.kind));
+
   const submit = async () => {
     setPoNoTouched(true);
     // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
@@ -665,6 +689,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     if (overItem) { uiAlert(t(`⚠ ${overItem.code}: ยอดของเข้าจริงรวมทุกงวด (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) เกินยอดสั่ง ${fmt(overItem.amount)} — แก้ให้ไม่เกินก่อนบันทึก`,`⚠ ${overItem.code}: total received across rounds (${fmt(overItem.rounds.reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0))}) exceeds ordered ${fmt(overItem.amount)} — fix before saving`)); return; }
     // PO จริง (ไม่ใช่แผน) ต้องมีเลข PO เสมอ
     if (!form.isPlan && !(form.supplier.poNumber||"").trim()) { uiAlert(t("PO จริงต้องกรอก \"เลข PO\" ก่อนบันทึก","A real PO needs a PO number before saving")); return; }
+    // ข้อมูลน่าสงสัย → ถามก่อน 1 ครั้ง (บันทึกต่อได้)
+    const warnList = [
+      ...(dupNoPOs.length ? [t(`เลข PO ${form.supplier.poNumber.trim()} มีอยู่แล้ว (${dupNoPOs.length} ใบ)`, `PO no. ${form.supplier.poNumber.trim()} already exists (${dupNoPOs.length})`)] : []),
+      ...(supSuggest ? [t(`ชื่อ Supplier ใกล้กับ "${supSuggest.name}" ที่ใช้อยู่แล้ว`, `Supplier looks like existing "${supSuggest.name}"`)] : []),
+      ...formIssues.map(x => x.msg),
+    ];
+    if (warnList.length && !(await uiConfirm(t("ตรวจก่อนบันทึก:\n\n","Please check before saving:\n\n") + warnList.map(w => "• " + w).join("\n"),
+      { title: t("ข้อมูลอาจผิด","Data may be wrong"), okLabel: t("บันทึกแบบนี้","Save as is"), cancelLabel: t("กลับไปแก้","Go back and fix") }))) return;
     const payload = {
       date: form.date, status: form.status, notes: form.notes || "",
       supplier: { name: form.supplier.name.trim(), poNumber: (form.supplier.poNumber||"").trim() },
@@ -798,7 +830,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 
   const issueOf = (p) => ({ inc: incomingStatus(p)==="late", pay: paymentStatus(p)==="late" && p.status!=="Paid" });
   const matchesIssue = (p) => { if (!issueFilter) return true; const k = issueOf(p);
-    return issueFilter==="late-incoming" ? k.inc : issueFilter==="late-payment" ? k.pay : (k.inc || k.pay); };
+    return issueFilter==="data" ? dataIssuesOf(p).length > 0 : issueFilter==="late-incoming" ? k.inc : issueFilter==="late-payment" ? k.pay : (k.inc || k.pay); };
   const showIssues = (kind) => {
     const next = issueFilter === kind ? null : kind;      // กดซ้ำ = ยกเลิกตัวกรอง
     setIssueFilter(next); setFilter("All");
@@ -877,7 +909,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
         </div>
 
         {/* เรื่องที่ต้องรีบดู = ชิปนับจำนวน (เดิมเป็นแถบแดงเต็มความกว้าง) — กดแล้วไปดูเฉพาะรายการที่มีปัญหา */}
-        {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0) && (
+        {view!=="add" && (lateIncomingCount>0 || latePaymentCount>0 || dataIssueCount>0) && (
           <div role="group" aria-label={t("เรื่องที่ต้องรีบดู","Needs attention")} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:16}}>
             <span style={{fontSize:13,color:T.textSecondary,fontWeight:600,display:"inline-flex",alignItems:"center",gap:6}}><Ico name="alert" size={16} color={T.red} />{t("ต้องรีบดู","Needs attention")}</span>
             {lateIncomingCount>0 && (
@@ -888,6 +920,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             {latePaymentCount>0 && (
               <button className="att-chip" data-attention="late-payment" aria-pressed={issueFilter==="late-payment"} onClick={()=>showIssues("late-payment")}>
                 <b>{latePaymentCount}</b> {t("จ่ายเงินเกินกำหนด","overdue payments")}
+              </button>
+            )}
+            {dataIssueCount>0 && (
+              <button className="att-chip" data-attention="data-check" aria-pressed={issueFilter==="data"} onClick={()=>showIssues("data")}
+                title={t("PO ที่ข้อมูลอาจผิด: เลข PO ซ้ำ · ยอดซ้ำ · วันที่ผิดปี · ยอดรับไม่ครบ · ชื่อ Supplier สะกดต่าง","POs whose data may be wrong: duplicate no. · same amount · wrong year · short received · supplier spelling")}>
+                <b>{dataIssueCount}</b> {t("ข้อมูลที่ควรตรวจ","to check")}
               </button>
             )}
           </div>
@@ -927,7 +965,14 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               {/* Supplier — exactly one vendor per PO. */}
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>Supplier <span style={{color:T.textMuted,fontWeight:400}}>({t("ไม่บังคับ","optional")})</span></span>
-                <input placeholder={t("ชื่อ Supplier","Supplier name")} value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base"/>
+                <input placeholder={t("ชื่อ Supplier","Supplier name")} value={form.supplier.name} onChange={e=>updateSupplierField("name",e.target.value)} className="input-base" list="po-supplier-list" autoComplete="off"/>
+                <datalist id="po-supplier-list">{supplierOptions.map(n => <option key={n} value={n} />)}</datalist>
+                {supSuggest && (
+                  <span data-sup-suggest style={{fontSize:12,color:"#92400e",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    {t(`ใกล้กับ "${supSuggest.name}" (ใช้ใน ${supSuggest.count} ใบ)`,`Looks like "${supSuggest.name}" (on ${supSuggest.count} POs)`)}
+                    <button type="button" className="btn-ghost" onClick={e=>{ e.preventDefault(); updateSupplierField("name", supSuggest.name); }} style={{fontSize:12,padding:"2px 10px",minHeight:28}}>{t("ใช้ชื่อนี้","Use this name")}</button>
+                  </span>
+                )}
               </label>
               <label style={{display:"flex",flexDirection:"column",gap:6}}>
                 <span style={{fontSize:12,color:T.textSecondary,fontWeight:500}}>{t("เลข PO","PO no.")} {form.isPlan ? <span style={{color:T.textMuted,fontWeight:400}}>({t("ไม่บังคับ","optional")})</span> : <span style={{color:T.red}}>*</span>}</span>
@@ -936,6 +981,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   aria-invalid={poNoTouched && !form.isPlan && !(form.supplier.poNumber||"").trim() ? true : undefined}
                   style={poNoTouched && !form.isPlan && !(form.supplier.poNumber||"").trim() ? {borderColor:T.red, background:T.redBg} : undefined}/>
                 {poNoTouched && !form.isPlan && !(form.supplier.poNumber||"").trim() && <span role="alert" data-po-error style={{fontSize:12,color:T.red}}>{t("กรอกเลข PO ก่อนบันทึก","Enter the PO number before saving")}</span>}
+                {dupNoPOs.length > 0 && (
+                  <span data-po-warn="dup-no" style={{fontSize:12,color:"#92400e"}}>
+                    {t("เลข PO นี้มีอยู่แล้ว","This PO no. already exists")}: {dupNoPOs.slice(0,3).map(p => `${poSupplierName(p)} · ฿${fmt(poTotal(p))} · ${fmtDate(p.date)}`).join(" / ")}
+                  </span>
+                )}
               </label>
 
               {/* Account-code line items — each carries its own store amount and
@@ -1040,6 +1090,12 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                 <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} className="input-base" style={{resize:"vertical"}}/>
               </label>
             </div>
+            {formIssues.length > 0 && (
+              <div data-form-warnings role="status" style={{marginTop:16,background:T.amberBg,border:"1px solid #fde68a",borderRadius:10,padding:"10px 12px",fontSize:12,color:"#92400e",lineHeight:1.5}}>
+                <div style={{fontWeight:650,marginBottom:4,display:"flex",alignItems:"center",gap:6}}><Ico name="alert" size={14} />{t("ตรวจก่อนบันทึก","Check before saving")}</div>
+                {formIssues.map((x,i) => <div key={i} data-warn-kind={x.kind}>• {x.msg}</div>)}
+              </div>
+            )}
             {/* เว้นที่ด้านล่างให้พ้นแถบ "ย้อนกลับ/ทำซ้ำ" ที่ลอยมุมซ้ายล่าง ไม่ให้ทับปุ่ม */}
             <div style={{display:"flex",gap:10,marginTop:20,marginBottom:76,flexWrap:"wrap",alignItems:"center"}}>
               <button onClick={submit} className="btn-primary">{editingPlan && !form.isPlan ? t("แปลงเป็น PO จริง","Convert to real PO") : form.isPlan ? t("บันทึกแผน","Save plan") : (editId?t("บันทึก","Save"):t("เพิ่ม PO","Add PO"))}</button>
@@ -1197,7 +1253,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             {issueFilter && (
               <div data-issue-bar role="status" style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:T.redBg,border:"1px solid #fecaca",borderRadius:10,padding:"8px 12px",marginBottom:12,fontSize:13,color:T.red}}>
                 <Ico name="filter" size={15} />
-                <span style={{fontWeight:600}}>{t("กำลังแสดงเฉพาะ","Showing only")}: {issueFilter==="late-incoming" ? t("ของเข้าล่าช้า","late incoming") : issueFilter==="late-payment" ? t("จ่ายเงินเกินกำหนด","overdue payments") : t("PO ที่มีปัญหา (ของเข้าล่าช้า / จ่ายเกินกำหนด)","POs with problems (late incoming / overdue payment)")}</span>
+                <span style={{fontWeight:600}}>{t("กำลังแสดงเฉพาะ","Showing only")}: {issueFilter==="data" ? t("PO ที่ข้อมูลควรตรวจ (เปิดดูรายละเอียดได้ในแต่ละใบ)","POs to check (open each one for details)") : issueFilter==="late-incoming" ? t("ของเข้าล่าช้า","late incoming") : issueFilter==="late-payment" ? t("จ่ายเงินเกินกำหนด","overdue payments") : t("PO ที่มีปัญหา (ของเข้าล่าช้า / จ่ายเกินกำหนด)","POs with problems (late incoming / overdue payment)")}</span>
                 <span style={{color:T.textSecondary}}>· {filtered.length} {t("ใบ","POs")}</span>
                 <button className="btn-ghost" onClick={()=>setIssueFilter(null)} style={{marginLeft:"auto",fontSize:12,padding:"4px 10px"}}>{t("แสดงทั้งหมด","Show all")}</button>
               </div>
@@ -1376,7 +1432,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </>
         )}
       </div>
-      <PODetailModal key={detailPO?.id || "none"} po={detailPO} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
+      <PODetailModal key={detailPO?.id || "none"} po={detailPO} issues={detailPO ? dataIssuesOf(detailPO) : []} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
     </Shell>
   );
 }
