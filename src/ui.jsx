@@ -1,7 +1,7 @@
 // Tender Cost — ชิ้นส่วนหน้าจอที่ใช้ร่วมกัน (แถบหัว, ปุ่ม, การ์ด, กล่องข้อความ, เครื่องคิดเลข, ช่องกรอกเงิน/วันที่)
 import { Component, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ROLE_LABELS } from "./auth.js";
-import { BNAV_H, BOTTOM, DialogStore, codeText, FAB_GAP, FAB_SIZE, GROUPS, PO_STATUS, STATUS_BG, STATUS_CLR, T, _LANG, accountOf, bnavH, fmt, fmt0, poStatusLabel, t, toggleLang, uiLocale, useLang } from "./core.jsx";
+import { BNAV_H, BOTTOM, DialogStore, appBuild, codeText, FAB_GAP, FAB_SIZE, GROUPS, PO_STATUS, STATUS_BG, STATUS_CLR, T, _LANG, accountOf, bnavH, fmt, fmt0, poStatusLabel, t, toggleLang, uiLocale, useLang } from "./core.jsx";
 
 // กันจอขาว: ถ้าหน้าจอส่วนใดโยน error ตอน render จะโชว์กล่องแจ้ง + ปุ่มลองใหม่
 // แทนที่จะพังทั้งแอพ
@@ -822,6 +822,10 @@ function UserMenu({ session, onLogout }) {
             style={{width:"100%",textAlign:"left",marginTop:6,border:"none",background:"none",padding:"9px 8px",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:600,color:T.red}}>
             {t("ออกจากระบบ","Logout")}
           </button>
+          <div data-app-version title={t("เทียบกับคนอื่นได้ — build ต้องตรงกัน","Compare with others — the build should match")}
+            style={{borderTop:`1px solid ${T.cardBorder}`,marginTop:6,padding:"8px 8px 2px",fontSize:11,color:T.textMuted,fontVariantNumeric:"tabular-nums",lineHeight:1.5}}>
+            {t("เวอร์ชัน","Version")} {appBuild().version}<br/>build {appBuild().build}{appBuild().commit ? ` · ${appBuild().commit}` : ""}
+          </div>
         </div>
       )}
     </div>
