@@ -1,12 +1,12 @@
 // Tender Cost — แผนก QS (ราคาเดิม + รายการเพิ่มรายเดือน)
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { ACCOUNTS, GROUPS, T, UnsavedGuard, WASTE_LBL, _LANG, buildCombinedBudget, fmt, fmt0, fmtK, fmtZ, hiddenSafeForPO, inThai, leaveIfDirty, monthAddValue, monthShortLabel, t, todayStr, uiAlert, uiConfirm, uid, wasteOf, withWaste } from "./core.jsx";
+import { ACCOUNTS, GROUPS, T, UnsavedGuard, WASTE_LBL, _LANG, buildCombinedBudget, codeText, extraCodeError, historyEntry, renameProjectCode, fmt, fmt0, fmtK, fmtZ, hiddenSafeForPO, inThai, leaveIfDirty, monthAddValue, monthShortLabel, t, todayStr, uiAlert, uiConfirm, uid, wasteOf, withWaste } from "./core.jsx";
 import { exportQSMonthExcel } from "./excel.js";
 import { BottomNav, CurrencyControl, GroupFilter, Ico, MoneyInput, SearchInput, Shell, StatCard, effRate, evalMoney, usdLine, useIsPhone } from "./ui.jsx";
 
 // ─── QS View ─────────────────────────────────────────────────────────────────
-function QSView({ project, updateProject, tenderCosts, saveTenders, poEntries = [], additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, runExportFn, setEditMode }) {
+function QSView({ project, updateProject, tenderCosts, saveTenders, poEntries = [], savePO, incomingPlan = [], saveIncomingPlan, additions, saveAdditions, extraItems, saveExtraItems, hiddenAccounts, saveHiddenAccounts, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, onExport, runExportFn, setEditMode }) {
   const [tab, setTab] = useState("baseline"); // "baseline" | "monthly"
   const isPhone = useIsPhone();
   const [tabHist, setTabHist] = useState([]);  // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
@@ -79,6 +79,31 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, poEntries = 
     saveAdditions(nextAdd);
   };
 
+  // เปลี่ยน Acc. Code ของ "รายการใหม่" (เดิมไม่ได้ใส่รหัส → ระบบให้รหัสภายใน EX-xxxx และแสดง "—")
+  // ย้ายข้อมูลทุกส่วนของโครงการนี้ตามรหัสใหม่: ราคาเดิม · รายเดือน (รวมคอลัมน์ย่อย/สีไฮไลต์) · PO · แผนของเข้า
+  // คืนข้อความผิดพลาด (แสดงใต้ช่อง) หรือ null เมื่อสำเร็จ / "cancel" เมื่อผู้ใช้ไม่ยืนยัน
+  const plansArr = Array.isArray(incomingPlan) ? incomingPlan : [];
+  const handleRenameExtraCode = async (from, rawTo) => {
+    const to = String(rawTo || "").trim();
+    const err = extraCodeError(to, from, { extra: extraItems, po: poEntries, plans: plansArr });
+    if (err) return err;
+    if (to === from) return null;
+    const item = extraItems.find(e => e.code === from);
+    const hist = historyEntry(session, "edited", t(`QS เปลี่ยน Acc. Code ของ "${item?.name || ""}" เป็น ${to}`, `QS changed the Acc. Code of "${item?.name || ""}" to ${to}`));
+    const next = renameProjectCode({ tenders: tenderCosts, additions, extra: extraItems, po: poEntries, plans: plansArr, hidden: hiddenAccounts }, from, to, hist);
+    if ((next.poCount || next.planCount) && !(await uiConfirm(
+      t(`เปลี่ยน Acc. Code ของ "${item?.name || ""}" เป็น ${to}?\n\nPO ${next.poCount} ใบ${next.planCount ? ` และแผนของเข้า ${next.planCount} รายการ` : ""} ที่ใช้รายการนี้จะเปลี่ยนเป็นรหัสใหม่ด้วย`,
+        `Change the Acc. Code of "${item?.name || ""}" to ${to}?\n\n${next.poCount} PO(s)${next.planCount ? ` and ${next.planCount} plan(s)` : ""} using this item will switch to the new code too`),
+      { okLabel: t("เปลี่ยนรหัส","Change code") }))) return "cancel";
+    saveTenders(next.tenders);
+    saveAdditions(next.additions);
+    if (next.poCount) savePO?.(next.po);
+    if (next.planCount) saveIncomingPlan?.(next.plans);
+    if ((hiddenAccounts || []).includes(from)) saveHiddenAccounts(next.hidden);
+    saveExtraItems(next.extra);
+    return null;
+  };
+
   // Hide / restore a fixed Acc. Code (511010 ... etc). Hiding doesn't erase its stored
   // numbers — it's reversible — it just removes it from the QS entry list and from
   // downstream totals, in case a project doesn't use that code at all.
@@ -142,7 +167,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, poEntries = 
       })()}
       {tab === "baseline"
         ? <QSBaselineTab project={project} tenderCosts={tenderCosts} saveTenders={saveTenders} extraItems={extraItems} additions={additions}
-                         onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
+                         onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem} onRenameExtra={handleRenameExtraCode}
                          hiddenAccounts={hiddenAccounts} onHideAccount={handleHideAccount} onRestoreAccount={handleRestoreAccount} setEditMode={setEditMode} />
         : <QSMonthlyTab tenderCosts={tenderCosts} additions={additions} saveAdditions={saveAdditions}
                          extraItems={extraItems} onAddExtra={handleAddExtraItem} onDeleteExtra={handleDeleteExtraItem}
@@ -152,7 +177,7 @@ function QSView({ project, updateProject, tenderCosts, saveTenders, poEntries = 
 }
 
 // ─── QS Tab 1: Baseline (original tender cost) ────────────────────────────────
-function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, additions = {}, onAddExtra, onDeleteExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
+function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, additions = {}, onAddExtra, onDeleteExtra, onRenameExtra, hiddenAccounts, onHideAccount, onRestoreAccount, setEditMode }) {
   const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [draft,  setDraft]  = useState({...tenderCosts});
   const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
@@ -168,6 +193,18 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
   const [collapsed, setCollapsed] = useState({});   // code -> true means sub-items hidden
   const [showHidden, setShowHidden] = useState(false);
   const [forceEdit, setForceEdit] = useState(false); // user explicitly clicked "แก้ไข" to unlock an already-saved baseline
+  const [codeEdit, setCodeEdit] = useState(null);   // { code, value, err } — แก้ Acc. Code ของรายการใหม่ในตาราง
+  const commitCode = async () => {
+    if (!codeEdit || !onRenameExtra) return;
+    const { code: from, value } = codeEdit;
+    const err = await onRenameExtra(from, value);
+    if (err === "cancel") return;
+    if (err) { setCodeEdit(c => c && ({ ...c, err })); return; }
+    const to = String(value).trim();
+    // ย้ายค่าที่กำลังพิมพ์ค้าง (draft) ไปใช้รหัสใหม่ด้วย ไม่งั้นกดบันทึกแล้วจะเขียนรหัสเดิมกลับ
+    if (to !== from) setDraft(d => { const n = { ...d }; if (from in n) { n[to] = n[from]; delete n[from]; } return n; });
+    setCodeEdit(null);
+  };
 
   // The baseline counts as "saved" (and therefore locked, requiring "แก้ไข"
   // to unlock) once it carries the explicit $saved flag, or — for baselines
@@ -450,14 +487,40 @@ function QSBaselineTab({ project, tenderCosts, saveTenders, extraItems, addition
                 <Fragment key={a.code}>
                   <tr onClick={()=>hasKids && setCollapsed(c=>({...c,[a.code]:!c[a.code]}))}
                       style={{background:i%2===0?T.card:"#fafbfd",borderBottom:(hasKids&&!isCollapsed)||subFor===a.code?"none":"1px solid #f1f5f9",cursor:hasKids?"pointer":"default"}}>
-                    <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontVariantNumeric:"tabular-nums",fontSize:13,fontWeight:500}}>
+                    <td style={{padding:"10px 16px",color:a.isExtra?T.amber:T.blue,fontVariantNumeric:"tabular-nums",fontSize:13,fontWeight:500,whiteSpace:"nowrap"}}>
                       {hasKids && (
                         <span title={isCollapsed?t("ขยายรายการย่อย","Expand sub-items"):t("ย่อรายการย่อย","Collapse sub-items")}
                           style={{color:T.textMuted,fontSize:12,marginRight:6,verticalAlign:"middle",display:"inline-block"}}>
                           {isCollapsed?"▸":"▾"}
                         </span>
                       )}
-                      {a.isExtra ? (a.code.startsWith("EX-") ? "—" : a.code) : a.code}
+                      {a.isExtra && codeEdit?.code === a.code ? (
+                        <span onClick={e=>e.stopPropagation()} style={{display:"inline-flex",flexDirection:"column",gap:3}}>
+                          <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
+                            <input data-code-input className="input-base" autoFocus value={codeEdit.value} placeholder={t("เช่น 511099","e.g. 511099")}
+                              aria-label={t(`Acc. Code ของ ${a.name}`,`Acc. Code for ${a.name}`)} aria-invalid={codeEdit.err ? true : undefined}
+                              onChange={e=>setCodeEdit(c=>({ ...c, value:e.target.value, err:null }))}
+                              onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); commitCode(); } else if (e.key==="Escape") { e.preventDefault(); e.stopPropagation(); setCodeEdit(null); } }}
+                              style={{width:112,padding:"5px 8px",fontVariantNumeric:"tabular-nums",...(codeEdit.err?{borderColor:T.red}:{})}}/>
+                            <button type="button" data-code-save onClick={commitCode} aria-label={t("บันทึกรหัส","Save code")} title={t("บันทึกรหัส","Save code")}
+                              style={{background:T.blue,border:"none",color:"#fff",borderRadius:7,width:28,height:28,cursor:"pointer",display:"inline-grid",placeItems:"center"}}><Ico name="check" size={14} /></button>
+                            <button type="button" onClick={()=>setCodeEdit(null)} aria-label={t("ยกเลิก","Cancel")} title={t("ยกเลิก","Cancel")}
+                              style={{background:"none",border:`1px solid ${T.cardBorder}`,color:T.textMuted,borderRadius:7,width:28,height:28,cursor:"pointer"}}>✕</button>
+                          </span>
+                          {codeEdit.err && <span role="alert" data-code-error style={{fontSize:12,color:T.red,maxWidth:260,whiteSpace:"normal",lineHeight:1.35,fontWeight:400}}>{codeEdit.err}</span>}
+                        </span>
+                      ) : (
+                        <>
+                          {a.isExtra ? codeText(a.code) : a.code}
+                          {a.isExtra && editingUnlocked && onRenameExtra && (
+                            <button type="button" data-code-edit onClick={e=>{ e.stopPropagation(); setCodeEdit({ code:a.code, value:/^EX-/.test(a.code) ? "" : a.code, err:null }); }}
+                              aria-label={t(`แก้ Acc. Code ของ ${a.name}`,`Edit Acc. Code for ${a.name}`)} title={/^EX-/.test(a.code) ? t("ใส่ Acc. Code","Set Acc. Code") : t("แก้ Acc. Code","Edit Acc. Code")}
+                              style={{marginLeft:6,background:"none",border:`1px dashed ${T.cardBorder}`,borderRadius:6,color:T.textMuted,cursor:"pointer",padding:"2px 6px",verticalAlign:"middle",display:"inline-flex",alignItems:"center",gap:3,fontSize:11}}>
+                              <Ico name="edit" size={12} />{/^EX-/.test(a.code) ? t("ใส่รหัส","Set code") : ""}
+                            </button>
+                          )}
+                        </>
+                      )}
                     </td>
                     <td style={{padding:"10px 16px"}}>
                       {(i===0 || displayRows[i-1]?.group!==a.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>}
@@ -630,6 +693,19 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
   const thisMonth = todayStr().slice(0,7);
   const months = Object.keys(additions).filter(k=>!k.startsWith("$")).sort();
   const [month, setMonth] = useState(months.length ? months[months.length-1] : thisMonth);
+  // หัวตาราง 2 ชั้นตรึงตอนเลื่อน: ชั้นที่ 2 ต้องติดอยู่ใต้ชั้นแรกพอดี — วัดความสูงจริงของชั้นแรก
+  // (เดิมตั้งตายตัว 33px แต่ชั้นแรกสูงกว่านั้น ชั้นที่ 2 จึงเลื่อนไปทับ/เหลื่อมกัน)
+  const mTableRef = useRef(null), mHead1Ref = useRef(null);
+  useLayoutEffect(() => {
+    const tb = mTableRef.current, tr = mHead1Ref.current;
+    if (!tb) return;
+    if (!tr) { tb.style.removeProperty("--mh1"); return; }
+    const set = () => tb.style.setProperty("--mh1", `${tr.getBoundingClientRect().height}px`);
+    set();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(set); ro.observe(tr);
+    return () => ro.disconnect();
+  });
   const [newMonth, setNewMonth] = useState("");
   const [filter, setFilter] = useState([]);   // อาเรย์หมวดที่เลือก (ว่าง = ทุกหมวด) — เลือกได้หลายหมวด
   const [hideEmpty, setHideEmpty] = useState(false);   // ซ่อนแถวที่ไม่มีค่า (รวมสะสม = 0)
@@ -1398,11 +1474,12 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
       {/* Main table: เดิม + เพิ่มเดือนนี้ = รวมสะสม */}
       <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
         <div className="mscroll">
-        <table style={{minWidth: isMultiCol ? "max-content" : "100%", width: isMultiCol ? "max-content" : "100%", borderCollapse:"collapse", fontSize:13}}>
+        {/* กว้างเต็มกล่องเสมอ (เดิม max-content → คอลัมน์น้อยแล้วเหลือที่ว่างขาวด้านข้าง แถวสีสลับจบไม่เท่ากัน) */}
+        <table ref={mTableRef} style={{minWidth:"100%", width: isMultiCol ? "max-content" : "100%", borderCollapse:"collapse", fontSize:13}}>
           <thead>
             {isMultiCol ? (
               <>
-                <tr style={{background:"#f8fafc"}}>
+                <tr ref={mHead1Ref} style={{background:"#f8fafc"}}>
                   <th rowSpan={2} style={{padding:"11px 16px",textAlign:"left",color:sortKey==="code"?T.blue:T.textMuted,fontWeight:600,fontSize:12,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${T.cardBorder}`,whiteSpace:"nowrap", ...qsFrz(0,"#f8fafc",7)}}>
                     <span onClick={()=>handleSort("code")} style={{cursor:"pointer",userSelect:"none"}}>Acc. Code{sortKey==="code"?(sortDir===1?" ▲":" ▼"):""}</span>
                   </th>
@@ -1507,7 +1584,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                           {isCollapsed?"▸":"▾"}
                         </span>
                       )}
-                      {r.code}
+                      {r.isExtra ? codeText(r.code) : r.code}
                     </td>
                     <td style={{padding:"10px 16px", ...qsFrz(1,rowBg)}}>
                       {(i===0 || displayRows[i-1]?.group!==r.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{r.group}</span>}
@@ -1527,7 +1604,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                     <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
                     {isMultiCol ? (
                       hasKids ? (
-                        <td colSpan={columns.length} style={{padding:"8px 16px",textAlign:"right"}}>
+                        <td colSpan={columns.length+1} style={{padding:"8px 16px",textAlign:"right"}}>
                           <div style={{width:"100%",padding:"7px 10px",textAlign:"right",fontVariantNumeric:"tabular-nums",background:T.amberBg,borderRadius:8,color:T.amber,fontWeight:650,fontSize:13}}>
                             {fmtZ(thisVal)}
                             {usdLine(thisVal, usdRate)}
@@ -1552,7 +1629,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                             )}
                           </td>
                         );
-                      })
+                      }).concat(<td key="__addcol" aria-hidden="true" />)   /* ช่องใต้ปุ่ม "+ เพิ่มรายการ" ในหัวตาราง — ให้จำนวนช่องเท่ากับหัว (เดิมขาด 1 ช่อง คอลัมน์หลังจากนี้เลยเหลื่อม) */
                     ) : (
                       <td
                         onMouseDown={!hasKids?e=>onCellDown(i,0,e):undefined}
@@ -1613,7 +1690,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                         </td>
                         <td style={{padding:"7px 16px",textAlign:"right",color:kCumBefore!==0?T.textPrimary:T.textMuted,fontVariantNumeric:"tabular-nums",fontSize:13, ...qsFrz(3,subBg)}}>{fmtZ(kCumBefore)}{usdLine(kCumBefore, usdRate)}</td>
                         <td style={{textAlign:"center",color:T.cardBorder,fontSize:13}}>+</td>
-                        <td style={{padding:"7px 16px",textAlign:"right"}}>
+                        <td colSpan={isMultiCol ? columns.length+1 : 1} style={{padding:"7px 16px",textAlign:"right"}}>
                           {editingUnlocked ? (
                             <MoneyInput allowNegative value={draftAdd[k.code]??""} onChange={v=>setDraftAdd(d=>({...d,[k.code]:v}))}
                               style={{width:130,fontSize:13,background:kThisVal!==0?T.greenBg:T.bg}}/>
@@ -1643,7 +1720,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                           placeholder={t("ชื่อรายการย่อย เช่น Silicone Structure","Sub-item name e.g. Silicone Structure")} style={{width:"100%",fontSize:13}}
                           onKeyDown={e=>e.key==="Enter"&&handleAddSub(r.code)} autoFocus />
                       </td>
-                      <td colSpan={(isMultiCol ? 8+columns.length : 9)-3} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                      <td colSpan={(isMultiCol ? 9+columns.length : 9)-3} style={{padding:"7px 16px",display:"flex",gap:6,justifyContent:"flex-end"}}>
                         <button className="btn-primary" style={{padding:"5px 12px",fontSize:13}} onClick={()=>handleAddSub(r.code)}>+ {t("เพิ่ม","Add")}</button>
                         <button className="btn-ghost" style={{padding:"5px 12px",fontSize:13}} onClick={()=>setSubFor(null)}>{t("ยกเลิก","Cancel")}</button>
                       </td>
@@ -1653,7 +1730,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
               );
             })}
             {filtered.length === 0 && (
-              <tr><td colSpan={isMultiCol ? 8+columns.length : 9} style={{padding:"28px 16px",textAlign:"center",color:T.textMuted,fontSize:13}}>{t("ไม่พบรายการที่ตรงกับการค้นหา","No items match your search")}</td></tr>
+              <tr><td colSpan={isMultiCol ? 9+columns.length : 9} style={{padding:"28px 16px",textAlign:"center",color:T.textMuted,fontSize:13}}>{t("ไม่พบรายการที่ตรงกับการค้นหา","No items match your search")}</td></tr>
             )}
           </tbody>
           <tfoot>
@@ -1670,7 +1747,7 @@ function QSMonthlyTab({ tenderCosts, additions, saveAdditions, extraItems, onAdd
                       <span style={{display:"inline-block",fontVariantNumeric:"tabular-nums",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
                       {usdLine(ct, usdRate)}
                     </td>
-                  ); })
+                  ); }).concat(<td key="__addcol" style={QSF_FOOT} />)
                 : (() => { const ct = filtered.reduce((s,r)=>s+rowMonthValue(r.code, month, draftAdd),0); return (
                     <td style={{padding:"10px 16px",textAlign:"right",whiteSpace:"nowrap", ...QSF_FOOT}}>
                       <span style={{display:"inline-block",fontVariantNumeric:"tabular-nums",fontSize:14, ...(ct!==0?{background:T.amber,color:"#fff",fontWeight:800,padding:"5px 10px",borderRadius:8}:{color:T.textMuted,fontWeight:600})}}>{fmt(ct)}</span>
