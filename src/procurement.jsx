@@ -1,6 +1,6 @@
 // Tender Cost — แผนกจัดซื้อ (รายการ PO, ฟอร์ม PO, แผนของเข้า, ติดตาม)
 import { useEffect, useState } from "react";
-import { ACCOUNTS, DEFAULT_CREDIT_DAYS, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
+import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
 function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
@@ -164,7 +164,7 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
               <div key={it.id||ii} style={{background:T.bg,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
                   <div style={{minWidth:0}}>
-                    <span style={{fontSize:11,color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{it.code||"—"}</span>
+                    <span style={{fontSize:11,color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{codeText(it.code)||"—"}</span>
                     <span style={{fontSize:12,color:T.textSecondary,marginLeft:8}}>{acc?.name||"—"}</span>
                   </div>
                   <span style={{fontSize:12,color:T.textMuted}}>{t("สั่ง","Ordered")} <b style={{color:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>{fmt(ordered)}</b></span>
@@ -449,7 +449,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code), bpo = balPOof(code);
                   return (
                     <tr key={code}>
-                      <td style={{ ...cM, ...stickyBody0, fontVariantNumeric: "tabular-nums", fontWeight: 600, color: T.blue }}>{code}</td>
+                      <td style={{ ...cM, ...stickyBody0, fontVariantNumeric: "tabular-nums", fontWeight: 600, color: T.blue }}>{codeText(code)}</td>
                       <td style={{ ...cM, ...stickyBody1, color: T.textSecondary }}>{nameOf(code)}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
@@ -520,7 +520,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {items.map(it => (
                     <span key={it.id} style={{ background: "#f8fafc", border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "5px 10px", fontSize: 12 }}>
-                      <b style={{ fontVariantNumeric: "tabular-nums", color: T.blue }}>{it.code}</b> {nameOf(it.code)} · <b style={{ fontVariantNumeric: "tabular-nums" }}>฿{fmt(parseFloat(it.amount) || 0)}</b>
+                      <b style={{ fontVariantNumeric: "tabular-nums", color: T.blue }}>{codeText(it.code)}</b> {nameOf(it.code)} · <b style={{ fontVariantNumeric: "tabular-nums" }}>฿{fmt(parseFloat(it.amount) || 0)}</b>
                     </span>
                   ))}
                 </div>
@@ -1167,7 +1167,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                   const remain = budget - stock - ordered - thisAmt;
                   return (
                     <div key={code} data-sum="code" style={{borderTop:`1px solid ${T.cardBorder}`,padding:"10px 0"}}>
-                      <div style={{fontSize:13,marginBottom:6}}><b style={{color:T.blue,fontVariantNumeric:"tabular-nums"}}>{code}</b> <span style={{color:T.textSecondary}}>{acc?.name||""}</span></div>
+                      <div style={{fontSize:13,marginBottom:6}}><b style={{color:T.blue,fontVariantNumeric:"tabular-nums"}}>{codeText(code)}</b> <span style={{color:T.textSecondary}}>{acc?.name||""}</span></div>
                       {row(t("งบ (QS)","Budget (QS)"), budget)}
                       {row(t("Stock","Stock"), stock, { minus:true })}
                       {row(t("PO อื่นที่สั่งแล้ว","Other POs ordered"), ordered, { minus:true })}
@@ -1298,7 +1298,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                         <button onClick={()=>toggleGroup(g.code)} aria-expanded={!g.isCollapsed}
                           style={{width:"100%",border:"none",background:"none",padding:"2px 2px 8px",display:"flex",alignItems:"baseline",gap:8,cursor:"pointer",textAlign:"left",flexWrap:"wrap"}}>
                           <Ico name="chevrons" size={14} color={T.textMuted} style={{transform:g.isCollapsed?"rotate(-90deg)":"none",alignSelf:"center"}} />
-                          <b style={{color:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{g.code}</b>
+                          <b style={{color:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{codeText(g.code)}</b>
                           <span style={{fontSize:13,fontWeight:600,color:T.textPrimary,flex:1,minWidth:0}}>{g.acc?.name || "—"}</span>
                           <span style={{fontSize:13,fontWeight:650,color:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>{fmt(g.total)}</span>
                           <span style={{flexBasis:"100%",paddingLeft:22}}>{budgetNote(g)} <span style={{fontSize:12,color:T.textMuted}}>· {g.rows.length} {t("รายการ","items")}</span></span>
@@ -1365,7 +1365,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                             <td colSpan={2} style={{padding:"10px 14px"}}>
                               <span style={{display:"inline-flex",alignItems:"center",gap:8}}>
                                 <Ico name="chevrons" size={14} color={T.textMuted} style={{transform:g.isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s"}} />
-                                <b style={{color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{g.code}</b>
+                                <b style={{color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{codeText(g.code)}</b>
                                 <span style={{color:T.textPrimary,fontWeight:600}}>{g.acc?.name || "—"}</span>
                                 <span style={{color:T.textMuted,fontSize:12}}>· {g.rows.length} {t("รายการ","items")}</span>
                               </span>
@@ -1712,7 +1712,7 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                 <div onClick={()=>toggleGroup(code)}
                   style={{padding:"12px 18px",background:"#f8fafc",borderBottom:isCollapsed?"none":`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none"}}>
                   <span style={{fontSize:12,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
-                  <span style={{color:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{code}</span>
+                  <span style={{color:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{codeText(code)}</span>
                   <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
                   <span style={{flex:1}}/>
                   <span style={{fontSize:12,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(grpBudget)}</b></span>
