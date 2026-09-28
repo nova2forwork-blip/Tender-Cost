@@ -1,7 +1,7 @@
 // Tender Cost — ชิ้นส่วนหน้าจอที่ใช้ร่วมกัน (แถบหัว, ปุ่ม, การ์ด, กล่องข้อความ, เครื่องคิดเลข, ช่องกรอกเงิน/วันที่)
 import { Component, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ROLE_LABELS } from "./auth.js";
-import { BNAV_H, BOTTOM, DialogStore, FAB_GAP, FAB_SIZE, GROUPS, PO_STATUS, STATUS_BG, STATUS_CLR, T, _LANG, accountOf, bnavH, fmt, fmt0, poStatusLabel, t, toggleLang, uiLocale, useLang } from "./core.jsx";
+import { BNAV_H, BOTTOM, DialogStore, codeText, FAB_GAP, FAB_SIZE, GROUPS, PO_STATUS, STATUS_BG, STATUS_CLR, T, _LANG, accountOf, bnavH, fmt, fmt0, poStatusLabel, t, toggleLang, uiLocale, useLang } from "./core.jsx";
 
 // กันจอขาว: ถ้าหน้าจอส่วนใดโยน error ตอน render จะโชว์กล่องแจ้ง + ปุ่มลองใหม่
 // แทนที่จะพังทั้งแอพ
@@ -986,7 +986,7 @@ function AccountPicker({ value, onChange, options }) {
         aria-haspopup="listbox" aria-expanded={open}
         className="input-base" style={{width:"100%",textAlign:"left",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:6}}>
         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color: sel?T.textPrimary:T.textMuted}}>
-          {sel ? `${sel.code} · ${sel.name}` : t("— เลือก Account Code —","— Select Account Code —")}
+          {sel ? `${codeText(sel.code)} · ${sel.name}` : t("— เลือก Account Code —","— Select Account Code —")}
         </span>
         <span style={{color:T.textMuted,fontSize:11}}>▾</span>
       </button>
@@ -1009,7 +1009,7 @@ function AccountPicker({ value, onChange, options }) {
                 style={{padding:"8px 12px",cursor:"pointer",fontSize:13,display:"flex",gap:8,alignItems:"baseline",
                   background: i===hi ? T.bg : (a.code===value ? T.blueLight : "transparent"),
                   boxShadow: i===hi ? `inset 3px 0 0 ${T.blue}` : "none"}}>
-                <span style={{fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:600,flexShrink:0}}>{a.code}</span>
+                <span style={{fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:600,flexShrink:0}}>{codeText(a.code)}</span>
                 <span style={{color:T.textSecondary,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.name}</span>
               </div>
             ))}
