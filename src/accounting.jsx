@@ -1,7 +1,7 @@
 // Tender Cost — แผนกบัญชี (ต้องจ่าย, ภาพรวมงบ, ตารางรวมเดือน)
 import { Fragment, useEffect, useState } from "react";
 import { Bar, BarChart, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { ACCOUNTS, GROUPS, GRP_COLORS, ORPHAN_NAME, PO_STATUS, STATUS_CLR, T, WASTE_LBL, buildCombinedBudget, exportAccountList, fmt, fmt0, fmtDate, fmtK, hiddenSafeForPO, monthShortLabel, paymentStatus, poBilledAmount, poItems, poPaidAmount, poPayLines, poStatusLabel, poTotal, roundReceived, t, todayStr } from "./core.jsx";
+import { ACCOUNTS, GROUPS, GRP_COLORS, codeText, ORPHAN_NAME, PO_STATUS, STATUS_CLR, T, WASTE_LBL, buildCombinedBudget, exportAccountList, fmt, fmt0, fmtDate, fmtK, hiddenSafeForPO, monthShortLabel, paymentStatus, poBilledAmount, poItems, poPaidAmount, poPayLines, poStatusLabel, poTotal, roundReceived, t, todayStr } from "./core.jsx";
 import { BottomNav, CurrencyControl, Ico, SearchInput, Shell, StatCard, effRate, usdLine, useIsPhone } from "./ui.jsx";
 
 // ─── Accounting: ตารางรวมรายเดือน (ต้นทุน + Incoming/Received + Payment + PO) ────
@@ -180,7 +180,7 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
           <tbody>
             {shownRows.map(r => (
               <tr key={r.a.code}>
-                <td style={{ ...cell, ...stickyBody0, fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{r.a.code}</td>
+                <td style={{ ...cell, ...stickyBody0, fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{codeText(r.a.code)}</td>
                 <td style={{ ...cell, ...stickyBody1 }}>{r.a.name}</td>
                 {numCell(r.budget, bCost)}
                 {numCell(r.balPO, bCost)}
@@ -461,7 +461,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                   .sort((a,b) => (a.ls[0].payDate||"").localeCompare(b.ls[0].payDate||""));
                 const secTotal = groups.reduce((s,g)=>s+g.total,0);
                 return (
-                  <div key={sec.key} style={{marginTop:12}}>
+                  <div key={sec.key} data-pay-sec={sec.key} data-sec-total={secTotal.toFixed(2)} style={{marginTop:12}}>
                     <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:6}}>
                       <span style={{fontSize:13,fontWeight:700,color:sec.clr}}>{sec.title}</span>
                       <span style={{fontSize:12,color:T.textMuted}}>{groups.length} {t("ราย","suppliers")} · {sec.lines.length} {t("งวด","rounds")}</span>
@@ -487,7 +487,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                                 <tr key={i}>
                                   <td style={{...td,fontVariantNumeric:"tabular-nums",color:l.payDate<payToday?T.red:T.textPrimary}}>{l.payDate ? fmtDate(l.payDate) : "—"}</td>
                                   <td style={td}>{l.poNo}</td>
-                                  <td style={td}><span style={{fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:600}}>{l.code}</span> <span style={{color:T.textMuted,fontSize:12}}>{l.accName}</span></td>
+                                  <td style={td}><span style={{fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:600}}>{codeText(l.code)}</span> <span style={{color:T.textMuted,fontSize:12}}>{l.accName}</span></td>
                                   <td style={td}>{methodOf(l)}</td>
                                   <td style={td}><span style={{background:sb,color:sc,fontSize:11,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{st}</span></td>
                                   <td style={{...td,textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{fmt(remainOf(l))}{usdLine(remainOf(l), usdRate)}</td>
@@ -603,12 +603,12 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                   const noBudget = a.budget<=0 && a.committed>0;
                   return (
                     <tr key={a.code} data-acc-row={a.code} style={{background:(a.over||noBudget)?"#fff5f5":i%2===0?T.card:"#fafbfd",borderBottom:`1px solid #f1f5f9`}}>
-                      <td style={{padding:"10px 16px",color:T.blue,fontVariantNumeric:"tabular-nums",fontSize:13,fontWeight:500}}>{a.code}</td>
+                      <td style={{padding:"10px 16px",color:T.blue,fontVariantNumeric:"tabular-nums",fontSize:13,fontWeight:500}}>{codeText(a.code)}</td>
                       <td style={{padding:"10px 16px",color:T.textPrimary}}>{a.name}</td>
                       <td style={{padding:"10px 16px"}}>
                         {(i===0 || displayAccountData[i-1]?.group!==a.group) && <span style={{background:T.blueLight,color:T.blue,fontSize:12,padding:"2px 9px",borderRadius:6,fontWeight:600}}>{a.group}</span>}
                       </td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
+                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:a.budget<0?T.red:T.blue,fontWeight:500}} title={a.budget<0?t("งบติดลบ — ยอดหักในงานเพิ่มรายเดือนมากกว่างบของรหัสนี้","Negative budget — monthly deductions exceed this code's budget"):undefined}>{Math.abs(a.budget)>=0.005?`${a.budget<0?"-":""}${fmt(Math.abs(a.budget))}`:"—"}{Math.abs(a.budget)>=0.005&&usdLine(Math.abs(a.budget), usdRate)}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:(a.over||noBudget)?T.red:T.amber,fontWeight:(a.over||noBudget)?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
                       <td data-variance title={noBudget ? t("ไม่มีงบ — มี PO แต่รหัสนี้ไม่มีงบ ทั้งยอดนับเป็นส่วนเกิน","No budget — POs on a code with no budget; the whole amount counts as over") : a.over ? t("เกินงบ","Over budget") : (a.budget>0 && a.committed/a.budget>=0.8) ? t(`ใช้ไป ${Math.round(a.committed/a.budget*100)}% ของงบ`,`${Math.round(a.committed/a.budget*100)}% of budget used`) : undefined}
                         style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?650:500}}>
