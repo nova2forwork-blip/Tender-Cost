@@ -431,6 +431,16 @@ const poPaidAmount = (p) => poPayLines(p).reduce((s, l) => s + (l.paidAmount || 
 // ต่อรายการ (ตามลำดับใน PO — PO แบบเก่าได้ id ใหม่ทุกครั้งที่อ่าน จึงอ้างด้วยลำดับ)
 const itemPaidAmount = (p, idx) => poPayLines(p).filter(l => l.itemIdx === idx).reduce((s, l) => s + (l.paidAmount || 0), 0);
 
+// ยอด "วางบิลแล้ว" ของ PO — ทีมไม่ได้เปลี่ยนสถานะเป็น "วางบิลแล้ว" ทีละใบ (จ่ายเงินคิดอัตโนมัติจากวันของเข้า)
+// จึงนับจาก "ของที่รับแล้ว" (ถึงรอบวางบิล) ไม่เกินยอดสั่งของแต่ละรายการ · ถ้าตั้งสถานะ วางบิลแล้ว/จ่ายแล้ว เอง = ทั้งใบ
+// และไม่น้อยกว่ายอดที่จ่ายแล้ว (จ่ายแล้วย่อมวางบิลแล้ว) — เดิมนับเฉพาะสถานะ จึงขึ้น 0 ทั้งที่จ่ายไปแล้วหลายสิบล้าน
+const poBilledAmount = (p) => {
+  const P = migratePO(p);
+  if (P.status === "Invoiced" || P.status === "Paid") return poTotal(P);
+  const recv = poItems(P).reduce((s, it) => s + Math.min(itemReceived(it), itemOrdered(it)), 0);
+  return Math.max(recv, poPaidAmount(P));
+};
+
 // ─── Lock completed POs ─────────────────────────────────────────────────────
 // Once a PO has been fully received AND fully paid, its numbers are final —
 // only an admin can still edit or delete it, so the paper trail for a closed
@@ -7964,7 +7974,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   // ใช้เกณฑ์ roundPaid ตัวเดียวให้ตรงกับหน้าจัดซื้อและไฟล์ Excel ทุกไฟล์
   const totalPaid     = poEntries.reduce((s,p)=> s + poPaidAmount(p), 0);
   const paidPOCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
-  const totalInvoiced = poEntries.filter(p=>["Invoiced","Paid"].includes(p.status)).reduce((s,p)=>s+poTotal(p),0);
+  const totalInvoiced = poEntries.reduce((s,p)=>s+poBilledAmount(p),0);   // ของเข้าแล้ว/วางบิล (ดู poBilledAmount)
   const pct           = tenderTotal>0?(totalComm/tenderTotal*100):0;
 
   // รวม "งานเพิ่ม" (standalone extra) เข้าไปในกราฟตามกลุ่มด้วย ไม่งั้นยอดในกราฟ
@@ -8216,7 +8226,8 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
               <StatCard label={t("งบประมาณ (QS)","Budget (QS)")} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate} sub={t(`เดิม + เผื่อเศษ ${WASTE_LBL} + เพิ่มรายเดือนทุกเดือน`,`Baseline + ${WASTE_LBL} wastage + all monthly additions`)} color={T.blue} icon="📋" accent={T.blueLight}/>
               <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} progress={tenderTotal>0?pct:null}
                 sub={tenderTotal>0 ? `${pct.toFixed(1)}% ${t("ของงบ","of budget")} · ${tenderTotal-totalComm<0 ? t("เกินงบ","over by") : t("คงเหลือ","left")} ฿${fmt0(Math.abs(tenderTotal-totalComm))}` : `${pct.toFixed(1)}% ${t("ของงบ","of budget")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
-              <StatCard label={t("วางบิลแล้ว","Invoiced")} value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate} sub={t("รอจ่าย + จ่ายแล้ว","Awaiting + paid")} color={T.purple} icon="🧾" accent={T.purpleBg}/>
+              <StatCard label={t("วางบิลแล้ว","Invoiced")} value={"฿"+fmt0(totalInvoiced)} thb={totalInvoiced} rate={usdRate}
+                sub={`${t("นับจากของที่รับแล้ว","from goods received")} · ${t("ค้างจ่าย","unpaid")} ฿${fmt0(Math.max(totalInvoiced-totalPaid,0))}`} color={T.purple} icon="🧾" accent={T.purpleBg}/>
               <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidPOCount} ${t("รายการ","items")}`} color={T.green} icon="✅" accent={T.greenBg}/>
             </div>
 
