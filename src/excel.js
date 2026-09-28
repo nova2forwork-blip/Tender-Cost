@@ -571,9 +571,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
       const cc=bucket(it.code,(r.actualDate||r.planDate||p.date||"").slice(0,7)); cc.po+=a; if(lateOf(r)) cc.poLate=true;
     }
   })));
-  const mCodes = Object.keys(mCell).sort();
-  const mMonths = [...new Set(mCodes.flatMap(c=>Object.keys(mCell[c])))].filter(Boolean).sort();
-  if (!mCodes.length || !mMonths.length) return;
+  const mMonths = [...new Set(Object.values(mCell).flatMap(c=>Object.keys(c)))].filter(Boolean).sort();
   const cellOf = (code,mk) => mCell[code]?.[mk] || null;
   const cellTot = (c) => c ? (c.paid+c.recv+c.po+c.plan) : 0;
   const budgetOf    = (code) => parseFloat(combinedB[code])||0;
@@ -581,6 +579,10 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   const plannedOf   = (code) => plansArr.reduce((s,pl)=>s+poAmountForCode(pl,code),0);
   const stockOf     = (code) => poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
   const takeoffOf = (code) => [...poEntries, ...plansArr].reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.takeoff)||0),0),0);
+  // ทุกรหัสที่มีงบ (รวมงบติดลบ) / PO / Stock / แผน หรือมีของเข้า — เดิมใส่เฉพาะรหัสที่มีของเข้า รหัสที่มีงบแต่ยังไม่มี PO
+  // หรือ PO ที่ยังไม่มียอดแผน/ยอดรับ จึงหาย และยอดรวม Tender Cost / Issue PO / Balance Cost ไม่ตรงหน้าสรุป
+  const mCodes = [...new Set([...acctList.map(a => a.code).filter(c => Math.abs(budgetOf(c)) >= 0.005 || committedOf(c) || stockOf(c) || plannedOf(c)), ...Object.keys(mCell)])].sort();
+  if (!mCodes.length || !mMonths.length) return;
   // เดือนละ 1 คอลัมน์ (ไม่แยก 3 ช่อง) — ในช่องใส่รายการแบบมีป้ายกำกับ จ่าย/รับ/รอเข้า/แผน
   // ช่วยให้ตารางไม่กว้างเกินเมื่อมีหลายเดือน (เช่น 2 ปี = 24 คอลัมน์ แทน 72)
   const cellLines = (c) => {
