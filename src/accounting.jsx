@@ -331,14 +331,18 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
   });
   const thisMonthKey = payToday.slice(0,7);
   // "ครบกำหนดเดือนนี้" = คงเหลือของเดือนนี้ + ยอดที่เลยกำหนดจากเดือนก่อน ๆ ที่ยังไม่จ่าย
-  const dueThisMonth = payByMonth.filter(m=>m.mk!=="9999-99" && m.mk<=thisMonthKey).reduce((s,m)=>s+m.remain,0);
+  // ของที่ "เลยวันแผนแล้วแต่ยังไม่เข้า" ยังไม่ต้องจ่าย (จ่ายเมื่อรับของ + เครดิต) — ไม่นับในยอดเดือนนี้ แยกโชว์ไว้ต่างหาก
+  // (เดิมนับรวม ทำให้ "ครบกำหนดเดือนนี้" สูงเกินจริง เช่นข้อมูลจริง 2.61 ล้าน ที่ต้องจ่ายจริงแค่ ~0.42 ล้าน)
+  const payRemainOf = (l) => Math.max(0, (l.amount||0) - (l.paidAmount||0));
+  const notInYet = (l) => !l.received && !l.paid && !!l.payDate && l.payDate < payToday;
+  const dueThisMonth = payLines.filter(l => l.month && l.month <= thisMonthKey && !notInYet(l)).reduce((s,l)=>s+payRemainOf(l),0);
+  const lateNotIn    = payLines.filter(notInYet).reduce((s,l)=>s+payRemainOf(l),0);
   // เดือนถัดไป — สำหรับแจ้งเตือนให้บัญชีเตรียมเงินล่วงหน้า
   const nextMonthKey = (() => { const [y,m]=thisMonthKey.split("-").map(Number); const ny=m===12?y+1:y, nm=m===12?1:m+1; return `${ny}-${String(nm).padStart(2,"0")}`; })();
   const nextBucket   = payByMonth.find(m=>m.mk===nextMonthKey);
   const dueNextMonth = nextBucket?.remain || 0;
 
   // ใช้ทั้งในแผง "ต้องจ่าย" และรายการแยกตาม Supplier — สถานะมีคำกำกับเสมอ (ไม่ต้องพึ่งคำอธิบายสี)
-  const payRemainOf = (l) => Math.max(0, (l.amount||0) - (l.paidAmount||0));
   const payMethodOf = (l) => l.isCash ? t("เงินสด","Cash") : t(`เครดิต ${l.term} วัน`, `Credit ${l.term}d`);
   const payStatusOf = (l) => !l.received
     ? (l.short ? [t("ยอดรับยังไม่ครบ","Received less than ordered"), T.amber, T.amberBg] : [t("ของยังไม่เข้า (ตามแผน)","Goods not in yet (plan)"), T.textSecondary, "#f1f5f9"])
@@ -383,7 +387,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
         {/* ต้องจ่าย — งานหลักของบัญชีจึงอยู่บนสุด: ยอดเดือนนี้/เดือนหน้า + รายการที่ต้องจ่ายเรียงตามวันครบกำหนด
             (เดิมเป็นแถบเหลืองไล่สี กดแล้วค่อยเห็นรายการ) · "ดูทั้งหมดแยกตาม Supplier" เปิดรายการเต็มด้านล่าง */}
         {(dueThisMonth>0 || dueNextMonth>0) && (() => {
-          const soon = payLines.filter(l => l.month && l.month <= nextMonthKey && payRemainOf(l) > 0.005)
+          const soon = payLines.filter(l => l.month && l.month <= nextMonthKey && payRemainOf(l) > 0.005 && !notInYet(l))
             .sort((a,b) => (a.payDate||"9999").localeCompare(b.payDate||"9999"));
           const SHOW = 5;
           const th = { padding:"8px 12px", fontSize:12, color:T.textMuted, fontWeight:600, textAlign:"left", borderBottom:`1px solid ${T.cardBorder}`, whiteSpace:"nowrap" };
@@ -397,6 +401,7 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                 <div style={{fontSize:12,color:T.textSecondary}}>{t("ครบกำหนดเดือนนี้","Due this month")} · {monthShortLabel(thisMonthKey)} <span style={{color:T.textMuted}}>({t("รวมค้างจ่าย","incl. overdue")})</span></div>
                 <div style={{fontSize:20,fontWeight:700,color:dueThisMonth>0?T.red:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(dueThisMonth)}</div>
                 {usdLine(dueThisMonth, usdRate)}
+                {lateNotIn > 0.005 && <div data-due-notin title={t("ของที่เลยวันแผนแล้วแต่ยังไม่ได้รับ — จ่ายเมื่อรับของ (+เครดิต) จึงไม่นับเป็นยอดต้องจ่ายตอนนี้","Goods past their plan date but not received — paid after receipt (+credit), so not counted as due now")} style={{fontSize:11,color:T.textSecondary,marginTop:2}}>{t("ไม่รวมของยังไม่เข้า","Excl. goods not in yet")} ฿{fmt0(lateNotIn)}</div>}
               </div>
               <div data-due="next" className="due-box" style={{background:"#f8fafc",borderRadius:10,padding:"6px 12px",minWidth:150}}>
                 <div style={{fontSize:12,color:T.textSecondary}}>{t("เตรียมเดือนหน้า","Next month")} · {monthShortLabel(nextMonthKey)}</div>
@@ -444,9 +449,12 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
           const open = payLines.filter(l => l.month && remainOf(l) > 0.005);
           const sections = [
             { key:"now",  title: t(`ครบกำหนดเดือนนี้ + ค้างจ่าย (ถึง ${monthShortLabel(thisMonthKey)})`, `Due this month + overdue (to ${monthShortLabel(thisMonthKey)})`),
-              lines: open.filter(l => l.month <= thisMonthKey), clr: T.red, bg: T.redBg },
+              lines: open.filter(l => l.month <= thisMonthKey && !notInYet(l)), clr: T.red, bg: T.redBg },
             { key:"next", title: t(`เดือนหน้า (${monthShortLabel(nextMonthKey)})`, `Next month (${monthShortLabel(nextMonthKey)})`),
               lines: open.filter(l => l.month === nextMonthKey), clr: T.amber, bg: T.amberBg },
+            // แยกไว้ให้เห็น แต่ไม่นับเป็นยอดต้องจ่าย — ให้จัดซื้ออัปเดตวันของเข้า
+            ...(lateNotIn > 0.005 ? [{ key:"notin", title: t("ของยังไม่เข้า (เลยวันแผนแล้ว) — ยังไม่ต้องจ่าย","Not received yet (past plan date) — nothing to pay yet"),
+              lines: payLines.filter(l => notInYet(l) && remainOf(l) > 0.005), clr: T.textSecondary, bg: "#f1f5f9" }] : []),
           ];
           const methodOf = payMethodOf, statusOf = payStatusOf;
           const th = { padding:"8px 12px", fontSize:11, color:T.textMuted, fontWeight:600, textAlign:"left", borderBottom:`1px solid ${T.cardBorder}`, whiteSpace:"nowrap" };
