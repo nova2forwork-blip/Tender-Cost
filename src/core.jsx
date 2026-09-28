@@ -102,6 +102,52 @@ const accountOf = (code) => {
   const e = _EXTRA_ITEMS.find(x => x.code === code);
   return e ? { code: e.code, name: e.name || "", group: e.group || "Other", isExtra: true } : null;
 };
+// รหัสสำหรับ "แสดงผล": รายการใหม่ที่ยังไม่ได้ใส่ Acc. Code จะมีรหัสภายใน EX-xxxx → แสดง "—"
+// (รหัส EX ที่ไม่อยู่ในรายการแล้วคงรหัสเดิม เพราะเป็นทางเดียวที่ระบุตัวได้)
+const codeText = (code) => (/^EX-/.test(String(code || "")) && _EXTRA_ITEMS.some(e => e.code === code)) ? "—" : (code || "");
+
+// ─── เปลี่ยน Acc. Code ของ "รายการใหม่" ภายในโครงการเดียว ────────────────────────
+// ตรวจรหัสใหม่ → คืนข้อความผิดพลาด (ภาษาตาม t) หรือ null
+const extraCodeError = (to, from, { extra = [], po = [], plans = [] } = {}) => {
+  const c = String(to || "").trim();
+  if (!c) return t("กรอก Acc. Code", "Enter an Acc. Code");
+  if (c === from) return null;
+  if (c.length > 20) return t("รหัสยาวเกิน 20 ตัวอักษร", "Code is longer than 20 characters");
+  if (/[:$\s]/.test(c) || /^EX-/i.test(c)) return t("รหัสห้ามมีเว้นวรรค : $ และห้ามขึ้นต้นด้วย EX-", "No spaces, : or $, and it can't start with EX-");
+  const std = ACCOUNTS.find(a => a.code === c);
+  if (std) return t(`รหัส ${c} มีในรายการหลักแล้ว (${std.name}) — ใช้รหัสอื่น หรือถ้าจะรวมงบ ให้ย้ายยอดไปที่แถว ${c} แทน`, `${c} is already a main code (${std.name}) — use another code, or move the amounts to that row instead`);
+  const ex = extra.find(e => e.code === c);
+  if (ex) return t(`รหัส ${c} ใช้กับ "${ex.name}" อยู่แล้ว`, `${c} is already used by "${ex.name}"`);
+  if ([...po, ...plans].some(p => poItems(p).some(it => it.code === c))) return t(`มี PO/แผนที่ใช้รหัส ${c} อยู่แล้ว`, `A PO/plan already uses ${c}`);
+  return null;
+};
+// เปลี่ยนรหัส from → to ในข้อมูลของโครงการ (ไม่แก้ของเดิม คืนชุดใหม่) · คีย์ "code" และ "code:คอลัมน์" · $fmt (สีไฮไลต์)
+const renameProjectCode = ({ tenders = {}, additions = {}, extra = [], po = [], plans = [], hidden = [] }, from, to, histEntry = null) => {
+  const renKey = (k) => k === from ? to : (k.startsWith(from + ":") ? to + k.slice(from.length) : k);
+  const renObj = (o) => {
+    if (!o || typeof o !== "object" || Array.isArray(o)) return o;
+    const out = {};
+    for (const [k, v] of Object.entries(o)) {
+      if (k === "$fmt" && v && typeof v === "object") out[k] = Object.fromEntries(Object.entries(v).map(([fk, fv]) => [renKey(fk), fv]));
+      else out[k.startsWith("$") ? k : renKey(k)] = v;
+    }
+    return out;
+  };
+  const touches = (p) => poItems(p).some(it => it.code === from);
+  const renPO = (p) => {
+    if (!touches(p)) return p;
+    const P = migratePO(p);
+    return { ...P, items: P.items.map(it => it.code === from ? { ...it, code: to } : it), ...(histEntry ? { history: [histEntry, ...(P.history || [])].slice(0, 40) } : {}) };
+  };
+  return {
+    tenders: renObj(tenders),
+    additions: Object.fromEntries(Object.entries(additions || {}).map(([m, o]) => [m, m.startsWith("$") ? o : renObj(o)])),
+    extra: extra.map(e => ({ ...e, ...(e.code === from ? { code: to } : {}), ...(e.parentCode === from ? { parentCode: to } : {}) })),
+    po: po.map(renPO), plans: plans.map(renPO),
+    hidden: hidden.map(c => c === from ? to : c),
+    poCount: po.filter(touches).length, planCount: plans.filter(touches).length,
+  };
+};
 // ย้ายข้อมูลเมื่อเปลี่ยนรหัสบัญชี (ข้ามทุกโครงการ) — renameMap = { oldCode: newCode }
 async function migrateAccountCodes(renameMap) {
   const map = Object.fromEntries(Object.entries(renameMap || {}).filter(([o, n]) => o && n && o !== n));
@@ -804,7 +850,7 @@ const GLOBAL_CSS = `
   .mscroll { scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
   .mscroll thead th { position: sticky; background: #f8fafc; z-index: 4; box-shadow: inset 0 -1px 0 ${T.cardBorder}; }
   .mscroll thead tr:first-child th { top: 0; }
-  .mscroll thead tr:nth-child(2) th { top: 33px; z-index: 4; }
+  .mscroll thead tr:nth-child(2) th { top: var(--mh1, 33px); z-index: 4; }
   /* สกรอลบาร์แนวนอนแบบใหญ่ คลิก/ลากง่าย — ใช้กับตารางรายเดือน (กว้างมาก) */
   .fatscroll { overflow: auto; -webkit-overflow-scrolling: touch; scrollbar-color: #64748b #e2e8f0; scrollbar-width: auto; }
   .fatscroll::-webkit-scrollbar { height: 28px; width: 28px; }
@@ -952,4 +998,4 @@ const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [],
   return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length, late, overCodes };
 };
 
-export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
+export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
