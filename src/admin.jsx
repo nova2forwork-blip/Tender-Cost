@@ -1,8 +1,8 @@
 // Tender Cost — หน้า Admin (ผู้ใช้, รหัสบัญชี, Log, กู้คืนข้อมูล)
 import { useCallback, useEffect, useState } from "react";
-import { loadKvSnapshots, restoreKvSnapshot, sg, ssOrThrow } from "./supabase.js";
+import { loadKvSnapshots, loadSeen, restoreKvSnapshot, sg, ssOrThrow } from "./supabase.js";
 import { ROLE_LABELS, createUser, deleteUser, loadLogs, loadUsers, resetPassword, toggleActive } from "./auth.js";
-import { ACCOUNTS, GROUPS, T, applyAccountList, migrateAccountCodes, t, uiAlert, uiConfirm, uiLocale, uid } from "./core.jsx";
+import { ACCOUNTS, GROUPS, T, appBuild, applyAccountList, migrateAccountCodes, t, uiAlert, uiConfirm, uiLocale, uid } from "./core.jsx";
 import { Ico, TopBar, UserMenu } from "./ui.jsx";
 
 // ─── User row (admin panel) ────────────────────────────────────────────────
@@ -286,6 +286,55 @@ function AdminAccountsTab() {
 }
 
 // ─── Admin Panel ────────────────────────────────────────────────────────────
+// ─── ใครเปิดแอปเวอร์ชันไหน (คีย์ tcs-seen-<user id> ที่แอปบันทึกตอนเข้าใช้) ─────────────
+function AdminVersionsTab() {
+  const [rows, setRows] = useState(null);
+  const load = useCallback(async () => { setRows(null); setRows(await loadSeen()); }, []);
+  useEffect(() => { load(); }, [load]);
+  const me = appBuild();
+  const list = (rows || []).slice().sort((a, b) => String(b.at || b.updated_at || "").localeCompare(String(a.at || a.updated_at || "")));
+  const same = (r) => r.build === me.build && r.version === me.version;
+  const nOld = list.filter(r => !same(r)).length;
+  const th = { padding:"10px 14px", textAlign:"left", color:T.textMuted, fontWeight:600, fontSize:11, letterSpacing:0.6, textTransform:"uppercase", borderBottom:`1px solid ${T.cardBorder}` };
+  const td = { padding:"9px 14px", fontSize:13, borderBottom:"1px solid #f1f5f9", fontVariantNumeric:"tabular-nums" };
+  return (
+    <div data-versions-tab style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,overflow:"hidden"}}>
+      <div style={{padding:"14px 18px",borderBottom:`1px solid ${T.cardBorder}`,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+        <div style={{fontSize:13,fontWeight:650,color:T.textPrimary}}>{t("เวอร์ชันที่แต่ละคนเปิดอยู่","Version each person is using")}</div>
+        <div style={{fontSize:12,color:T.textMuted}}>{t("ของคุณ","Yours")}: <b style={{color:T.textPrimary}}>v{me.version} · build {me.build}</b>{me.commit ? ` · ${me.commit}` : ""}</div>
+        {rows && list.length > 0 && (nOld === 0
+          ? <span data-versions-ok style={{background:T.greenBg,color:T.green,fontSize:12,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{t("ทุกคนใช้เวอร์ชันเดียวกัน","Everyone is on the same version")}</span>
+          : <span data-versions-old style={{background:T.amberBg,color:"#92400e",fontSize:12,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{t(`${nOld} คนยังใช้เวอร์ชันอื่น — ให้รีเฟรช`,`${nOld} on another version — ask them to refresh`)}</span>)}
+        <button className="btn-ghost" onClick={load} style={{marginLeft:"auto",fontSize:12,padding:"5px 12px"}}>{t("โหลดใหม่","Reload")}</button>
+      </div>
+      {rows === null ? (
+        <div style={{padding:24,color:T.textMuted,fontSize:13}}>{t("กำลังโหลด...","Loading...")}</div>
+      ) : list.length === 0 ? (
+        <div style={{padding:24,color:T.textMuted,fontSize:13,lineHeight:1.6}}>
+          {t("ยังไม่มีข้อมูล — ต้องรันไฟล์ tender-cost-version.sql ใน Supabase ครั้งเดียว แล้วให้แต่ละคนเปิดแอปใหม่","No data yet — run tender-cost-version.sql in Supabase once, then have each person reopen the app")}
+        </div>
+      ) : (
+        <div className="hscroll"><table style={{width:"100%",minWidth:640,borderCollapse:"collapse"}}>
+          <thead><tr style={{background:"#f8fafc"}}>
+            {[["ผู้ใช้","User"],["แผนก","Department"],["เวอร์ชัน","Version"],["Build","Build"],["เปิดล่าสุด","Last opened"]].map(([h,he]) => <th key={h} style={th}>{t(h,he)}</th>)}
+          </tr></thead>
+          <tbody>
+            {list.map(r => (
+              <tr key={r.key} data-seen-row data-same={same(r) ? "1" : "0"} style={{background:same(r) ? "transparent" : "#fffbeb"}}>
+                <td style={{...td,fontWeight:600,color:T.textPrimary}}>{r.name || "—"}</td>
+                <td style={{...td,color:T.textSecondary}}>{ROLE_LABELS[r.role] || r.role || "—"}</td>
+                <td style={td}>{r.version ? `v${r.version}` : "—"}</td>
+                <td style={{...td,color:same(r) ? T.green : "#92400e",fontWeight:650}}>{r.build || "—"}{r.commit ? <span style={{color:T.textMuted,fontWeight:400}}> · {r.commit}</span> : null}{!same(r) && <span style={{marginLeft:8,fontSize:11}}>{t("ไม่ตรง","differs")}</span>}</td>
+                <td style={{...td,color:T.textSecondary,fontSize:12}}>{(r.at || r.updated_at) ? new Date(r.at || r.updated_at).toLocaleString(uiLocale()) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ onBack, onLogout, session }) {
   const [tab,   setTab]   = useState("users");
   const [users, setUsers] = useState([]);
@@ -334,7 +383,7 @@ function AdminPanel({ onBack, onLogout, session }) {
 
       <div style={{padding:"28px 32px"}}>
         <div style={{display:"flex",gap:8,marginBottom:22}}>
-          {[["users",t("จัดการผู้ใช้","Manage users")],["accounts",t("รหัสบัญชี","Account codes")],["logs",t("Log การเข้าใช้งาน","Access log")],["restore",t("กู้คืนข้อมูล","Restore data")]].map(([id,label])=>(
+          {[["users",t("จัดการผู้ใช้","Manage users")],["accounts",t("รหัสบัญชี","Account codes")],["logs",t("Log การเข้าใช้งาน","Access log")],["versions",t("เวอร์ชันที่ใช้","Versions in use")],["restore",t("กู้คืนข้อมูล","Restore data")]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)}
               style={{background:tab===id?T.blue:T.card,color:tab===id?"#fff":T.textSecondary,border:`1px solid ${tab===id?T.blue:T.cardBorder}`,borderRadius:10,padding:"9px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               {label}
@@ -346,6 +395,8 @@ function AdminPanel({ onBack, onLogout, session }) {
           <div style={{color:T.textMuted,fontSize:13}}>{t("กำลังโหลด...","Loading...")}</div>
         ) : tab === "restore" ? (
           <AdminRestoreTab />
+        ) : tab === "versions" ? (
+          <AdminVersionsTab />
         ) : tab === "accounts" ? (
           <AdminAccountsTab />
         ) : tab === "users" ? (
@@ -435,4 +486,4 @@ function AdminPanel({ onBack, onLogout, session }) {
   );
 }
 
-export { UserRow, AdminRestoreTab, AdminAccountsTab, AdminPanel };
+export { UserRow, AdminRestoreTab, AdminAccountsTab, AdminVersionsTab, AdminPanel };
