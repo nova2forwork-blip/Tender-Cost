@@ -889,7 +889,9 @@ const evalMoney = (expr, allowNegative = false) => {
   const sum = sign * terms.reduce((s, t) => s + (parseFloat(t) || 0), 0);
   if (isNaN(sum)) return "";
   // ช่องที่ติดลบไม่ได้: ยังพิมพ์สูตรลบได้ (เช่น 100-20=80) แต่ถ้าผลรวมติดลบ ให้เป็น 0 กันข้อมูลเสียหาย
-  return String(allowNegative ? Math.round(sum * 100) / 100 : Math.max(0, sum));
+  // ปัดเป็นสตางค์ (2 ตำแหน่ง) เสมอ — เดิมช่องที่ติดลบไม่ได้เก็บทศนิยมเกิน (เช่น 1,643,254.568) ทำให้ยอดรวมมีเศษ
+  const r2 = Math.round(sum * 100) / 100;
+  return String(allowNegative ? r2 : Math.max(0, r2));
 };
 const fmtMoneyInput = (v) => {
   if (v === "" || v == null || isNaN(Number(v))) return "";
