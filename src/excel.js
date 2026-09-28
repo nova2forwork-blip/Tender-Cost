@@ -17,6 +17,11 @@ const STATUS_PILL = [
   [/(ยังไม่กำหนด|unset|ไม่ระบุ)/i,                                                                  { bg:"E5E7EB", fg:"374151" }], // ยังไม่ตั้งค่า = เทา (ไม่ใช่แดงแบบเกินกำหนด)
   [/(to\s*do|todo|ร่าง|ยังไม่|ค้างจ่าย|ค้าง|เกินกำหนด|เกินงบ|ไม่มีงบ|overdue|ยกเลิก|cancel|reject)/i,               { bg:"FEE2E2", fg:"991B1B" }],
 ];
+// รหัสที่เพิ่มเอง (EX-xxxx) เป็นรหัสภายในของระบบ → แสดง "(เพิ่มเอง)" แทน · ชื่ออยู่คอลัมน์ถัดไปอยู่แล้ว
+// (รหัส EX ที่ไม่อยู่ในรายการแล้ว = รหัสเดียวที่ระบุตัวได้ → คงไว้)
+const xCode = (code) => /^EX-/.test(String(code || "")) && accountOf(code) ? "(เพิ่มเอง)" : (code || "");
+// สถานะของงวดจ่ายใน Excel — ส่วนที่ยอดรับของยังไม่ครบ (short) บอกตรง ๆ แทน "รอจ่ายเงิน"
+const payLineLabel = (l) => l.short ? "รอรับของ (ยอดรับยังไม่ครบ)" : PAYMENT_LABEL[l.status];
 function statusPill(val) {
   const s = String(val == null ? "" : val);
   if (!s.trim() || s === "-") return null;
@@ -351,7 +356,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     const waste    = wasteOf(baseline);
     const added    = Object.keys(additions||{}).reduce((s,m)=> m.startsWith("$") ? s : s + monthAddValue(additions, m, a.code), 0);   // รวมตรง ๆ (ไม่ลบกัน กันเศษทศนิยม -฿0)
     const total    = baseline + waste + added;
-    rows1.push([a.code, a.name, a.group, baseline, waste, added, total, ...(U?[toUsd(total,rate)]:[])]);
+    rows1.push([xCode(a.code), a.name, a.group, baseline, waste, added, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups1.push(a.group);
   });
   const dataEnd1 = rows1.length-1;
@@ -387,7 +392,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
     const waste     = wasteOf(baseline);
     const monthVals = months.map(m => monthAddValue(additions, m, a.code));
     const total = baseline + waste + monthVals.reduce((s,v)=>s+v,0);
-    rows2.push([a.code, a.name, baseline, waste, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
+    rows2.push([xCode(a.code), a.name, baseline, waste, ...monthVals, total, ...(U?[toUsd(total,rate)]:[])]);
     rowGroups2.push(a.group);
   });
   const dataEnd2 = rows2.length-1;
@@ -441,7 +446,7 @@ function exportQSExcel(project, tenderCosts, additions, extraItems=[], hiddenAcc
       const vals = hasOther ? [...b.vals, b.other] : b.vals;
       const rowTotal = b.total;
       if (rowTotal === 0 && !vals.some(v => v !== 0)) return; // เอาเฉพาะรายการที่มียอดในเดือนนี้
-      rows.push([a.code, a.name, a.group, ...vals, rowTotal, ...(U?[toUsd(rowTotal,rate)]:[])]);
+      rows.push([xCode(a.code), a.name, a.group, ...vals, rowTotal, ...(U?[toUsd(rowTotal,rate)]:[])]);
       rowGroups.push(a.group);
       vals.forEach((v, i) => { colTotals[i] += v; });
       grand += rowTotal;
@@ -519,7 +524,7 @@ function exportQSMonthExcel(project, tenderCosts, additions, month, extraItems=[
     const waste = wasteOf(baseline);
     const cum = baseline + waste + upto.reduce((s, m) => s + monthAddValue(additions, m, a.code), 0);
     if (monthTot === 0 && baseline === 0 && cum === 0) return;
-    rows.push([a.code, a.name, a.group, baseline, waste, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
+    rows.push([xCode(a.code), a.name, a.group, baseline, waste, ...vals, monthTot, cum, ...(U?[toUsd(cum,rate)]:[])]);
     rowGroups.push(a.group);
     vals.forEach((v, i) => { colTotals[i] += v; });
     gBase += baseline; gWaste += waste; gMonth += monthTot; gCum += cum;
@@ -611,7 +616,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   const lineCount = {}; // จำนวนบรรทัดสูงสุดต่อแถว → ใช้ตั้งความสูงแถว
   mCodes.forEach((code, ri) => {
     const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code), takeoff=takeoffOf(code);
-    const row = [code, nameOf(code), budget, takeoff, stock, committed, budget-stock-committed-planned];
+    const row = [xCode(code), nameOf(code), budget, takeoff, stock, committed, budget-stock-committed-planned];
     let maxLines = 1;
     mMonths.forEach(mk => { const l=cellLines(cellOf(code,mk)); maxLines=Math.max(maxLines, l.length||1); row.push(l.length?l.join("\n"):"-"); });
     row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0), budget-stock-committed); // Balance Cost = Tender Cost − Stock − Issue PO
@@ -701,7 +706,7 @@ function addAccountingMatrixSheet(wb, { project, poEntries, incomingPlan=[], ten
   const mgStart = 6, mgTotCol = 6+mgM.length, payStart = mgTotCol+1, payTotCol = payStart+payM.length, poCol = payTotCol+1, poBalCol = poCol+1, numCols = poBalCol+1;
   const blank = (v) => v ? v : "-";
   rowsData.forEach(r => {
-    rows.push([r.a.code, r.a.name, blank(r.budget), blank(r.balPO), blank(r.stock), blank(r.balCost),
+    rows.push([xCode(r.a.code), r.a.name, blank(r.budget), blank(r.balPO), blank(r.stock), blank(r.balCost),
       ...r.mgRow.map(c=>blank(c.eff)), blank(r.mgTot),
       ...r.pyRow.map(v=>blank(v)), blank(r.pyTot), blank(r.committed), blank(r.balPOout)]);
   });
@@ -767,7 +772,7 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
       const deliveryStr = _rd.map((r,i) => `${_rd.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
       const acc = accountOf(it.code);
       const amount = parseFloat(it.amount) || 0;
-      rows1.push([p.date, it.code, acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay], p.notes||""]);
+      rows1.push([p.date, xCode(it.code), acc?.name||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay], p.notes||""]);
       rowGroups1.push(acc?.group || "-");
       grand1 += amount;
     });
@@ -814,7 +819,7 @@ function exportProcurementExcel(project, poEntries, incomingPlan=[], tenderCosts
           poItems(p).forEach(it => {
             const acc = accountOf(it.code);
             const amount = parseFloat(it.amount) || 0;
-            rows.push([it.code, acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, ...(U?[toUsd(amount,rate)]:[]), p.status, PAYMENT_LABEL[pay]]);
+            rows.push([xCode(it.code), acc?.name||"", acc?.group||"-", itemSupplierName(p), poNumbersLabel(p), p.date, amount, ...(U?[toUsd(amount,rate)]:[]), p.status, PAYMENT_LABEL[pay]]);
             rowGroups.push(acc?.group||"-");
             grand += amount;
           });
@@ -866,11 +871,11 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
     const committed = poEntries.reduce((s,p)=>s+poAmountForCode(p,a.code),0);
     if (budget<=0 && committed<=0) return;
     const variance = budget - committed;
-    const pctUsed  = budget>0 ? committed/budget : (committed>0 ? 9.99 : 0);
+    const pctUsed  = budget>0 ? committed/budget : "—";   // ไม่มีงบ → ไม่มี % (เดิมใส่ 9.99 = 999% ดูเหมือนเกินงบ 10 เท่า)
     const status   = committed>0 && budget<=0 ? "ไม่มีงบ" : committed>budget && budget>0 ? "เกินงบ" : committed>0 ? "OK" : budget>0 ? "ยังไม่ PO" : "-";
     rows1.push(U
-      ? [a.code, a.name, a.group, budget, toUsd(budget,rate), committed, toUsd(committed,rate), variance, pctUsed, status]
-      : [a.code, a.name, a.group, budget, committed, variance, pctUsed, status]);
+      ? [xCode(a.code), a.name, a.group, budget, toUsd(budget,rate), committed, toUsd(committed,rate), variance, pctUsed, status]
+      : [xCode(a.code), a.name, a.group, budget, committed, variance, pctUsed, status]);
     rowGroups1.push(a.group);
     gB += budget; gC += committed;
   });
@@ -914,7 +919,7 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const deliveryStr = _rd2.map((r,i) => `${_rd2.length>1?`งวด${i+1}: `:""}${r.plan||"—"} → ${r.actual? "รับ "+r.actual : "รอ"}`).join("\n") || "-";
       const acc = accountOf(it.code);
       const amount = parseFloat(it.amount) || 0;
-      rows2.push([p.date, it.code, acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay]]);
+      rows2.push([p.date, xCode(it.code), acc?.name||"", acc?.group||"", itemSupplierName(p), poNumbersLabel(p), amount, ...(U?[toUsd(amount,rate)]:[]), p.status, deliveryStr, poNextDueDate(pItem)||"-", PAYMENT_LABEL[pay]]);
       rowGroups2.push(acc?.group || "-");
       grand2 += amount;
     });
@@ -1015,8 +1020,8 @@ function exportAccountingExcel(project, tenderCosts, additions, poEntries, extra
       const label = mk==="9999-99" ? "ยังไม่ระบุ" : monthShortLabel(mk);
       const incomingTxt = l.incoming ? `${l.incoming}${l.incomingType?` (${l.incomingType})`:""}` : "-";
       rowsC.push(U
-        ? [label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, toUsd(l.amount,rate), PAYMENT_LABEL[l.status]]
-        : [label, l.payDate||"-", l.supplier, l.poNo, l.code, l.accName, l.method, incomingTxt, l.amount, PAYMENT_LABEL[l.status]]);
+        ? [label, l.payDate||"-", l.supplier, l.poNo, xCode(l.code), l.accName, l.method, incomingTxt, l.amount, toUsd(l.amount,rate), payLineLabel(l)]
+        : [label, l.payDate||"-", l.supplier, l.poNo, xCode(l.code), l.accName, l.method, incomingTxt, l.amount, payLineLabel(l)]);
       rowGroupsD.push(mk);
       grandD += l.amount;
     });
