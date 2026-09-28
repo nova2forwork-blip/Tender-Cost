@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { sgMany } from "./supabase.js";
 import { verifyLogin } from "./auth.js";
-import { T, fmtK, projectSummary, t, uid } from "./core.jsx";
+import { T, appBuildLabel, fmtK, projectSummary, t, uid } from "./core.jsx";
 import { EMOJI_ICON, Ico, LangToggle, SearchInput, SyncBadge, TopBar, UserMenu } from "./ui.jsx";
 
 // ─── Login Screen ─────────────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ function LoginScreen({ onLogin }) {
             {busy ? t("กำลังตรวจสอบ...","Signing in...") : t("เข้าสู่ระบบ","Sign in")}
           </button>
         </div>
+        <div data-login-version style={{marginTop:16,textAlign:"center",fontSize:11,color:T.textMuted,fontVariantNumeric:"tabular-nums"}}>{appBuildLabel()}</div>
       </form>
     </div>
   );
