@@ -1,6 +1,6 @@
 // Tender Cost — แผนกจัดซื้อ (รายการ PO, ฟอร์ม PO, แผนของเข้า, ติดตาม)
 import { useEffect, useState } from "react";
-import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
+import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, unusualAmountIssues, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
 function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
@@ -641,7 +641,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const FORM_KINDS = ["po-no-punct","po-no-month","same-amount","far-date","decimals","supplier-mark"];
   const formIssues = poDataIssues({ id:"__form", date: form.date, status: form.status, supplier: form.supplier,
     // ส่ง items ทั้งหมด (บรรทัดว่างไม่ทำให้เตือน) — ถ้า items ว่าง migratePO จะมองเป็น PO แบบเก่า
-    items: form.items }, poDataContext(otherPOs)).filter(x => FORM_KINDS.includes(x.kind));
+    items: form.items }, poDataContext(otherPOs)).filter(x => FORM_KINDS.includes(x.kind)).concat(unusualAmountIssues(form.items.filter(it => {   // แก้ PO เดิม: เตือนเฉพาะรายการที่ยอดเปลี่ยน (ยอดเดิมยืนยันไปแล้ว)
+      const prevPO = editId ? (editingPlan ? plans : poEntries).find(p => p.id === editId) : null;
+      const prevIt = prevPO && poItems(prevPO).find(x => x.id === it.id);
+      return !prevIt || String(prevIt.amount) !== String(it.amount) || prevIt.code !== it.code;
+    }), otherPOs));
 
   const submit = async () => {
     setPoNoTouched(true);
