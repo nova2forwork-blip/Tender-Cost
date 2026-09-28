@@ -8325,10 +8325,8 @@ function AccountingView({ project, updateProject, tenderCosts, additions, poEntr
                       </td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:T.blue,fontWeight:500}}>{a.budget>0?fmt(a.budget):"—"}{a.budget>0&&usdLine(a.budget, usdRate)}</td>
                       <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:(a.over||noBudget)?T.red:T.amber,fontWeight:(a.over||noBudget)?650:500}}>{a.committed>0?fmt(a.committed):"—"}{a.committed>0&&usdLine(a.committed, usdRate)}</td>
-                      <td style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?650:500}}>
-                        {noBudget ? <span data-word="nobudget" title={t("มี PO แต่ QS ยังไม่ได้ลงงบของรหัสนี้ — ทั้งยอดนับเป็นส่วนเกิน","Has POs but no QS budget for this code — the whole amount counts as over")} style={{background:T.redBg,color:T.red,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t("ไม่มีงบ","No budget")}</span>
-                          : a.over ? <span data-word="over" style={{background:T.redBg,color:T.red,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t("เกินงบ","Over")}</span>
-                          : (a.budget>0 && a.committed/a.budget>=0.8) ? <span data-word="near" style={{background:T.amberBg,color:T.amber,fontSize:11,fontWeight:650,padding:"1px 7px",borderRadius:20,marginRight:8,verticalAlign:"1px"}}>{t(`ใช้ ${Math.round(a.committed/a.budget*100)}%`,`${Math.round(a.committed/a.budget*100)}% used`)}</span> : null}
+                      <td data-variance title={noBudget ? t("ไม่มีงบ — มี PO แต่รหัสนี้ไม่มีงบ ทั้งยอดนับเป็นส่วนเกิน","No budget — POs on a code with no budget; the whole amount counts as over") : a.over ? t("เกินงบ","Over budget") : (a.budget>0 && a.committed/a.budget>=0.8) ? t(`ใช้ไป ${Math.round(a.committed/a.budget*100)}% ของงบ`,`${Math.round(a.committed/a.budget*100)}% of budget used`) : undefined}
+                        style={{padding:"10px 16px",textAlign:"right",fontVariantNumeric:"tabular-nums",color:variance<0?T.red:T.textSecondary,fontWeight:variance<0?650:500}}>
                         {(a.budget>0||a.committed>0)?`${variance<0?"-":""}${fmt(Math.abs(variance))}`:"—"}
                         {(a.budget>0||a.committed>0)&&usdLine(Math.abs(variance), usdRate)}
                       </td>
