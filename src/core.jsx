@@ -511,7 +511,10 @@ const PO_STAGES = ["waiting","partial","received","paid"];
 const poStage = (p) => {
   if (paymentStatus(p) === "paid") return "paid";
   const inc = incomingStatus(p);
-  return inc === "received" ? "received" : inc === "partial" ? "partial" : "waiting";
+  if (inc === "received") return "received";
+  // รับของมาแล้วบางส่วน = "รับบางส่วน" เสมอ แม้งวดที่เหลือจะล่าช้า (เดิมสถานะ "ล่าช้า" มาก่อน → ไปอยู่ "รอของเข้า"
+  // ทั้งที่รับของแล้ว ตัวเลขชิปจึงไม่ตรงความหมาย) — ความล่าช้ายังนับในชิป "ของเข้าล่าช้า" ตามเดิม
+  return poRounds(p).some(roundReceived) ? "partial" : "waiting";
 };
 const poStageLabel = (k) => ({
   All: t("ทั้งหมด","All"), waiting: t("รอของเข้า","Awaiting goods"), partial: t("รับบางส่วน","Partly received"),
