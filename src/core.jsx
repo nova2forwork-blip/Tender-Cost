@@ -186,6 +186,32 @@ async function migrateAccountCodes(renameMap) {
   for (const w of writes) await ssOrThrow(w.key, w.value);
 }
 
+// ─── เวอร์ชัน / บิลด์ ──────────────────────────────────────────────────────────
+// APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
+// build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
+// commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
+const APP_VERSION = "2026.09.28-4";
+const _envOf = () => { try { return (import.meta && import.meta.env) || {}; } catch { return {}; } };
+const buildFromScripts = (doc) => {
+  try {
+    const srcs = [...(doc || document).querySelectorAll('script[type="module"][src], script[src]')].map(s => s.getAttribute("src") || "");
+    for (const src of srcs) { const m = src.match(/\/assets\/index[.-]([A-Za-z0-9_-]{6,})\.js/); if (m) return m[1]; }
+  } catch { /* ไม่มี document (ทดสอบ) */ }
+  return "";
+};
+// หา build จากข้อความ HTML (ใช้ตอนเช็กว่ามีเวอร์ชันใหม่บนเซิร์ฟเวอร์)
+const buildFromHtml = (html) => { const m = String(html || "").match(/\/assets\/index[.-]([A-Za-z0-9_-]{6,})\.js/); return m ? m[1] : ""; };
+let _buildCache = null;
+const appBuild = () => {
+  if (_buildCache) return _buildCache;
+  const env = _envOf();
+  const commit = String(env.VITE_VERCEL_GIT_COMMIT_SHA || env.VITE_GIT_COMMIT || "").slice(0, 7);
+  const build = (typeof window !== "undefined" && window.__APP_BUILD) || (typeof document !== "undefined" ? buildFromScripts(document) : "");   // __APP_BUILD = ใช้ในชุดทดสอบเท่านั้น
+  _buildCache = { version: APP_VERSION, build: build || "dev", commit, env: env.VITE_VERCEL_ENV || env.MODE || "" };
+  return _buildCache;
+};
+const appBuildLabel = () => { const b = appBuild(); return `v${b.version} · build ${b.build}${b.commit ? ` · ${b.commit}` : ""}`; };
+
 // ─── Incoming / Payment tracking status ────────────────────────────────────
 // A PO's incoming status is derived from its planned/actual dates rather than
 // stored directly, so it's always in sync with today's date.
@@ -581,6 +607,24 @@ const poDataContext = (pos = []) => {
   const byNo = {};
   pos.forEach(p => { const k = normPoNo(poSupplier(p).poNumber); if (k) (byNo[k] = byNo[k] || []).push(p.id); });
   return { byNo, counts: supplierCounts(pos), today: todayStr() };
+};
+// ยอดสูงผิดปกติเมื่อเทียบกับ PO อื่นของรหัสเดียวกัน (มีอย่างน้อย 2 ใบให้เทียบ) — ใช้ในฟอร์ม PO เพื่อถามยืนยันเท่านั้น
+// (ยอดใหญ่ที่ถูกต้องเกิดขึ้นได้ เช่น PO ค่าขนส่งทั้งโครงการ — กดยืนยันแล้วบันทึกได้)
+const UNUSUAL_X = 10, UNUSUAL_MIN = 100000;
+const unusualAmountIssues = (items = [], otherPOs = []) => {
+  const hist = {};
+  otherPOs.forEach(p => poItems(p).forEach(it => { const a = parseFloat(it.amount) || 0; if (a > 0 && it.code) (hist[it.code] = hist[it.code] || []).push(a); }));
+  const median = (arr) => { const s = arr.slice().sort((x, y) => x - y), m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const out = [];
+  items.forEach(it => {
+    const a = parseFloat(it.amount) || 0, h = hist[it.code] || [];
+    if (!it.code || a < UNUSUAL_MIN || h.length < 2) return;
+    const m = median(h);
+    if (m > 0 && a >= UNUSUAL_X * m) out.push({ kind: "unusual", msg: t(
+      `รายการ ${it.code} ยอด ${fmt(a)} สูงกว่าปกติของรหัสนี้ประมาณ ${Math.round(a / m)} เท่า (ปกติ ≈ ${fmt(m)}) — ตรวจว่ายอดถูกต้อง`,
+      `Line ${it.code} amount ${fmt(a)} is about ${Math.round(a / m)}× the usual for this code (usually ≈ ${fmt(m)}) — check the amount`) });
+  });
+  return out;
 };
 // รายการเรื่องที่ควรตรวจของ PO หนึ่งใบ → [{ kind, msg }]
 const poDataIssues = (p, ctx = poDataContext([])) => {
@@ -990,15 +1034,14 @@ const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [],
   const codes = [...ACCOUNTS.filter(a => !effHidden.includes(a.code)).map(a => a.code), ...(extra || []).filter(e => !e.parentCode).map(e => e.code)];
   const budget = codes.reduce((s, c) => s + (parseFloat(combined[c]) || 0), 0);
   const committed = (po || []).reduce((s, p) => s + poTotal(p), 0);
-  const thisMonth = todayStr().slice(0, 7), byMonth = {};
-  (po || []).flatMap(poPayLines).forEach(l => {
-    const mk = l.month || "9999-99"; const b = byMonth[mk] || (byMonth[mk] = { sum: 0, paid: 0 });
-    b.sum += l.amount; b.paid += (l.paidAmount || 0);
-  });
-  const dueNow = Object.entries(byMonth).filter(([mk]) => mk !== "9999-99" && mk <= thisMonth).reduce((s, [, b]) => s + Math.max(0, b.sum - b.paid), 0);
+  // ต้องจ่ายเดือนนี้ (รวมค้าง) — สูตรเดียวกับหน้าบัญชี: ไม่นับของที่เลยวันแผนแล้วแต่ยังไม่เข้า (ยังไม่ต้องจ่าย)
+  const thisMonth = todayStr().slice(0, 7), today = todayStr();
+  const dueNow = (po || []).flatMap(poPayLines)
+    .filter(l => l.month && l.month <= thisMonth && !(!l.received && !l.paid && l.payDate && l.payDate < today))
+    .reduce((s, l) => s + Math.max(0, (l.amount || 0) - (l.paidAmount || 0)), 0);
   const late = (po || []).filter(p => incomingStatus(p) === "late").length;
   const overCodes = codes.filter(c => { const b = parseFloat(combined[c]) || 0; const u = (po || []).reduce((s, p) => s + poAmountForCode(p, c), 0); return b > 0 && u > b + 0.005; }).length;
   return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length, late, overCodes };
 };
 
-export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
+export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, APP_VERSION, appBuild, appBuildLabel, buildFromHtml, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, unusualAmountIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
