@@ -42,6 +42,9 @@ export default function App() {
   const [projLoadErr, setProjLoadErr] = useState("");    // โหลดข้อมูลโครงการไม่สำเร็จ
   const [listLoadErr, setListLoadErr] = useState(false);  // โหลดรายการโครงการไม่สำเร็จ (อย่าโชว์ "ยังไม่มีโครงการ" หลอก ๆ)
   const [role,     setRole]     = useState(null);
+  // บัญชีเปิดดูหน้าจัดซื้อ (ดูอย่างเดียว) — กลับเป็นหน้าบัญชีเมื่อออกจากโครงการ/เปลี่ยนโครงการ
+  const [acctPeek, setAcctPeek] = useState(false);
+  useEffect(() => { setAcctPeek(false); }, [screen, activeId]);
   const [tenderCosts, setTCosts]= useState({});
   const [additions,   setAdditions]  = useState({});
   const [extraItems,  setExtraItems] = useState([]);
@@ -537,7 +540,7 @@ export default function App() {
   const updateBanner = newBuild && !updateLater ? (
     <div data-update-banner role="status" style={{position:"fixed",left:"50%",top:12,transform:"translateX(-50%)",zIndex:300,maxWidth:"94vw",
       background:"#1e3a8a",color:"#fff",borderRadius:12,padding:"10px 14px",boxShadow:"0 10px 30px rgba(15,23,42,0.3)",fontSize:13,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-      <span style={{flex:1,minWidth:200}}>{t("มีเวอร์ชันใหม่ของแอป — รีเฟรชเพื่อใช้เวอร์ชันเดียวกับทุกคน","A new version is available — refresh so everyone uses the same version")} <span style={{opacity:0.7,fontVariantNumeric:"tabular-nums"}}>(build {newBuild})</span></span>
+      <span style={{flex:1,minWidth:200}}>{t("มีเวอร์ชันใหม่ของแอป — รีเฟรชเพื่อใช้เวอร์ชันเดียวกับทุกคน","A new version is available — refresh so everyone uses the same version")}</span>
       <button data-update-now onClick={() => leaveIfDirty(() => window.location.reload())} style={{background:"#fff",color:"#1e3a8a",border:"none",borderRadius:8,padding:"6px 14px",fontWeight:700,cursor:"pointer",fontSize:13}}>{t("รีเฟรชเลย","Refresh now")}</button>
       <button onClick={() => setUpdateLater(true)} style={{background:"none",color:"#c7d2fe",border:"none",cursor:"pointer",fontSize:12}}>{t("ภายหลัง","Later")}</button>
     </div>
@@ -697,8 +700,17 @@ export default function App() {
           Promise.resolve(exportProcurementExcel(activeProject, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts))
         )} />
       )}
-      {screen === "app" && projReadyId === activeId && effectiveRole === "accounting"  && (
-        <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan))} />
+      {screen === "app" && projReadyId === activeId && effectiveRole === "accounting" && !(acctPeek && session.role === "accounting") && (
+        <AccountingView {...sharedProps} onExport={() => runExport(() => exportAccountingExcel(activeProject, tenderCosts, additions, poEntries, extraItems, hiddenAccounts, incomingPlan))}
+          deptSwitch={session.role === "accounting" ? { label: t("ดูจัดซื้อ","View procurement"), icon: "eye", title: t("เปิดดูข้อมูลจัดซื้อ (ดูอย่างเดียว แก้ไขไม่ได้)","Open procurement data (view only)"), onClick: () => setAcctPeek(true) } : null} />
+      )}
+      {/* บัญชีดูข้อมูลจัดซื้อ — หน้าจัดซื้อเดียวกัน แต่ readOnly: ไม่มีปุ่มเพิ่ม/แก้/ลบ และบันทึกไม่ได้ */}
+      {screen === "app" && projReadyId === activeId && effectiveRole === "accounting" && acctPeek && session.role === "accounting" && (
+        <ProcurementView {...sharedProps} readOnly
+          savePO={() => {}} saveIncomingPlan={() => {}} updateProject={() => {}}
+          onBack={() => setAcctPeek(false)}
+          deptSwitch={{ label: t("กลับหน้าบัญชี","Back to Accounting"), title: t("กลับไปหน้าบัญชี","Back to the Accounting page"), onClick: () => setAcctPeek(false) }}
+          onExport={() => runExport(() => Promise.resolve(exportProcurementExcel(activeProject, poEntries, incomingPlan, tenderCosts, additions, extraItems, hiddenAccounts)))} />
       )}
       </ErrorBoundary>
     </>
