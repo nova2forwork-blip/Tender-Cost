@@ -190,9 +190,11 @@ async function migrateAccountCodes(renameMap) {
 // APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
 // build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
 // commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
-const APP_VERSION = "1.0.007";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
+const APP_VERSION = "1.0.008";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
 // ประวัติการอัปเดต (ใหม่สุดอยู่บน) — แสดงในเมนูผู้ใช้ → "ประวัติการอัปเดต"
 const APP_CHANGELOG = [
+  { v: "1.0.008", date: "2026-09-30", th: ["ตารางรวมเดือน (บัญชี) และของเข้ารายเดือน (จัดซื้อ): ล็อกหัวตารางและแถว TOTAL ตอนเลื่อนลง ไม่หลุดขึ้นไปแล้ว"],
+    en: ["Monthly matrix (Accounting) and monthly incoming (Procurement): header and TOTAL row stay in place while scrolling down"] },
   { v: "1.0.007", date: "2026-09-30", th: ["บัญชีกด \"ดูจัดซื้อ\" เพื่อดูรายการ PO / แผนของเข้า / ติดตาม / รายละเอียด PO และ Export ของจัดซื้อได้ — ดูอย่างเดียว แก้ไขไม่ได้"],
     en: ["Accounting can press \"View procurement\" to see POs, incoming plans, tracking, PO details and the procurement export — view only, no editing"] },
   { v: "1.0.006", date: "2026-09-30", th: ["บัญชี → ตารางรวมเดือน: เรียงคอลัมน์ใหม่ Tender Cost · Stock · Issue PO · Balance PO (= Tender − Stock − Issue PO) ทั้งในแอปและ Excel", "เอาคอลัมน์ซ้ำ (Balance Pending PO / Pending PO / Total PO / Balance Cost) ออก"],
@@ -925,6 +927,12 @@ const GLOBAL_CSS = `
   .fatscroll::-webkit-scrollbar-thumb { background: #556274; border-radius: 14px; border: 5px solid #dbe2ec; min-width: 64px; min-height: 64px; }
   .fatscroll::-webkit-scrollbar-thumb:hover { background: #3b4756; }
   .fatscroll::-webkit-scrollbar-corner { background: #e2e8f0; }
+  /* ตารางรวมเดือน (บัญชี) / ของเข้ารายเดือน (จัดซื้อ): ล็อกหัวตาราง + แถว TOTAL ตอนเลื่อนลง
+     กล่องตารางสูงไม่เกินหน้าจอ → เลื่อนในกล่อง หัวตารางจึงติดอยู่ด้านบนเสมอ (เดิมเลื่อนทั้งหน้า หัวตารางหลุดขึ้นไป) */
+  .lockhead { max-height: calc(100vh - 120px); min-height: 320px; overscroll-behavior: contain; }
+  .lockhead thead th { position: sticky; z-index: 2; }
+  .lockhead tfoot td { position: sticky; bottom: 0; z-index: 2; box-shadow: inset 0 1px 0 #cbd5e1; }
+  .lockhead tfoot td:first-child { z-index: 3 !important; }
   /* เลื่อนลื่นบน iOS */
   .hscroll, .mscroll { -webkit-overflow-scrolling: touch; }
   /* ── มือถือ/จอแคบ: ปุ่มแตะง่ายขึ้น + ช่องกรอกไม่โดน iOS ซูมอัตโนมัติ (ต้อง ≥16px) ── */
