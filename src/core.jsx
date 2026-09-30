@@ -190,9 +190,11 @@ async function migrateAccountCodes(renameMap) {
 // APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
 // build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
 // commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
-const APP_VERSION = "1.0.009";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
+const APP_VERSION = "1.0.010";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
 // ประวัติการอัปเดต (ใหม่สุดอยู่บน) — แสดงในเมนูผู้ใช้ → "ประวัติการอัปเดต"
 const APP_CHANGELOG = [
+  { v: "1.0.010", date: "2026-09-30", th: ["ฟอร์ม PO: ใต้ช่อง Take off บอกทันทีว่า Take off ของรหัสนั้นรวมแล้วกี่ % ของ Tender (รวมที่กำลังกรอก)"],
+    en: ["PO form: under Take off, shows live how much of the Tender is taken off for that code (incl. what you are typing)"] },
   { v: "1.0.009", date: "2026-09-30", th: ["จัดซื้อ: เพิ่มการ์ด \"Tender Cost\" บอกยอด Tender รวม และ Take off มาแล้วกี่ % ของ Tender", "ตารางของเข้ารายเดือน + Excel: เพิ่มคอลัมน์ \"% Take off\" (Take off ÷ Tender Cost) ต่อรหัส และรวม"],
     en: ["Procurement: new \"Tender Cost\" card with the total tender and how much is taken off (%)", "Monthly incoming table + Excel: new \"% Take off\" column (Take off ÷ Tender Cost) per code and in total"] },
   { v: "1.0.008", date: "2026-09-30", th: ["ตารางรวมเดือน (บัญชี) และของเข้ารายเดือน (จัดซื้อ): ล็อกหัวตารางและแถว TOTAL ตอนเลื่อนลง ไม่หลุดขึ้นไปแล้ว"],
