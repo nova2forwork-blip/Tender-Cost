@@ -375,6 +375,9 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const plannedOf = (code) => list.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
   const stockOf = (code) => pos.reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.store) || 0), 0), 0);
   const takeoffOf = (code) => [...pos, ...list].reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.takeoff) || 0), 0), 0); // Take off (กรอกเอง)
+  // % Take off = Take off ÷ Tender Cost ของรหัสนั้น (ไม่มีงบ → null แสดง "—")
+  const tkPctOf = (code) => budgetOf(code) > 0 ? takeoffOf(code) / budgetOf(code) * 100 : null;
+  const pctTxt = (v) => v == null ? "—" : `${v.toFixed(1)}%`;
   const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // "Pending PO" = งบ − Stock − Issue PO − แผน (ยอดที่ยังต้องสั่ง)
   const balPOof   = (code) => budgetOf(code) - stockOf(code) - issuePOof(code);                      // "Balance Cost" = Tender Cost − Stock − Issue PO
@@ -385,6 +388,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       case "name":    return nameOf(code);
       case "tender":  return budgetOf(code);
       case "takeoff": return takeoffOf(code);
+      case "tkpct":   return tkPctOf(code) ?? -1;
       case "stock":   return stockOf(code);
       case "issue":   return issuePOof(code);
       case "pending": return balCostOf(code);
@@ -455,6 +459,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <th onClick={()=>toggleSort("name")}    style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
                   <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS = ราคาเดิม + เผื่อเศษ ${WASTE_LBL} (ของราคาเดิม) + งานเพิ่ม`,`QS budget = baseline + ${WASTE_LBL} wastage (on baseline) + additions`)}>Tender Cost<span style={{fontSize:11,fontWeight:600,opacity:0.8,marginLeft:4}}>{t(`รวมเผื่อ ${WASTE_LBL}`,`incl. ${WASTE_LBL}`)}</span>{arrow("tender")}</th>
                   <th onClick={()=>toggleSort("takeoff")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Take off{arrow("takeoff")}</th>
+                  <th data-tkpct-head onClick={()=>toggleSort("tkpct")} style={{ ...hM(bCost), minWidth: 84, cursor:"pointer", userSelect:"none" }} title={t("Take off ÷ Tender Cost — take off มาแล้วกี่ % ของงบ (เกิน 100% = ตัวแดง)","Take off ÷ Tender Cost — how much of the budget is taken off (over 100% = red)")}>% Take off{arrow("tkpct")}</th>
                   <th onClick={()=>toggleSort("stock")}   style={{ ...hM(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
                   <th onClick={()=>toggleSort("issue")}   style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Issue PO{arrow("issue")}</th>
                   <th onClick={()=>toggleSort("pending")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("pending")}</th>
@@ -472,6 +477,9 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                       <td style={{ ...cM, ...stickyBody1, color: T.textSecondary }}>{nameOf(code)}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
+                      {(() => { const pc = tkPctOf(code); return (
+                        <td data-tkpct style={{ ...nM, background: bCost, fontWeight: 600, color: !tko ? T.textMuted : pc == null || pc > 100 ? T.red : T.textPrimary }}
+                          title={!tko ? undefined : pc == null ? t("มี Take off แต่ไม่มีงบ","Take off with no budget") : undefined}>{!tko ? "-" : pctTxt(pc)}</td>); })()}
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(iss)}{iss ? usdLine(iss, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
@@ -499,6 +507,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <td style={{ ...cM, ...stickyBody0, fontWeight: 700, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(budgetOf))}{sum(budgetOf) ? usdLine(sum(budgetOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(takeoffOf))}{sum(takeoffOf) ? usdLine(sum(takeoffOf), usdRate) : null}</td>
+                  <td data-tkpct-total title={t("คิดเฉพาะรหัสที่อยู่ในตารางนี้ — ภาพรวมทั้งโครงการดูที่การ์ด Tender Cost ด้านบน","Only the codes in this table — the whole-project figure is on the Tender Cost card above")} style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(budgetOf) > 0 && sum(takeoffOf) / sum(budgetOf) > 1 ? T.red : T.textPrimary }}>{sum(takeoffOf) ? pctTxt(sum(budgetOf) > 0 ? sum(takeoffOf) / sum(budgetOf) * 100 : null) : "-"}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(stockOf))}{sum(stockOf) ? usdLine(sum(stockOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(issuePOof))}{sum(issuePOof) ? usdLine(sum(issuePOof), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
@@ -620,6 +629,9 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
   const totalComm   = poEntries.reduce((s,p)=>s+poTotal(p),0);
   const totalPaid   = poEntries.reduce((s,p)=>s+poPaidAmount(p),0);
   const paidCount   = poEntries.filter(p=>paymentStatus(p)==="paid").length;
+  // Take off รวมทั้งโครงการ (PO + แผน) — ใช้บอกว่า Take off มาแล้วกี่ % ของ Tender
+  const fmtPct = (v) => `${v.toFixed(1)}%`;
+  const takeoffTotal = [...poEntries, ...plans].reduce((s,p)=> s + poItems(p).reduce((ss,it)=> ss + (parseFloat(it.takeoff)||0), 0), 0);
 
   // Late-item alert counts, shown as a banner regardless of which tab is
   // active so problems surface immediately instead of only inside "ติดตามของเข้า/จ่ายเงิน".
@@ -942,8 +954,12 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
             )}
           </div>
         )}
-        <div className="stat-grid has-lead" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+        <div className="stat-grid has-lead four" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
           <StatCard lead progress={tenderTotal>0 ? totalComm/tenderTotal*100 : null} label={t(`งบคงเหลือ (รวมเผื่อเศษ ${WASTE_LBL})`,`Budget remaining (incl. ${WASTE_LBL} wastage)`)} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${t("ใช้ไป","Used")} ${((totalComm/tenderTotal)*100).toFixed(1)}% ${t("ของงบ","of budget")} ฿${fmt0(tenderTotal)}`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
+          {/* ยอด Tender ทั้งโครงการ + Take off รวมแล้วกี่ % ของ Tender (Take off = ช่องกรอกเองในรายการ PO/แผน) */}
+          <StatCard label={t(`Tender Cost (รวมเผื่อ ${WASTE_LBL})`,`Tender Cost (incl. ${WASTE_LBL})`)} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate}
+              sub={takeoffTotal ? `Take off ${tenderTotal>0 ? `${fmtPct(takeoffTotal/tenderTotal*100)} ${t("ของ Tender","of Tender")}` : ""} · ฿${fmt0(takeoffTotal)}` : t("ยังไม่มี Take off","No take-off yet")}
+              color={T.blue} icon="📐" accent={T.blueLight}/>
           <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} ${t("รายการ","items")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
           <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} ${t("รายการ","items")} · ${t("จ่ายอัตโนมัติ","auto-paid")}`} color={T.green} icon="✅" accent={T.greenBg}/>
         </div>
