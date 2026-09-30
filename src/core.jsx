@@ -190,7 +190,24 @@ async function migrateAccountCodes(renameMap) {
 // APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
 // build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
 // commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
-const APP_VERSION = "2026.09.28-4";
+const APP_VERSION = "1.0.007";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
+// ประวัติการอัปเดต (ใหม่สุดอยู่บน) — แสดงในเมนูผู้ใช้ → "ประวัติการอัปเดต"
+const APP_CHANGELOG = [
+  { v: "1.0.007", date: "2026-09-30", th: ["บัญชีกด \"ดูจัดซื้อ\" เพื่อดูรายการ PO / แผนของเข้า / ติดตาม / รายละเอียด PO และ Export ของจัดซื้อได้ — ดูอย่างเดียว แก้ไขไม่ได้"],
+    en: ["Accounting can press \"View procurement\" to see POs, incoming plans, tracking, PO details and the procurement export — view only, no editing"] },
+  { v: "1.0.006", date: "2026-09-30", th: ["บัญชี → ตารางรวมเดือน: เรียงคอลัมน์ใหม่ Tender Cost · Stock · Issue PO · Balance PO (= Tender − Stock − Issue PO) ทั้งในแอปและ Excel", "เอาคอลัมน์ซ้ำ (Balance Pending PO / Pending PO / Total PO / Balance Cost) ออก"],
+    en: ["Accounting → Monthly matrix: columns now Tender Cost · Stock · Issue PO · Balance PO (= Tender − Stock − Issue PO), in the app and Excel", "Removed duplicate columns (Balance Pending PO / Pending PO / Total PO / Balance Cost)"] },
+  { v: "1.0.005", date: "2026-09-28", th: ["เลขเวอร์ชันเป็นตัวเลข (1.0.xxx) แทนรหัส build", "เพิ่มหน้าต่าง \"ประวัติการอัปเดต\" ในเมนูผู้ใช้"],
+    en: ["Numeric version (1.0.xxx) instead of the build code", "Added \"Update history\" in the user menu"] },
+  { v: "1.0.004", date: "2026-09-28", th: ["แสดงเวอร์ชันในหน้าเข้าสู่ระบบและเมนูผู้ใช้ · แจ้งเตือนเมื่อมีเวอร์ชันใหม่", "Admin → \"เวอร์ชันที่ใช้\" ดูว่าทุกคนเปิดเวอร์ชันเดียวกันไหม", "บัญชี: \"ครบกำหนดเดือนนี้\" ไม่นับของที่ยังไม่เข้า (แยกแสดงไว้)", "ฟอร์ม PO: ถามยืนยันเมื่อยอดสูงกว่าปกติของรหัสนั้นมาก"],
+    en: ["Version shown on the login screen and user menu · new-version notice", "Admin → \"Versions in use\" shows whether everyone is on the same version", "Accounting: \"Due this month\" excludes goods not received yet (shown separately)", "PO form: confirm when an amount is far above the usual for that code"] },
+  { v: "1.0.003", date: "2026-09-28", th: ["ชิป \"รับบางส่วน\" นับ PO ที่รับของแล้วบางงวดถูกต้อง", "ตารางบัญชีแสดงงบติดลบ", "Excel \"ของเข้ารายเดือน\" ครบทุกรหัส", "รายการใหม่ที่ยังไม่มีรหัสแสดง \"—\" ทุกหน้า"],
+    en: ["\"Partly received\" chip counts POs with some goods in", "Accounting table shows negative budgets", "Excel \"Incoming by month\" lists every code", "New items without a code show \"—\" everywhere"] },
+  { v: "1.0.002", date: "2026-09-28", th: ["QS ใส่/แก้ Acc. Code ของรายการใหม่ได้", "ตารางรายเดือน: หัวตารางกับคอลัมน์ตรงกัน เต็มความกว้าง"],
+    en: ["QS can set/edit the Acc. Code of new items", "Monthly table: header and columns line up, full width"] },
+  { v: "1.0.001", date: "2026-09-28", th: ["แผนจ่ายแยก จ่ายแล้ว / รอจ่าย / รอรับของ (ไม่ขึ้นเกินกำหนดเกินจริง)", "จัดซื้อ: ชิป \"ข้อมูลที่ควรตรวจ\" + คำเตือนในฟอร์ม PO", "Excel: ไม่มี 999% · รหัสภายในแสดง \"(เพิ่มเอง)\""],
+    en: ["Payment plan splits paid / to pay / waiting for goods", "Procurement: \"to check\" chip + PO form warnings", "Excel: no 999% · internal codes shown as \"(เพิ่มเอง)\""] },
+];
 const _envOf = () => { try { return (import.meta && import.meta.env) || {}; } catch { return {}; } };
 const buildFromScripts = (doc) => {
   try {
@@ -210,7 +227,10 @@ const appBuild = () => {
   _buildCache = { version: APP_VERSION, build: build || "dev", commit, env: env.VITE_VERCEL_ENV || env.MODE || "" };
   return _buildCache;
 };
-const appBuildLabel = () => { const b = appBuild(); return `v${b.version} · build ${b.build}${b.commit ? ` · ${b.commit}` : ""}`; };
+const appBuildLabel = () => `v${appBuild().version}`;
+// รหัส build/commit ไว้ดูละเอียด (tooltip / หน้า Admin)
+const appBuildDetail = () => { const b = appBuild(); return `build ${b.build}${b.commit ? ` · commit ${b.commit}` : ""}`; };
+const changelogText = () => APP_CHANGELOG.map(c => `v${c.v} · ${fmtDate(c.date)}\n${(_LANG === "en" ? c.en : c.th).map(x => "• " + x).join("\n")}`).join("\n\n");
 
 // ─── Incoming / Payment tracking status ────────────────────────────────────
 // A PO's incoming status is derived from its planned/actual dates rather than
@@ -1044,4 +1064,4 @@ const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [],
   return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length, late, overCodes };
 };
 
-export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, APP_VERSION, appBuild, appBuildLabel, buildFromHtml, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, unusualAmountIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
+export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, APP_VERSION, APP_CHANGELOG, appBuild, appBuildLabel, appBuildDetail, changelogText, buildFromHtml, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, unusualAmountIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
