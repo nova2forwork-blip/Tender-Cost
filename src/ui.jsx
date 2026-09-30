@@ -1,7 +1,7 @@
 // Tender Cost — ชิ้นส่วนหน้าจอที่ใช้ร่วมกัน (แถบหัว, ปุ่ม, การ์ด, กล่องข้อความ, เครื่องคิดเลข, ช่องกรอกเงิน/วันที่)
 import { Component, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ROLE_LABELS } from "./auth.js";
-import { BNAV_H, BOTTOM, DialogStore, appBuild, codeText, FAB_GAP, FAB_SIZE, GROUPS, PO_STATUS, STATUS_BG, STATUS_CLR, T, _LANG, accountOf, bnavH, fmt, fmt0, poStatusLabel, t, toggleLang, uiLocale, useLang } from "./core.jsx";
+import { APP_CHANGELOG, BNAV_H, BOTTOM, DialogStore, appBuild, appBuildDetail, changelogText, codeText, uiAlert, FAB_GAP, FAB_SIZE, GROUPS, PO_STATUS, STATUS_BG, STATUS_CLR, T, _LANG, accountOf, bnavH, fmt, fmt0, fmtDate, poStatusLabel, t, toggleLang, uiLocale, useLang } from "./core.jsx";
 
 // กันจอขาว: ถ้าหน้าจอส่วนใดโยน error ตอน render จะโชว์กล่องแจ้ง + ปุ่มลองใหม่
 // แทนที่จะพังทั้งแอพ
@@ -144,6 +144,7 @@ const ICON_PATHS = {
   edit: "M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4",
   home: "M4 11l8-7 8 7v9h-5v-6H9v6H4z",
   grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
   eyeoff: "M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a15 15 0 0 1-3.2 3.7M6.6 6.6C4.3 8.1 3 12 3 12s4 6 9 6c1.6 0 3-.4 4.3-1",
   ruler: "M4 17L17 4l3 3L7 20zM8 13l2 2M11 10l2 2M14 7l2 2",
   gear: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1",
@@ -663,6 +664,28 @@ function BottomNav({ items }) {
   );
 }
 
+// ประวัติการอัปเดต (เมนูผู้ใช้) — เลขเวอร์ชันตัวหนา + วันที่ แล้วตามด้วยรายการที่เปลี่ยน
+function ChangelogList() {
+  useLang();
+  const cur = appBuild().version;
+  return (
+    <div data-changelog style={{display:"flex",flexDirection:"column",gap:14,whiteSpace:"normal"}}>
+      {APP_CHANGELOG.map(c => (
+        <div key={c.v} data-changelog-ver={c.v}>
+          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4}}>
+            <b style={{color:T.textPrimary,fontSize:14.5,fontVariantNumeric:"tabular-nums"}}>v{c.v}</b>
+            <span style={{fontSize:12,color:T.textMuted}}>{fmtDate(c.date)}</span>
+            {c.v === cur && <span style={{fontSize:11,fontWeight:600,color:T.green,background:T.greenBg,padding:"1px 8px",borderRadius:20}}>{t("ที่ใช้อยู่","Current")}</span>}
+          </div>
+          <ul style={{margin:0,paddingLeft:18,fontSize:13.5,lineHeight:1.55}}>
+            {(_LANG === "en" ? c.en : c.th).map((x, i) => <li key={i}>{x}</li>)}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ที่แสดงกล่องข้อความในแอป (uiAlert / uiConfirm / uiPrompt) — ทีละกล่อง ตามลำดับ
 function DialogHost() {
   useLang();
@@ -709,10 +732,10 @@ function DialogHost() {
       <div role={d.kind === "alert" ? "alertdialog" : "dialog"} aria-modal="true" aria-labelledby="ui-dlg-t" aria-describedby="ui-dlg-m"
         style={{background:"#fff",borderRadius:16,width:"min(440px, 100%)",maxHeight:"calc(100vh - 32px)",overflowY:"auto",boxShadow:"0 24px 64px rgba(15,23,42,0.28)",padding:"20px 22px 18px"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-          {(d.danger || d.kind === "alert") && <span style={{width:32,height:32,borderRadius:10,display:"grid",placeItems:"center",background:d.danger?T.redBg:T.amberBg,color:d.danger?T.red:T.amber,flexShrink:0}}><Ico name="alert" size={18} /></span>}
+          {(d.danger || d.kind === "alert") && d.icon !== false && <span style={{width:32,height:32,borderRadius:10,display:"grid",placeItems:"center",background:d.danger?T.redBg:T.amberBg,color:d.danger?T.red:T.amber,flexShrink:0}}><Ico name="alert" size={18} /></span>}
           <h2 id="ui-dlg-t" style={{margin:0,fontSize:16,fontWeight:650,color:T.textPrimary}}>{title}</h2>
         </div>
-        <div id="ui-dlg-m" data-ui-message style={{fontSize:14,lineHeight:1.6,color:T.textSecondary,whiteSpace:"pre-line",overflowWrap:"anywhere"}}>{String(d.message ?? "").replace(/^\u26A0\uFE0F?\s*/, "")}</div>
+        <div id="ui-dlg-m" data-ui-message style={{fontSize:14,lineHeight:1.6,color:T.textSecondary,whiteSpace:"pre-line",overflowWrap:"anywhere"}}>{d.body || String(d.message ?? "").replace(/^\u26A0\uFE0F?\s*/, "")}</div>
         {d.kind === "prompt" && (
           <input ref={inRef} data-ui-input value={text} onChange={e => setText(e.target.value)} placeholder={d.placeholder || ""} className="input-base"
             aria-label={title} style={{marginTop:12}} />
@@ -822,9 +845,11 @@ function UserMenu({ session, onLogout }) {
             style={{width:"100%",textAlign:"left",marginTop:6,border:"none",background:"none",padding:"9px 8px",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:600,color:T.red}}>
             {t("ออกจากระบบ","Logout")}
           </button>
-          <div data-app-version title={t("เทียบกับคนอื่นได้ — build ต้องตรงกัน","Compare with others — the build should match")}
-            style={{borderTop:`1px solid ${T.cardBorder}`,marginTop:6,padding:"8px 8px 2px",fontSize:11,color:T.textMuted,fontVariantNumeric:"tabular-nums",lineHeight:1.5}}>
-            {t("เวอร์ชัน","Version")} {appBuild().version}<br/>build {appBuild().build}{appBuild().commit ? ` · ${appBuild().commit}` : ""}
+          <div data-app-version title={appBuildDetail()}
+            style={{borderTop:`1px solid ${T.cardBorder}`,marginTop:6,padding:"8px 8px 2px",fontSize:12,color:T.textMuted,fontVariantNumeric:"tabular-nums",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+            <span>{t("เวอร์ชัน","Version")} <b style={{color:T.textSecondary}}>{appBuild().version}</b></span>
+            <button type="button" data-changelog-open onClick={() => { setOpen(false); uiAlert(changelogText(), { title: t("ประวัติการอัปเดต","Update history"), okLabel: t("ปิด","Close"), icon: false, body: <ChangelogList /> }); }}
+              style={{border:"none",background:"none",color:T.blue,cursor:"pointer",fontSize:12,padding:"2px 0",fontWeight:600}}>{t("ประวัติการอัปเดต","Update history")}</button>
           </div>
         </div>
       )}
@@ -840,7 +865,9 @@ const DEPT_STYLE = {
   procurement: { color:"#b45309", bg:"#fdf1e3", label:() => t("จัดซื้อ","Procurement") },
   accounting:  { color:"#047857", bg:"#e3f5ec", label:() => t("บัญชี","Accounting") },
 };
-function Shell({ role, color, project, onBack, onHome, onDept, children, syncedAt, syncing, session, onLogout }) {
+// deptSwitch = { label, title, onClick } → ปุ่มสลับไปดูอีกแผนก (บัญชี ↔ จัดซื้อแบบดูอย่างเดียว)
+// viewOnly   = true → ป้าย "ดูอย่างเดียว" ต่อท้ายชื่อแผนก
+function Shell({ role, color, project, onBack, onHome, onDept, children, syncedAt, syncing, session, onLogout, deptSwitch = null, viewOnly = false }) {
   const dept = DEPT_STYLE[role] || DEPT_STYLE.qs;
   const iconBtn = { border:`1px solid ${T.cardBorder}`, background:"#fff", color:T.textSecondary, cursor:"pointer", borderRadius:8, width:36, height:36, display:"grid", placeItems:"center", flexShrink:0 };
   return (
@@ -865,6 +892,18 @@ function Shell({ role, color, project, onBack, onHome, onDept, children, syncedA
             </button>
           ) : (
             <span style={{background:dept.bg,color:dept.color,borderRadius:6,padding:"3px 8px",fontSize:12,fontWeight:700,whiteSpace:"nowrap",flexShrink:0}}>{dept.label()}</span>
+          )}
+          {viewOnly && (
+            <span data-view-only title={t("ดูข้อมูลได้ แต่แก้ไขไม่ได้","You can view but not edit")}
+              style={{background:"#f1f5f9",color:T.textSecondary,border:`1px solid ${T.cardBorder}`,borderRadius:6,padding:"2px 7px",fontSize:11.5,fontWeight:650,whiteSpace:"nowrap",flexShrink:0,display:"inline-flex",alignItems:"center",gap:4}}>
+              <Ico name="eye" size={13} />{t("ดูอย่างเดียว","View only")}
+            </span>
+          )}
+          {deptSwitch && (
+            <button data-dept-switch onClick={deptSwitch.onClick} title={deptSwitch.title || deptSwitch.label}
+              style={{border:`1px solid ${T.cardBorder}`,background:"#fff",color:T.textSecondary,borderRadius:8,padding:"4px 10px",fontSize:12.5,fontWeight:650,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0,display:"inline-flex",alignItems:"center",gap:5}}>
+              {deptSwitch.icon && <Ico name={deptSwitch.icon} size={14} />}{deptSwitch.label}
+            </button>
           )}
         </nav>
         {project.area && <span className="hdr-meta" style={{fontSize:12,color:T.textMuted,whiteSpace:"nowrap"}}>{project.area} ft² · {project.panels} Panels</span>}
@@ -1026,12 +1065,12 @@ function AccountPicker({ value, onChange, options }) {
 
 // A status badge that's also a dropdown — lets anyone change a PO's status
 // in one click from wherever it's shown, instead of opening the full edit form.
-function StatusPicker({ status, onChange, compact, disabled }) {
+function StatusPicker({ status, onChange, compact, disabled, disabledTitle }) {
   return (
     <select value={status} disabled={disabled} onClick={e=>e.stopPropagation()} onChange={e=>{ e.stopPropagation(); onChange(e.target.value); }}
       style={{background:STATUS_BG[status],color:STATUS_CLR[status],fontSize:compact?11:12,padding:compact?"5px 8px":"6px 10px",minHeight:compact?30:34,
         borderRadius:20,fontWeight:600,border:`1px solid ${STATUS_CLR[status]}40`,cursor:disabled?"not-allowed":"pointer",outline:"none",
-        opacity:disabled?0.65:1}} title={disabled?t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only"):undefined}>
+        opacity:disabled?0.65:1}} title={disabled?(disabledTitle || t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")):undefined}>
       {PO_STATUS.map(s=><option key={s} value={s}>{poStatusLabel(s)}</option>)}
     </select>
   );
