@@ -190,9 +190,11 @@ async function migrateAccountCodes(renameMap) {
 // APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
 // build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
 // commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
-const APP_VERSION = "1.0.008";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
+const APP_VERSION = "1.0.009";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
 // ประวัติการอัปเดต (ใหม่สุดอยู่บน) — แสดงในเมนูผู้ใช้ → "ประวัติการอัปเดต"
 const APP_CHANGELOG = [
+  { v: "1.0.009", date: "2026-09-30", th: ["จัดซื้อ: เพิ่มการ์ด \"Tender Cost\" บอกยอด Tender รวม และ Take off มาแล้วกี่ % ของ Tender", "ตารางของเข้ารายเดือน + Excel: เพิ่มคอลัมน์ \"% Take off\" (Take off ÷ Tender Cost) ต่อรหัส และรวม"],
+    en: ["Procurement: new \"Tender Cost\" card with the total tender and how much is taken off (%)", "Monthly incoming table + Excel: new \"% Take off\" column (Take off ÷ Tender Cost) per code and in total"] },
   { v: "1.0.008", date: "2026-09-30", th: ["ตารางรวมเดือน (บัญชี) และของเข้ารายเดือน (จัดซื้อ): ล็อกหัวตารางและแถว TOTAL ตอนเลื่อนลง ไม่หลุดขึ้นไปแล้ว"],
     en: ["Monthly matrix (Accounting) and monthly incoming (Procurement): header and TOTAL row stay in place while scrolling down"] },
   { v: "1.0.007", date: "2026-09-30", th: ["บัญชีกด \"ดูจัดซื้อ\" เพื่อดูรายการ PO / แผนของเข้า / ติดตาม / รายละเอียด PO และ Export ของจัดซื้อได้ — ดูอย่างเดียว แก้ไขไม่ได้"],
@@ -878,7 +880,8 @@ const GLOBAL_CSS = `
   /* แท็บแบบแถบเลือก (segmented): พื้นเทา แท็บที่เลือกเป็นการ์ดขาว — สีเรียบเหมือนกันทุกแผนก */
   /* การ์ดสรุปที่มีตัวหลัก: ตัวแรกกว้างกว่า (จอกว้าง) · เต็มแถว (มือถือ) */
   .stat-grid.has-lead { grid-template-columns: 1.6fr 1fr 1fr !important; }
-  @media (max-width: 900px) { .stat-grid.has-lead { grid-template-columns: 1fr 1fr !important; } .stat-grid.has-lead .stat-lead, .stat-grid.has-lead .stat-card:last-child:nth-child(even) { grid-column: 1 / -1; } }
+  .stat-grid.has-lead.four { grid-template-columns: 1.5fr 1fr 1fr 1fr !important; }   /* จัดซื้อ: งบคงเหลือ · Tender · ผูกพัน · ชำระ */
+  @media (max-width: 900px) { .stat-grid.has-lead, .stat-grid.has-lead.four { grid-template-columns: 1fr 1fr !important; } .stat-grid.has-lead .stat-lead, .stat-grid.has-lead .stat-card:last-child:nth-child(even) { grid-column: 1 / -1; } }
   /* ฟอร์ม PO บนมือถือ: ช่องหลักเรียงทีละช่อง · ช่องตัวเลขของแต่ละรายการ 2 คอลัมน์ (ช่องสุดท้ายเต็มแถว) */
   @media (max-width: 600px) {
     .po-form-grid { grid-template-columns: 1fr !important; }
