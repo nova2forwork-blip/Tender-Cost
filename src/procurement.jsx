@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, unusualAmountIssues, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
-function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0 }) {
+function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0, readOnly=false }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
   const [confirmDel, setConfirmDel] = useState(false); // ยืนยันลบในแอป (กันกรณี window.confirm ถูกบล็อกใน webview)
@@ -21,7 +21,7 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
   const inc = incomingStatus(po), pay = paymentStatus(po);
   const history = poHistory(po);
   const lastUpd = poLastUpdate(po);
-  const locked = !canEditPO(po, session);
+  const locked = readOnly || !canEditPO(po, session);   // readOnly = บัญชีเปิดดูข้อมูลจัดซื้อ (ดูอย่างเดียว)
   const receivedDates = poReceivedDates(po);
   const paidDate = poPaidDate(po);
   // ยอด "ของเข้าจริง" รวมทุกงวด ห้ามเกินยอดสั่ง — ใช้ปิดปุ่มบันทึก + เตือนค้างไว้
@@ -36,7 +36,7 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
   // PO ที่ปิดแล้ว (รับครบ+จ่ายครบ) แก้งวด/ยอด/วันรับได้เฉพาะ Admin — กันการ "ปลดล็อกตัวเอง"
   // ด้วยการล้างวันรับจริง แล้วค่อยลบ/แก้ PO ได้ และทุกการแก้งวดบันทึกลงประวัติ PO
   const setItemRounds = (itemId, rounds) => {
-    if (locked) { setCapWarn(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันรับได้เฉพาะ Admin","This PO is fully received & paid — only Admin can change amounts/dates")); return; }
+    if (locked) { setCapWarn(readOnly ? t("ดูอย่างเดียว — แก้ไขไม่ได้","View only — can't edit") : t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันรับได้เฉพาะ Admin","This PO is fully received & paid — only Admin can change amounts/dates")); return; }
     const code = po.items.find(it => it.id===itemId)?.code || "";
     const next = { ...po, items: po.items.map(it => it.id===itemId ? {...it, rounds} : it) };
     const msg  = t(`แก้งวดของเข้า ${code}`, `Edited delivery rounds ${code}`);
@@ -105,7 +105,12 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
           <button onClick={onClose} style={{background:T.bg,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:T.textMuted,flexShrink:0}}>×</button>
         </div>
 
-        {locked && (
+        {readOnly && (
+          <div data-po-view-only style={{display:"flex",alignItems:"center",gap:6,background:"#f1f5f9",border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:12,color:T.textSecondary}}>
+            <Ico name="eye" size={14} /> {t("ดูอย่างเดียว — บัญชีดูข้อมูล PO ได้ แต่แก้ไขไม่ได้","View only — Accounting can view this PO but not edit it")}
+          </div>
+        )}
+        {locked && !readOnly && (
           <div style={{display:"flex",alignItems:"center",gap:6,background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"6px 10px",margin:"8px 0 2px",fontSize:11,color:"#92400e"}}>
             <Ico name="lock" size={14} /> {t("รับของและจ่ายเงินครบแล้ว — แก้ยอด/วันของเข้าจริงได้ (ลบ PO และแก้ผู้ขาย/หมวด/ยอดสั่ง เฉพาะ Admin)","Fully received & paid — actual amount/date still editable (delete PO and edit vendor/category/order: Admin only)")}
           </div>
@@ -121,7 +126,7 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
         {/* Status is a live dropdown here too — the most natural place to
             update it right after reviewing everything else on the PO. */}
         <div style={{display:"flex",gap:6,margin:"12px 0 4px",flexWrap:"wrap",alignItems:"center"}}>
-          <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)} disabled={locked}/>
+          <StatusPicker status={po.status} onChange={s=>onStatusChange?.(po,s)} disabled={locked} disabledTitle={readOnly ? t("ดูอย่างเดียว — แก้ไขไม่ได้","View only — cannot edit") : undefined}/>
           <span style={{background:INCOMING_BG[inc],color:INCOMING_CLR[inc],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{incLabel(inc)}</span>
           <span style={{background:PAYMENT_BG[pay],color:PAYMENT_CLR[pay],fontSize:11,padding:"3px 10px",borderRadius:20,fontWeight:600}}>{payLabel(pay)}</span>
           {po.paymentType && (
@@ -274,7 +279,7 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
         )}
         {/* แถบปุ่มติดขอบล่างของป๊อปอัพ — เดิมอยู่ท้ายเนื้อหา ถ้า PO มีหลายงวดปุ่มจะถูกตัดจนต้องเลื่อนลงสุด */}
         <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",position:"sticky",bottom:-26,margin:"16px -26px -26px",padding:"12px 26px 18px",background:T.card,borderTop:`1px solid ${T.cardBorder}`,boxShadow:"0 -8px 14px -10px rgba(15,23,42,0.25)",borderRadius:"0 0 16px 16px",zIndex:2}}>
-          <button
+          {!readOnly && <button
             onClick={()=>{
               // ตรวจอีกครั้งก่อนปิด: ยอดของเข้าจริงรวมของทุกรายการห้ามเกินยอดสั่ง
               const bad = po.items.find(it => { const o=itemOrdered(it); const rc=(it.rounds||[]).reduce((s,r)=>s+(parseFloat(r.actualAmount)||0),0); return o>0 && Math.round(rc*100) > Math.round(o*100); });
@@ -283,9 +288,9 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
             }}
             disabled={!!overCapItem} className="btn-primary"
             title={overCapItem?t(`${overCapItem.code||"รายการ"}: ยอดรวมทุกงวดเกินยอดสั่ง แก้ให้ไม่เกินก่อนบันทึก`,`${overCapItem.code||"item"}: total across rounds exceeds order — fix before saving`):undefined}
-            style={overCapItem?{background:"#e2e8f0",color:"#94a3b8",cursor:"not-allowed"}:undefined}>{overCapItem && <Ico name="alert" size={15} />} {t("บันทึก","Save")}</button>
+            style={overCapItem?{background:"#e2e8f0",color:"#94a3b8",cursor:"not-allowed"}:undefined}>{overCapItem && <Ico name="alert" size={15} />} {t("บันทึก","Save")}</button>}
           {!locked && <button onClick={()=>onEdit(po)} className="btn-ghost" style={{fontSize:12}} title={t("แก้ผู้ขาย / หมวด / ยอดสั่ง","Edit vendor / category / order")}><Ico name="edit" size={14} /> {t("แก้ไข PO","Edit PO")}</button>}
-          {confirmDel ? (
+          {readOnly ? null : confirmDel ? (
             <span style={{display:"flex",alignItems:"center",gap:6,background:T.redBg,border:`1px solid #fecaca`,borderRadius:10,padding:"4px 6px 4px 12px"}}>
               <span style={{fontSize:12,color:T.red,fontWeight:600,whiteSpace:"nowrap"}}>{t("ลบ PO นี้จริงไหม? ย้อนกลับไม่ได้","Delete this PO? Cannot be undone")}</span>
               <button onClick={()=>{ setConfirmDel(false); onDelete(po.id, true); }} className="btn-primary" style={{background:T.red,padding:"5px 12px",fontSize:12}}>{t("ลบเลย","Delete")}</button>
@@ -409,9 +414,11 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-        <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto" }}>+ {t("เพิ่ม PO","Add PO")}</button>
-      </div>
+      {onNew && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+          <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto" }}>+ {t("เพิ่ม PO","Add PO")}</button>
+        </div>
+      )}
 
       {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
@@ -514,8 +521,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                     <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 650, color: T.textPrimary }}>฿{fmt(total)}</span>
                     {total ? usdLine(total, usdRate) : null}
                   </span>
-                  <button onClick={() => onConvert(pl)} className="btn-primary" style={{ fontSize: 12, padding: "6px 12px" }}>→ {t("ทำเป็น PO จริง","Make real PO")}</button>
-                  <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}><Ico name="edit" /> {t("แก้ไข","Edit")}</button>
+                  {onConvert && <button onClick={() => onConvert(pl)} className="btn-primary" style={{ fontSize: 12, padding: "6px 12px" }}>→ {t("ทำเป็น PO จริง","Make real PO")}</button>}
+                  {onEdit && <button onClick={() => onEdit(pl)} className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }}><Ico name="edit" /> {t("แก้ไข","Edit")}</button>}
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {items.map(it => (
@@ -534,8 +541,17 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
 }
 
 // ─── Procurement View ─────────────────────────────────────────────────────────
-function ProcurementView({ project, updateProject, tenderCosts, additions, poEntries, savePO, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode, incomingPlan={}, saveIncomingPlan }) {
-  const usdRate = effRate(project);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
+// readOnly = บัญชีเปิดดูข้อมูลจัดซื้อ: เห็นทุกอย่าง (รายการ PO / แผนของเข้า / ติดตาม / รายละเอียด / Export)
+// แต่ไม่มีปุ่มเพิ่ม/แก้/ลบ/เปลี่ยนสถานะ และฟังก์ชันบันทึกทุกตัวถูกตัดทิ้ง (กันหลุดจากปุ่มที่ลืมซ่อน)
+function ProcurementView({ project, updateProject: updateProjectProp, tenderCosts, additions, poEntries, savePO: savePOProp, onBack, onHome, onDept, syncedAt, syncing, session, onLogout, extraItems=[], hiddenAccounts=[], onExport, setEditMode, incomingPlan={}, saveIncomingPlan: saveIncomingPlanProp, readOnly=false, deptSwitch=null }) {
+  const denyRO = () => { uiAlert(t("ดูอย่างเดียว — บัญชีดูข้อมูลจัดซื้อได้ แต่แก้ไขไม่ได้","View only — Accounting can view procurement data but not edit it")); };
+  const savePO           = readOnly ? denyRO : savePOProp;
+  const saveIncomingPlan = readOnly ? denyRO : saveIncomingPlanProp;
+  // สกุลเงิน: โหมดดูอย่างเดียว = ตั้งค่าเฉพาะเครื่องนี้ (ไม่บันทึกกลับโครงการ) เหมือนหน้าบัญชี
+  const [curOverride, setCurOverride] = useState({});
+  const curProject    = readOnly ? { ...project, ...curOverride } : project;
+  const updateProject = readOnly ? (fields) => setCurOverride(o => ({ ...o, ...fields })) : updateProjectProp;
+  const usdRate = effRate(curProject);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
   const [tab,    setTab]    = useState("list"); // "list" | "tracking"
   const [tabHist, setTabHist] = useState([]);   // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
   const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
@@ -565,7 +581,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const [collapsed, setCollapsed] = useState({});
   const plans = Array.isArray(incomingPlan) ? incomingPlan : [];
   // อยู่ในโหมดแก้ไขเมื่อเปิดฟอร์มเพิ่ม/แก้ PO หรือเปิดหน้ารายละเอียด (บันทึกของเข้า/แบ่งงวด)
-  useEffect(() => { setEditMode?.(view==="add" || detailId!=null); return () => setEditMode?.(false); }, [view, detailId, setEditMode]);
+  useEffect(() => { setEditMode?.(!readOnly && (view==="add" || detailId!=null)); return () => setEditMode?.(false); }, [view, detailId, setEditMode, readOnly]);
 
   const detailPO = poEntries.find(p => p.id === detailId) || null;
   const openDetail  = (p) => setDetailId(p.id);
@@ -648,6 +664,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     }), otherPOs));
 
   const submit = async () => {
+    if (readOnly) return denyRO();
     setPoNoTouched(true);
     // ชื่อ Supplier ไม่บังคับ — ใส่หรือไม่ใส่ก็ได้
     // กันมูลค่าติดลบ (ทำให้ยอดคงเหลือ/งบเพี้ยน)
@@ -736,6 +753,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // when recording actual goods received or splitting a round). Migrates the
   // record to the new shape on first touch so it's normalised going forward.
   const updatePO = (updated) => {
+    if (readOnly) return denyRO();
     // เช็คสิทธิ์กับ "PO ที่บันทึกอยู่จริง" (ไม่ใช่ค่าที่กำลังจะแก้) — PO ที่ปิดแล้วแก้ได้เฉพาะ Admin
     const stored = poEntries.find(x=>x.id===updated.id);
     if (stored && !canEditPO(stored, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
@@ -747,6 +765,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   // move a PO from "PO Issued" to "Delivered". Still fully logged. Locked
   // once a PO is fully received + fully paid, unless the current user is admin.
   const applyStatus = (po, newStatus, paidDate) => {
+    if (readOnly) return denyRO();
     const patch = { ...po, status: newStatus };
     if (newStatus === "Paid") patch.paidDate = paidDate || todayStr();   // จำวันจ่ายที่กำหนดเอง
     const label = `${t("เปลี่ยนสถานะ","Status change")}: ${poStatusLabel(po.status)} → ${poStatusLabel(newStatus)}` + (newStatus === "Paid" && patch.paidDate ? ` (${t("จ่าย","paid")} ${patch.paidDate})` : "");
@@ -755,6 +774,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   };
   const changeStatus = async (po, newStatus) => {
     if (newStatus === po.status) return;
+    if (readOnly) return denyRO();
     if (!canEditPO(po, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     // ตั้งเป็น "Paid" → เตือนถ้ายังไม่มีการรับของเลย แล้วให้กรอกวันจ่ายเองก่อน
     if (newStatus === "Paid") {
@@ -767,6 +787,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   };
 
   const openEdit = (p) => {
+    if (readOnly) return denyRO();
     if (!canEditPO(p, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — แก้ไขได้เฉพาะ Admin","This PO is fully received & paid — Admin only can edit")); return; }
     const P = migratePO(p);
     setForm({
@@ -783,6 +804,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   };
   // โหลด PO/แผน (โครงสร้างเดียวกัน) เข้าฟอร์ม — ใช้ร่วมกันทั้งแก้แผนและแปลงเป็น PO
   const loadIntoForm = (p, asPlan) => {
+    if (readOnly) return denyRO();
     const P = migratePO(p);
     setForm({
       date: P.date || todayStr(), status: P.status || "PO Issued", notes: P.notes || "",
@@ -796,10 +818,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     });
     setEditId(p.id); setEditingPlan(true); setDetailId(null); setView("add");
   };
-  const openNewPO   = () => { setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:false }); setDetailId(null); setView("add"); };
+  const openNewPO   = () => { if (readOnly) return denyRO(); setEditId(null); setEditingPlan(false); setForm({ ...emptyForm(), isPlan:false }); setDetailId(null); setView("add"); };
   const openEditPlan = (pl) => loadIntoForm(pl, true);   // แก้แผน (ติ๊กแผนอยู่)
   const startConvert = (pl) => loadIntoForm(pl, false);  // แปลงแผน → PO (เอาติ๊กออกให้แล้ว กดบันทึกก็เป็น PO)
   const deletePlan = async (id) => {
+    if (readOnly) { denyRO(); return false; }
     const pl = (plans||[]).find(p=>p.id===id);
     const d = pl ? (poRounds(pl).map(r=>r.planDate).filter(Boolean).sort()[0] || pl.date || "") : "";
     const info = pl ? `${d||t("(ไม่มีวัน)","(no date)")}${pl.supplier?.name?` · ${pl.supplier.name}`:""} · ฿${fmt0(poItems(pl).reduce((s,it)=>s+(parseFloat(it.amount)||0),0))}` : "";
@@ -807,6 +830,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
     return false;   // กดยกเลิก — ให้ผู้เรียกรู้ (ไม่ปิดฟอร์มทิ้ง)
   };
   const deletePO = async (id, confirmed=false) => {
+    if (readOnly) return denyRO();
     const po = poEntries.find(x=>x.id===id);
     if (po && !canEditPO(po, session)) { uiAlert(t("PO นี้รับของและจ่ายเงินครบแล้ว — ลบได้เฉพาะ Admin","This PO is fully received & paid — Admin only can delete")); return; }
     // ถามยืนยันก่อนลบ (ลบแล้วย้อนกลับไม่ได้) — ถ้า confirmed=true แปลว่ายืนยันในแอปมาแล้ว
@@ -861,7 +885,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
   const sortedGroupCodes = Object.keys(groupedFiltered).sort();
 
   return (
-    <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout}>
+    <Shell role="procurement" color={T.amber} project={project} onBack={backNav} onHome={onHome} onDept={onDept} syncedAt={syncedAt} syncing={syncing} session={session} onLogout={onLogout} deptSwitch={deptSwitch} viewOnly={readOnly}>
       {payModal && (
         <div onClick={()=>setPayModal(null)} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:16,width:"min(380px,100%)",overflow:"hidden",boxShadow:"0 24px 60px rgba(15,23,42,0.3)"}}>
@@ -883,7 +907,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
       {isPhone && view!=="add" && <BottomNav items={[
         { key:"list",   icon:"clipboard", label:t("รายการ PO","PO List"), on:tab==="list", onClick:()=>goTab("list") },
         { key:"inplan", icon:"calendar",  label:t("แผนของเข้า","Incoming plan"), on:tab==="inplan", onClick:()=>goTab("inplan") },
-        { key:"add",    icon:"plus",      label:t("เพิ่ม PO","Add PO"), onClick:openNewPO },
+        ...(readOnly ? [] : [{ key:"add", icon:"plus", label:t("เพิ่ม PO","Add PO"), onClick:openNewPO }]),
         { key:"export", icon:"download",  label:"Export", onClick:onExport },
       ]} />}
       <div style={{padding:"24px 28px"}}>
@@ -898,7 +922,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
             ))}
             </div>
             )}
-            <div style={{marginLeft:"auto"}}><CurrencyControl project={project} updateProject={updateProject}/></div>
+            <div style={{marginLeft:"auto"}}><CurrencyControl project={curProject} updateProject={updateProject}/></div>
             {!isPhone && (
             <button onClick={onExport} className="btn-ghost" style={{display:"flex",alignItems:"center",gap:6}}>
               <Ico name="download" /> Export Excel
@@ -1201,11 +1225,11 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </div>
         ) : tab==="inplan" ? (
           <>
-            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={openNewPO} onEdit={openEditPlan} onConvert={startConvert} onDelete={deletePlan} />
+            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={readOnly ? null : openNewPO} onEdit={readOnly ? null : openEditPlan} onConvert={readOnly ? null : startConvert} onDelete={readOnly ? null : deletePlan} />
             {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
             <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
               <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><Ico name="truck" size={18} color={T.textSecondary} />{t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
-              <ProcurementTrackingTab poEntries={poEntries} onEdit={openEdit} onView={openDetail} onAddNew={openNewPO}
+              <ProcurementTrackingTab poEntries={poEntries} onEdit={readOnly ? null : openEdit} onView={openDetail} onAddNew={readOnly ? null : openNewPO} readOnly={readOnly}
                 onStatusChange={changeStatus} session={session} usdRate={usdRate}
                 tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
                 onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
@@ -1250,7 +1274,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                     : <><Ico name="chevrons" size={14} style={{transform:"rotate(180deg)"}} />{t("ย่อทั้งหมด","Collapse all")}</>}
                 </button>
               )}
-              {!isPhone && <button onClick={openNewPO} className="btn-primary">+ {t("เพิ่ม PO","Add PO")}</button>}{/* มือถือ: ใช้ปุ่ม "เพิ่ม PO" ในแถบล่าง */}
+              {!isPhone && !readOnly && <button onClick={openNewPO} className="btn-primary">+ {t("เพิ่ม PO","Add PO")}</button>}{/* มือถือ: ใช้ปุ่ม "เพิ่ม PO" ในแถบล่าง */}
             </div>
 
             <div data-po-list-top style={{scrollMarginTop:12}} />
@@ -1266,7 +1290,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
               <div style={{textAlign:"center",padding:"60px 0",color:T.textMuted}}>
                 <div style={{marginBottom:12,color:T.textMuted}}><Ico name="clipboard" size={32} sw={1.5} /></div>
                 <div style={{fontSize:14,fontWeight:500,color:T.textSecondary,marginBottom:6}}>{poEntries.length===0?t("ยังไม่มีรายการ","No items yet"):t("ไม่พบรายการที่ตรงเงื่อนไข","No items match")}</div>
-                <div style={{fontSize:12}}>{poEntries.length===0?t('กด "+ เพิ่ม PO" เพื่อเริ่มต้น','Press "+ Add PO" to start'):t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
+                <div style={{fontSize:12}}>{poEntries.length===0?(readOnly?t("จัดซื้อยังไม่ได้บันทึก PO","Procurement hasn't recorded any PO yet"):t('กด "+ เพิ่ม PO" เพื่อเริ่มต้น','Press "+ Add PO" to start')):t("ลองล้างตัวกรอง หรือคำค้นหา","Try clearing filters or search")}</div>
               </div>
             ) : (
               (() => {
@@ -1289,7 +1313,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                     <span style={{color:g.toOrder<0?T.red:T.textMuted,fontWeight:g.toOrder<0?650:400}}>{g.toOrder<0 ? t("เกินงบ","Over budget") : t("ต้องสั่งเพิ่ม","To order")} <b style={{color:g.toOrder<0?T.red:T.amber,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(Math.abs(g.toOrder))}</b></span>
                   </span>
                 );
-                const editBtn = (p, locked) => (
+                const editBtn = (p, locked) => readOnly ? null : (
                   <button onClick={e=>{ e.stopPropagation(); openEdit(p); }} disabled={locked} aria-label={t("แก้ไข","Edit")} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข (ลบได้ในหน้านี้)","Edit (delete available here)")}
                     style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textSecondary,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:36,minHeight:36,borderRadius:8,display:"inline-grid",placeItems:"center"}}><Ico name="edit" size={17} /></button>
                 );
@@ -1330,7 +1354,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                                   <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,fontSize:12,color:T.textMuted}} onClick={e=>e.stopPropagation()}>
                                     <span style={{whiteSpace:"nowrap"}}>{t("จ่าย","Pay")}: <PayDateText po={p}/></span>
                                     <span style={{flex:1}}/>
-                                    <StatusPicker status={p.status} onChange={st=>changeStatus(p,st)} disabled={locked} compact/>
+                                    <StatusPicker status={p.status} onChange={st=>changeStatus(p,st)} disabled={locked || readOnly} disabledTitle={readOnly ? t("ดูอย่างเดียว — แก้ไขไม่ได้","View only — cannot edit") : undefined} compact/>
                                     {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")}><Ico name="lock" size={14} color={T.textMuted} /></span>}
                                     {editBtn(p, locked)}
                                   </div>
@@ -1408,7 +1432,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
                                 </td>
                                 <td style={td} onClick={e=>e.stopPropagation()}>
                                   <div style={{display:"flex",alignItems:"center",gap:4}}>
-                                    <StatusPicker status={p.status} onChange={st=>changeStatus(p,st)} disabled={locked} compact/>
+                                    <StatusPicker status={p.status} onChange={st=>changeStatus(p,st)} disabled={locked || readOnly} disabledTitle={readOnly ? t("ดูอย่างเดียว — แก้ไขไม่ได้","View only — cannot edit") : undefined} compact/>
                                     {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}><Ico name="lock" size={14} color={T.textMuted} /></span>}
                                   </div>
                                   {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)} · {poLastUpdate(p).user}</div>}
@@ -1436,7 +1460,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
           </>
         )}
       </div>
-      <PODetailModal key={detailPO?.id || "none"} po={detailPO} issues={detailPO ? dataIssuesOf(detailPO) : []} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} />
+      <PODetailModal key={detailPO?.id || "none"} po={detailPO} issues={detailPO ? dataIssuesOf(detailPO) : []} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} readOnly={readOnly} />
     </Shell>
   );
 }
@@ -1444,7 +1468,7 @@ function ProcurementView({ project, updateProject, tenderCosts, additions, poEnt
 // ─── Procurement: Incoming / Payment Tracking tab ─────────────────────────────
 // Groups every PO by its Account Code so the team can see, at a glance and per
 // cost line, which deliveries and payments are on track vs. overdue.
-function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[] }) {
+function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], readOnly=false }) {
   const trkBudget = buildCombinedBudget(tenderCosts, additions);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
@@ -1601,14 +1625,14 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
         </td>
         <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",alignItems:"center",gap:4}}>
-            <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
+            <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked || readOnly} disabledTitle={readOnly ? t("ดูอย่างเดียว — แก้ไขไม่ได้","View only — cannot edit") : undefined} compact/>
             {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}><Ico name="lock" size={14} color={T.textMuted} /></span>}
           </div>
           {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
         </td>
         <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-          <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
-            style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8,display:"inline-grid",placeItems:"center"}} aria-label={t("แก้ไข","Edit")}><Ico name="edit" size={16} /></button>
+          {onEdit && <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
+            style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8,display:"inline-grid",placeItems:"center"}} aria-label={t("แก้ไข","Edit")}><Ico name="edit" size={16} /></button>}
         </td>
       </tr>
     );
@@ -1778,14 +1802,14 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                           </td>
                           <td style={{padding:"9px 16px"}} onClick={e=>e.stopPropagation()}>
                             <div style={{display:"flex",alignItems:"center",gap:4}}>
-                              <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked} compact/>
+                              <StatusPicker status={p.status} onChange={s=>onStatusChange?.(p,s)} disabled={locked || readOnly} disabledTitle={readOnly ? t("ดูอย่างเดียว — แก้ไขไม่ได้","View only — cannot edit") : undefined} compact/>
                               {locked && <span title={t("รับของและจ่ายเงินครบแล้ว แก้ไขได้เฉพาะ Admin","Fully received & paid — Admin only")} style={{fontSize:12}}><Ico name="lock" size={14} color={T.textMuted} /></span>}
                             </div>
                             {poLastUpdate(p) && <div style={{fontSize:12,color:T.textMuted,marginTop:3,whiteSpace:"nowrap"}}>{t("อัปเดต","Updated")} {relativeTime(poLastUpdate(p).at)}</div>}
                           </td>
                           <td style={{padding:"9px 16px",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
-                            <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
-                              style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8,display:"inline-grid",placeItems:"center"}} aria-label={t("แก้ไข","Edit")}><Ico name="edit" size={16} /></button>
+                            {onEdit && <button onClick={()=>onEdit(p)} disabled={locked} title={locked?t("แก้ไขได้เฉพาะ Admin","Admin only"):t("แก้ไข","Edit")}
+                              style={{background:"none",border:"none",color:locked?"#cbd5e1":T.textMuted,cursor:locked?"not-allowed":"pointer",padding:"6px 8px",minWidth:34,minHeight:34,borderRadius:8,display:"inline-grid",placeItems:"center"}} aria-label={t("แก้ไข","Edit")}><Ico name="edit" size={16} /></button>}
                           </td>
                         </tr>
                       );
