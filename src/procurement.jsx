@@ -662,6 +662,11 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
   // "ต้องสั่งสุทธิ" = ยอดที่เหลือต้องสั่งจริง = งบ − store(ในฟอร์ม) − store ที่บันทึกไว้แล้ว − PO ที่สั่งแล้ว − แผนที่มี
   // "ต้องสั่งสุทธิ" อ้างอิงจาก Take off (กรอกเอง) — ไม่ผูกกับงบโครงการ (QS) อีกต่อไป
   const itemNet = (it) => (parseFloat(it.takeoff)||0) - (parseFloat(it.store)||0) - otherStock(it.code) - otherCommitted(it.code) - otherPlanned(it.code);
+  // Take off ของรหัสนี้ที่บันทึกไว้แล้ว (PO + แผนอื่น ยกเว้นรายการที่กำลังแก้) + ทุกบรรทัดในฟอร์มที่เป็นรหัสเดียวกัน
+  // → ใช้บอก "Take off มาแล้วกี่ % ของ Tender" ระหว่างกรอก PO
+  const otherTakeoff = (code) => [...poEntries.filter(p => editingPlan || p.id !== editId), ...plans.filter(pl => !(editingPlan && pl.id === editId))]
+    .reduce((s,p)=> s + poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.takeoff)||0),0), 0);
+  const formTakeoff = (code) => form.items.filter(it=>it.code===code).reduce((s,it)=>s+(parseFloat(it.takeoff)||0),0);
   const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
   // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
 
@@ -1083,6 +1088,23 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
                         </>}
                       </label>
                     </div>
+                    {/* Take off รหัสนี้รวมแล้วกี่ % ของ Tender (รวมที่กำลังกรอก) — อัปเดตทันทีตอนพิมพ์ */}
+                    {it.code && (() => {
+                      const before = otherTakeoff(it.code), total = before + formTakeoff(it.code), line = parseFloat(it.takeoff)||0;
+                      const pc = budget > 0 ? total / budget * 100 : null, over = pc != null && pc > 100;
+                      return (
+                        <div data-tk-pct style={{margin:"-2px 0 10px",fontSize:12,color:T.textSecondary,background:over||(pc==null&&total>0)?T.redBg:"#eef4ff",border:`1px solid ${over||(pc==null&&total>0)?"#fecaca":"#dbe6ff"}`,borderRadius:8,padding:"6px 10px",display:"flex",flexWrap:"wrap",gap:"2px 10px",alignItems:"center"}}>
+                          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><Ico name="ruler" size={14} />{t("Take off รหัสนี้","Take off for this code")}</span>
+                          {budget > 0 ? (<>
+                            <b data-tk-pct-val style={{color:over?T.red:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{pc.toFixed(1)}%</b>
+                            <span style={{fontVariantNumeric:"tabular-nums"}}>{t("ของ Tender","of Tender")} ฿{fmt0(budget)} · {t("รวม","total")} ฿{fmt0(total)}{over ? ` · ${t("เกิน Tender","over Tender")}` : ""}</span>
+                            {line > 0 && <span style={{color:T.textMuted,fontVariantNumeric:"tabular-nums"}}>({t("บรรทัดนี้","this line")} {(line/budget*100).toFixed(1)}%{before>0?` · ${t("ก่อนหน้า","before")} ${(before/budget*100).toFixed(1)}%`:""})</span>}
+                          </>) : (
+                            <span style={{color:total>0?T.red:T.textMuted}}>{t("ไม่มีงบ Tender ของรหัสนี้ — คิด % ไม่ได้","No Tender budget for this code — no %")}{total>0?` · Take off ฿${fmt0(total)}`:""}</span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {/* แถวล่าง: มูลค่า PO · % · แผนของเข้า — ความสูงเท่ากันหมด */}
                     <div className="po-item-grid" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
