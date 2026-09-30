@@ -1,5 +1,5 @@
 // Tender Cost — แผนกจัดซื้อ (รายการ PO, ฟอร์ม PO, แผนของเข้า, ติดตาม)
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, unusualAmountIssues, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
@@ -312,6 +312,16 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
 //  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
 //  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
 function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {}, additions = {}, extraItems = [], hiddenAccounts = [], onNew, onEdit, onConvert, onDelete }) {
+  // ตารางของเข้ารายเดือน: ล็อกหัวตาราง — วัดความกว้างจริงของคอลัมน์ Acc. Code ให้คอลัมน์ชื่อบัญชีตรึงต่อพอดี
+  const imTableRef = useRef(null);
+  useLayoutEffect(() => {
+    const tb = imTableRef.current; if (!tb) return;
+    const set = () => { const c0 = tb.querySelector("thead th"); if (c0) tb.style.setProperty("--c1w", `${c0.getBoundingClientRect().width}px`); };
+    set();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(set); ro.observe(tb);
+    return () => ro.disconnect();
+  });
   const list = Array.isArray(plans) ? plans : [];
   const pos = Array.isArray(poEntries) ? poEntries : [];
   const acctList = exportAccountList(extraItems, hiddenAccounts);
@@ -399,16 +409,18 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
     : { key, dir: (key === "code" || key === "name") ? "asc" : "desc" });
   const arrow = (key) => mSort.key === key ? (mSort.dir === "asc" ? " ▲" : " ▼") : "";
 
-  const cM = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
+  // ขอบแบบ separate (เส้นขวา+ล่างของแต่ละช่อง) — เส้นขอบติดไปกับช่องที่ตรึง ไม่มีร่องให้ข้อความลอดตอนเลื่อน
+  const cM = { borderRight: "1px solid #d9e0ea", borderBottom: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const nM = { ...cM, textAlign: "right", fontVariantNumeric: "tabular-nums" };
   const hM = (bg) => ({ ...cM, background: bg, fontWeight: 650, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
   const bCost = "#f4e9ef";
   // ตรึงคอลัมน์แรก 2 ช่อง (รหัส/ชื่อบัญชี) ให้ไม่เลื่อนหายตอนดูเดือนไกล ๆ
   const COL1_W = 86;
+  const C1_LEFT = `var(--c1w, ${COL1_W}px)`;
   const stickyBody0 = { position: "sticky", left: 0, background: "#fff", zIndex: 1 };
-  const stickyBody1 = { position: "sticky", left: COL1_W, background: "#fff", zIndex: 1 };
+  const stickyBody1 = { position: "sticky", left: C1_LEFT, background: "#fff", zIndex: 1 };
   const stickyHead0 = { left: 0, zIndex: 3 };
-  const stickyHead1 = { left: COL1_W, zIndex: 3 };
+  const stickyHead1 = { left: C1_LEFT, zIndex: 3 };
   const money = (n) => n ? (n < 0 ? `(${fmt(Math.abs(n))})` : fmt(n)) : "-";
   const sum = (fn) => shownCodes.reduce((s, c) => s + fn(c), 0);
 
@@ -435,8 +447,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
             <SearchInput value={mSearch} onChange={setMSearch} placeholder={t("ค้นหา Acc. Code / ชื่อบัญชี","Search Acc. Code / account name")} width={260} big/>
             <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownCodes.length}/{codes.length} {t("รายการ","items")}</span>
           </div>
-          <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
-            <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
+          <div className="fatscroll lockhead" data-lockhead style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+            <table ref={imTableRef} style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
               <thead>
                 <tr>
                   <th onClick={()=>toggleSort("code")}    style={{ ...hM("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
