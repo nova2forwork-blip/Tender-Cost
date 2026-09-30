@@ -1,5 +1,5 @@
 // Tender Cost — แผนกบัญชี (ต้องจ่าย, ภาพรวมงบ, ตารางรวมเดือน)
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Bar, BarChart, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ACCOUNTS, GROUPS, GRP_COLORS, codeText, ORPHAN_NAME, PO_STATUS, STATUS_CLR, T, WASTE_LBL, buildCombinedBudget, exportAccountList, fmt, fmt0, fmtDate, fmtK, hiddenSafeForPO, monthShortLabel, paymentStatus, poBilledAmount, poItems, poPaidAmount, poPayLines, poStatusLabel, poTotal, roundReceived, t, todayStr } from "./core.jsx";
 import { BottomNav, CurrencyControl, Ico, SearchInput, Shell, StatCard, effRate, usdLine, useIsPhone } from "./ui.jsx";
@@ -14,6 +14,19 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const combined = buildCombinedBudget(tenderCosts, additions);
   const [aSearch, setASearch] = useState("");                       // ค้นหา Acc. Code/ชื่อบัญชี
   const [aSort, setASort] = useState({ key: "code", dir: "asc" });  // เรียงตามหัวคอลัมน์
+  // หัวตาราง 2 ชั้นล็อกตอนเลื่อนลง: ชั้นที่ 2 ต้องติดใต้ชั้นแรกพอดี → วัดความสูงจริงของชั้นแรก
+  const mxTableRef = useRef(null), mxHead1Ref = useRef(null);
+  useLayoutEffect(() => {
+    const tb = mxTableRef.current, tr = mxHead1Ref.current;
+    if (!tb || !tr) return;
+    // --ah1 = ความสูงหัวชั้นแรก · --c1w = ความกว้างจริงของคอลัมน์ Acc. Code (คอลัมน์ชื่อบัญชีตรึงต่อจากนี้พอดี ไม่ทับกัน)
+    const set = () => { tb.style.setProperty("--ah1", `${tr.getBoundingClientRect().height}px`);
+      const c0 = tb.querySelector("thead tr:nth-child(2) th"); if (c0) tb.style.setProperty("--c1w", `${c0.getBoundingClientRect().width}px`); };
+    set();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(set); ro.observe(tr); ro.observe(tb);
+    return () => ro.disconnect();
+  });
   const committedByCode = {}, stockByCode = {}, plannedByCode = {};
   const payplan = {};
   const bump = (obj, code, mk, amt) => { if (!mk || !amt) return; (obj[code] = obj[code] || {}); obj[code][mk] = (obj[code][mk] || 0) + amt; };
@@ -103,15 +116,18 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
   const totOf = (pick) => shownRows.reduce((s, r) => s + pick(r), 0);
 
   const bCost = "#f4e9ef", bMg = "#eef3ee", bPy = "#fdf1e2";
-  const cell = { border: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
+  // ขอบแบบ separate (เส้นขวา+ล่างของแต่ละช่อง) — เส้นขอบติดไปกับช่องที่ตรึง ไม่มีร่องให้ข้อความลอดตอนเลื่อน
+  const cell = { borderRight: "1px solid #d9e0ea", borderBottom: "1px solid #d9e0ea", padding: "8px 13px", fontSize:13, whiteSpace: "nowrap" };
   const num  = { ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" };
   const hCell = (bg) => ({ ...cell, background: bg, fontWeight: 650, color: T.textSecondary, textAlign: "center", position: "sticky", top: 0 });
+  const hCell2 = (bg) => ({ ...hCell(bg), top: "var(--ah1, 37px)" });   // หัวตารางชั้นที่ 2 — ติดใต้ชั้นแรกพอดี
   // ── ตรึงคอลัมน์แรก 2 ช่อง (รหัส/ชื่อบัญชี) ให้ไม่เลื่อนหายตอนดูเดือนไกล ๆ ──────
   const COL1_W = 86;
+  const C1_LEFT = `var(--c1w, ${COL1_W}px)`;   // ต่อจากคอลัมน์รหัสตามความกว้างจริง
   const stickyBody0 = { position: "sticky", left: 0, background: "#fff", zIndex: 1 };
-  const stickyBody1 = { position: "sticky", left: COL1_W, background: "#fff", zIndex: 1 };
+  const stickyBody1 = { position: "sticky", left: C1_LEFT, background: "#fff", zIndex: 1 };
   const stickyHead0 = { left: 0, zIndex: 3 };
-  const stickyHead1 = { left: COL1_W, zIndex: 3 };
+  const stickyHead1 = { left: C1_LEFT, zIndex: 3 };
   const numCell = (v, bg) => (
     <td style={{ ...num, background: bg, color: v < 0 ? T.red : (v ? T.textPrimary : T.textMuted), fontWeight: v ? 500 : 450 }}>{money(v)}{v ? usdLine(Math.abs(v), usdRate) : null}</td>
   );
@@ -146,25 +162,25 @@ function AccountingMatrixTab({ tenderCosts, additions, poEntries, extraItems, hi
         <SearchInput value={aSearch} onChange={setASearch} placeholder={t("ค้นหา Acc. Code / ชื่อบัญชี","Search Acc. Code / account name")} width={260} big/>
         <span style={{ fontSize: 11, color: T.textMuted }}>{t("คลิกหัวคอลัมน์เพื่อเรียงลำดับ · แสดง","Click a header to sort · showing")} {shownRows.length}/{rows.length} {t("รายการ","items")}</span>
       </div>
-      <div className="fatscroll" style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
-        <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%" }}>
+      <div className="fatscroll lockhead" data-lockhead style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+        <table ref={mxTableRef} style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
           <thead>
-            <tr>
+            <tr ref={mxHead1Ref}>
               <th colSpan={6} style={{ ...hCell("#eef2f7"), textAlign: "left" }}>{t("ต้นทุน / งบประมาณ","Cost / Budget")}</th>
               <th colSpan={mgM.length + 1} style={hCell(bMg)}>{t("ของเข้า (รับ/PO/แผน)","Incoming (Recv/PO/Plan)")}</th>
               <th colSpan={payM.length + 1} style={hCell(bPy)}>{t("แผนจ่ายเงิน","Payment plan")}</th>
             </tr>
             <tr>
-              <th onClick={()=>toggleSort("code")}      style={{ ...hCell("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
-              <th onClick={()=>toggleSort("name")}      style={{ ...hCell("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
-              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS = ราคาเดิม + เผื่อเศษ ${WASTE_LBL} (ของราคาเดิม) + งานเพิ่ม`,`QS budget = baseline + ${WASTE_LBL} wastage (on baseline) + additions`)}>Tender Cost<span style={{fontSize:11,fontWeight:600,opacity:0.8,marginLeft:4}}>{t(`รวมเผื่อ ${WASTE_LBL}`,`incl. ${WASTE_LBL}`)}</span>{arrow("budget")}</th>
-              <th onClick={()=>toggleSort("stock")}     style={{ ...hCell(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }} title={t("มูลค่าของที่มีใน store (กรอกในช่อง \"มีใน store\" ของ PO)","Value already in store (the PO's \"In store\" field)")}>Stock{arrow("stock")}</th>
-              <th data-mx-col="issue" onClick={()=>toggleSort("committed")} style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }} title={t("ยอดรวม PO ที่ออกแล้วของรหัสนี้","Total of POs issued for this code")}>Issue PO{arrow("committed")}</th>
-              <th data-mx-col="balance" onClick={()=>toggleSort("balPO")} style={{ ...hCell(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }} title={t("Tender Cost − Stock − Issue PO (ติดลบ = เกินงบ)","Tender Cost − Stock − Issue PO (negative = over budget)")}>Balance PO{arrow("balPO")}</th>
-              {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell(bMg), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("im:"+i)}</th>)}
-              <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("mgTot")}</th>
-              {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell(bPy), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("pm:"+i)}</th>)}
-              <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("pyTot")}</th>
+              <th onClick={()=>toggleSort("code")}      style={{ ...hCell2("#f1f5f9"), ...stickyHead0, textAlign: "left", minWidth: COL1_W, cursor:"pointer", userSelect:"none" }}>Acc. Code{arrow("code")}</th>
+              <th onClick={()=>toggleSort("name")}      style={{ ...hCell2("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 190, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
+              <th onClick={()=>toggleSort("budget")}    style={{ ...hCell2(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS = ราคาเดิม + เผื่อเศษ ${WASTE_LBL} (ของราคาเดิม) + งานเพิ่ม`,`QS budget = baseline + ${WASTE_LBL} wastage (on baseline) + additions`)}>Tender Cost<span style={{fontSize:11,fontWeight:600,opacity:0.8,marginLeft:4}}>{t(`รวมเผื่อ ${WASTE_LBL}`,`incl. ${WASTE_LBL}`)}</span>{arrow("budget")}</th>
+              <th onClick={()=>toggleSort("stock")}     style={{ ...hCell2(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }} title={t("มูลค่าของที่มีใน store (กรอกในช่อง \"มีใน store\" ของ PO)","Value already in store (the PO's \"In store\" field)")}>Stock{arrow("stock")}</th>
+              <th data-mx-col="issue" onClick={()=>toggleSort("committed")} style={{ ...hCell2(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }} title={t("ยอดรวม PO ที่ออกแล้วของรหัสนี้","Total of POs issued for this code")}>Issue PO{arrow("committed")}</th>
+              <th data-mx-col="balance" onClick={()=>toggleSort("balPO")} style={{ ...hCell2(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }} title={t("Tender Cost − Stock − Issue PO (ติดลบ = เกินงบ)","Tender Cost − Stock − Issue PO (negative = over budget)")}>Balance PO{arrow("balPO")}</th>
+              {mgM.map((mk,i) => <th key={"m" + mk} onClick={()=>toggleSort("im:"+i)} style={{ ...hCell2(bMg), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("im:"+i)}</th>)}
+              <th onClick={()=>toggleSort("mgTot")}     style={{ ...hCell2(bMg), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("mgTot")}</th>
+              {payM.map((mk,i) => <th key={"p" + mk} onClick={()=>toggleSort("pm:"+i)} style={{ ...hCell2(bPy), cursor:"pointer", userSelect:"none" }}>{lbl(mk)}{arrow("pm:"+i)}</th>)}
+              <th onClick={()=>toggleSort("pyTot")}     style={{ ...hCell2(bPy), fontWeight: 700, cursor:"pointer", userSelect:"none" }}>TOTAL{arrow("pyTot")}</th>
             </tr>
           </thead>
           <tbody>
