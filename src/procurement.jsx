@@ -1,6 +1,6 @@
 // Tender Cost — แผนกจัดซื้อ (รายการ PO, ฟอร์ม PO, แผนของเข้า, ติดตาม)
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, unusualAmountIssues, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, takeoffPctOf, takeoffPctOverall, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
+import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, unusualAmountIssues, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
 function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0, readOnly=false }) {
@@ -375,9 +375,9 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
   const plannedOf = (code) => list.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
   const stockOf = (code) => pos.reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.store) || 0), 0), 0);
   const takeoffOf = (code) => [...pos, ...list].reduce((s, p) => s + poItems(p).filter(it => it.code === code).reduce((ss, it) => ss + (parseFloat(it.takeoff) || 0), 0), 0); // Take off (กรอกเอง)
-  // % Take off = ตัวเลขที่จัดซื้อกรอกในฟอร์ม PO (ช่อง "% Take off") รวมทุกบรรทัดของรหัสนั้น (PO + แผน) · ยังไม่กรอก = null
-  const tkPctOf = (code) => takeoffPctOf([...pos, ...list], code);
-  const pctTxt = (v) => v == null ? "-" : `${(Math.round(v * 10) / 10).toFixed(1)}%`;
+  // % Take off = Take off (บาท ที่กรอกตอนสร้าง PO/แผน) ÷ Tender Cost ของรหัสนั้น · ไม่มีงบ → null (แสดง "—")
+  const tkPctOf = (code) => budgetOf(code) > 0 ? takeoffOf(code) / budgetOf(code) * 100 : null;
+  const pctTxt = (v) => v == null ? "—" : `${v.toFixed(1)}%`;
   const issuePOof = (code) => committedOf(code);                                                   // Issue PO = ยอดรวม PO ที่ยื่นจริง
   const balCostOf = (code) => budgetOf(code) - stockOf(code) - committedOf(code) - plannedOf(code); // "Pending PO" = งบ − Stock − Issue PO − แผน (ยอดที่ยังต้องสั่ง)
   const balPOof   = (code) => budgetOf(code) - stockOf(code) - issuePOof(code);                      // "Balance Cost" = Tender Cost − Stock − Issue PO
@@ -459,7 +459,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <th onClick={()=>toggleSort("name")}    style={{ ...hM("#f1f5f9"), ...stickyHead1, textAlign: "left", minWidth: 180, cursor:"pointer", userSelect:"none" }}>Acc. Name{arrow("name")}</th>
                   <th onClick={()=>toggleSort("tender")}  style={{ ...hM(bCost), minWidth: 120, cursor:"pointer", userSelect:"none" }} title={t(`งบ QS = ราคาเดิม + เผื่อเศษ ${WASTE_LBL} (ของราคาเดิม) + งานเพิ่ม`,`QS budget = baseline + ${WASTE_LBL} wastage (on baseline) + additions`)}>Tender Cost<span style={{fontSize:11,fontWeight:600,opacity:0.8,marginLeft:4}}>{t(`รวมเผื่อ ${WASTE_LBL}`,`incl. ${WASTE_LBL}`)}</span>{arrow("tender")}</th>
                   <th onClick={()=>toggleSort("takeoff")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Take off{arrow("takeoff")}</th>
-                  <th data-tkpct-head onClick={()=>toggleSort("tkpct")} style={{ ...hM(bCost), minWidth: 84, cursor:"pointer", userSelect:"none" }} title={t("% Take off ที่จัดซื้อกรอกในฟอร์ม PO — รวมทุกบรรทัดของรหัสนี้ (เกิน 100% = ตัวแดง)","% Take off entered on the PO form — all lines of this code added up (over 100% = red)")}>% Take off{arrow("tkpct")}</th>
+                  <th data-tkpct-head onClick={()=>toggleSort("tkpct")} style={{ ...hM(bCost), minWidth: 84, cursor:"pointer", userSelect:"none" }} title={t("Take off ÷ Tender Cost — Take off ที่กรอกตอนสร้าง PO รวมแล้วกี่ % ของ Tender (เกิน 100% = ตัวแดง)","Take off ÷ Tender Cost — take off entered on the POs as % of Tender (over 100% = red)")}>% Take off{arrow("tkpct")}</th>
                   <th onClick={()=>toggleSort("stock")}   style={{ ...hM(bCost), minWidth: 90, cursor:"pointer", userSelect:"none" }}>Stock{arrow("stock")}</th>
                   <th onClick={()=>toggleSort("issue")}   style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Issue PO{arrow("issue")}</th>
                   <th onClick={()=>toggleSort("pending")} style={{ ...hM(bCost), minWidth: 110, cursor:"pointer", userSelect:"none" }}>Pending PO{arrow("pending")}</th>
@@ -478,7 +478,8 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
                       {(() => { const pc = tkPctOf(code); return (
-                        <td data-tkpct style={{ ...nM, background: bCost, fontWeight: 600, color: pc == null ? T.textMuted : pc > 100 ? T.red : T.textPrimary }}>{pctTxt(pc)}</td>); })()}
+                        <td data-tkpct style={{ ...nM, background: bCost, fontWeight: 600, color: !tko ? T.textMuted : pc == null || pc > 100 ? T.red : T.textPrimary }}
+                          title={!tko ? undefined : pc == null ? t("มี Take off แต่ไม่มีงบ","Take off with no budget") : undefined}>{!tko ? "-" : pctTxt(pc)}</td>); })()}
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(stk)}{stk ? usdLine(stk, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(iss)}{iss ? usdLine(iss, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: bc < 0 ? T.red : T.textPrimary }}>{money(bc)}{bc ? usdLine(Math.abs(bc), usdRate) : null}</td>
@@ -506,8 +507,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   <td style={{ ...cM, ...stickyBody0, fontWeight: 700, background: "#f1f5f9" }} colSpan={2}>TOTAL</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(budgetOf))}{sum(budgetOf) ? usdLine(sum(budgetOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(takeoffOf))}{sum(takeoffOf) ? usdLine(sum(takeoffOf), usdRate) : null}</td>
-                  {(() => { const ov = takeoffPctOverall([...pos, ...list], shownCodes, budgetOf); return (
-                  <td data-tkpct-total title={t("เฉลี่ยถ่วงด้วย Tender ของรหัสในตารางนี้ (รหัสที่ยังไม่กรอก = 0%) — ภาพรวมทั้งโครงการดูที่การ์ด Tender Cost","Tender-weighted average of the codes in this table (not entered = 0%) — whole project on the Tender Cost card")} style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: ov != null && ov > 100 ? T.red : T.textPrimary }}>{pctTxt(ov)}</td>); })()}
+                  <td data-tkpct-total title={t("Take off รวม ÷ Tender รวม ของรหัสที่อยู่ในตารางนี้","Total take off ÷ total Tender of the codes in this table")} style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(budgetOf) > 0 && sum(takeoffOf) / sum(budgetOf) > 1 ? T.red : T.textPrimary }}>{sum(takeoffOf) ? pctTxt(sum(budgetOf) > 0 ? sum(takeoffOf) / sum(budgetOf) * 100 : null) : "-"}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(stockOf))}{sum(stockOf) ? usdLine(sum(stockOf), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7" }}>{money(sum(issuePOof))}{sum(issuePOof) ? usdLine(sum(issuePOof), usdRate) : null}</td>
                   <td style={{ ...nM, fontWeight: 700, background: "#eef2f7", color: sum(balCostOf) < 0 ? T.red : T.textPrimary }}>{money(sum(balCostOf))}{sum(balCostOf) ? usdLine(Math.abs(sum(balCostOf)), usdRate) : null}</td>
@@ -661,9 +661,17 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
   const itemNet = (it) => (parseFloat(it.takeoff)||0) - (parseFloat(it.store)||0) - otherStock(it.code) - otherCommitted(it.code) - otherPlanned(it.code);
   // Take off ของรหัสนี้ที่บันทึกไว้แล้ว (PO + แผนอื่น ยกเว้นรายการที่กำลังแก้) + ทุกบรรทัดในฟอร์มที่เป็นรหัสเดียวกัน
   // → ใช้บอก "Take off มาแล้วกี่ % ของ Tender" ระหว่างกรอก PO
-  // % Take off (กรอกเอง) ที่บันทึกไว้แล้วของรหัสนี้ (PO + แผนอื่น ยกเว้นรายการที่กำลังแก้) + ที่กรอกในฟอร์มตอนนี้
-  const otherEntries = () => [...poEntries.filter(p => editingPlan || p.id !== editId), ...plans.filter(pl => !(editingPlan && pl.id === editId))];
-  const formPct = (code) => { const ls = form.items.filter(it => it.code === code && String(it.pct ?? "").trim() !== "" && !isNaN(parseFloat(it.pct))); return ls.length ? ls.reduce((s, it) => s + parseFloat(it.pct), 0) : null; };
+  // Take off ของรหัสนี้ที่บันทึกไว้แล้ว (PO + แผนอื่น ยกเว้นรายการที่กำลังแก้) + ทุกบรรทัดในฟอร์มที่เป็นรหัสเดียวกัน
+  // → บอก "Take off มาแล้วกี่ % ของ Tender" ระหว่างกรอก PO (ตรงกับคอลัมน์ % Take off ในตาราง)
+  const otherTakeoff = (code) => [...poEntries.filter(p => editingPlan || p.id !== editId), ...plans.filter(pl => !(editingPlan && pl.id === editId))]
+    .reduce((s,p)=> s + poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.takeoff)||0),0), 0);
+  const formTakeoff = (code) => form.items.filter(it=>it.code===code).reduce((s,it)=>s+(parseFloat(it.takeoff)||0),0);
+  // "% ของยอดสั่ง" (กรอกเอง) = สั่งไปกี่ % ของ Take off — รวมทุก PO/แผนของรหัสเดียวกันต้องไม่เกิน 100%
+  const pctNum = (v) => { const n = parseFloat(v); return String(v ?? "").trim() !== "" && !isNaN(n) ? n : 0; };
+  const savedPct = (code) => [...poEntries.filter(p => editingPlan || p.id !== editId), ...plans.filter(pl => !(editingPlan && pl.id === editId))]
+    .reduce((s,p)=> s + poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+pctNum(it.pct),0), 0);
+  const formPctSum = (code) => form.items.filter(it=>it.code===code).reduce((s,it)=>s+pctNum(it.pct),0);
+  const pctTotal = (code) => Math.round((savedPct(code) + formPctSum(code)) * 100) / 100;
   const setItemAmount = (id, val) => updateItemRow(id, "amount", val);
   // % ของยอดสั่ง = ช่องกรอกเอง (it.pct) ไม่ผูกกับมูลค่า PO อีกต่อไป
 
@@ -727,6 +735,16 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
       };
     });
     if (!validItems.length) { uiAlert(t("กรุณาเลือก Account Code และกรอกมูลค่าอย่างน้อย 1 รายการ","Please select an Account Code and enter at least one value")); return; }
+    // % ของยอดสั่ง รวมทุก PO ของรหัสเดียวกันต้องไม่เกิน 100% (เช็กเฉพาะรหัสที่ใบนี้กรอก % ไว้)
+    const pctOver = [...new Set(validItems.filter(it => pctNum(it.pct) !== 0).map(it => it.code))].map(c => [c, pctTotal(c), savedPct(c)]).filter(([, tot]) => tot > 100);
+    const pctNeg = validItems.find(it => pctNum(it.pct) < 0);
+    if (pctNeg) { uiAlert(t(`${pctNeg.code}: % ของยอดสั่ง ติดลบไม่ได้`,`${pctNeg.code}: % of order can't be negative`)); return; }
+    if (pctOver.length) {
+      uiAlert(t("% ของยอดสั่ง รวมทุก PO ต้องไม่เกิน 100% — แก้ก่อนบันทึก:\n\n","% of order across all POs must not exceed 100% — fix before saving:\n\n")
+        + pctOver.map(([c, tot, sv]) => t(`• ${c}: รวม ${tot}% (PO อื่น ${Math.round(sv*100)/100}% · ใบนี้ ${Math.round((tot-sv)*100)/100}%) — ใบนี้ใส่ได้อีกไม่เกิน ${Math.max(0, Math.round((100-sv)*100)/100)}%`,
+                                           `• ${c}: total ${tot}% (other POs ${Math.round(sv*100)/100}% · this one ${Math.round((tot-sv)*100)/100}%) — this PO can take at most ${Math.max(0, Math.round((100-sv)*100)/100)}%`)).join("\n"));
+      return;
+    }
     // กันยอดของเข้าจริงรวมทุกงวดเกินยอดสั่งของแต่ละรายการ (แจ้งเตือน + บันทึกไม่ได้)
     const overItem = validItems.find(it => {
       const o = parseFloat(it.amount)||0; if (!(o>0)) return false;
@@ -1091,36 +1109,41 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
                         <MoneyInput value={it.amount} onChange={v=>setItemAmount(it.id,v)}/>
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
-                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("% Take off (กรอกเอง)","% Take off (manual)")}</span>
+                        <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("% ของยอดสั่ง (กรอกเอง)","% of order (manual)")}</span>
                         <div style={{position:"relative",display:"flex",alignItems:"center"}}>
-                          <input type="number" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)}
+                          <input type="number" min="0" max="100" placeholder="0" value={it.pct ?? ""} onChange={e=>updateItemRow(it.id,"pct",e.target.value)} data-manual-pct
                             className="input-base" style={{textAlign:"right",fontVariantNumeric:"tabular-nums",flex:1,paddingRight:26}}/>
                           <span style={{position:"absolute",right:11,fontSize:13,color:(it.pct??"")!==""?T.textPrimary:T.textMuted,fontWeight:600,pointerEvents:"none"}}>%</span>
                         </div>
+                        {it.code && (() => {
+                          const tot = pctTotal(it.code), sv = savedPct(it.code), over = tot > 100;
+                          if (!tot && !sv) return null;
+                          return (
+                            <span data-pct-sum style={{fontSize:11,fontWeight:over?650:500,color:over?T.red:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>
+                              {t("รวมทุก PO","All POs")} {tot}% {over ? t(`— เกิน 100% (ใส่ได้อีก ${Math.max(0, Math.round((100-sv)*100)/100)}%)`,`— over 100% (max ${Math.max(0, Math.round((100-sv)*100)/100)}% here)`) : t(`· เหลือ ${Math.round((100-tot)*100)/100}%`,`· ${Math.round((100-tot)*100)/100}% left`)}
+                            </span>
+                          );
+                        })()}
                       </label>
                       <label style={{display:"flex",flexDirection:"column",gap:5}}>
                         <span style={{fontSize:11,color:T.textSecondary,fontWeight:500}}>{t("แผนของเข้า (งวดแรก)","Incoming plan (1st round)")}</span>
                         <DateInput value={it.rounds?.[0]?.planDate||""} onChange={e=>updateItemPlan(it.id,"planDate",e.target.value)}/>
                       </label>
                     </div>
-                    {/* % Take off รหัสนี้รวมแล้วเท่าไร (ที่บันทึกไว้ + ที่กำลังกรอก) — อัปเดตทันทีตอนพิมพ์ ตรงกับคอลัมน์ % Take off ในตาราง */}
+                    {/* Take off รหัสนี้รวมแล้วกี่ % ของ Tender (ที่บันทึกไว้ + ที่กำลังกรอก) — อัปเดตทันทีตอนพิมพ์ ตรงกับคอลัมน์ % Take off */}
                     {it.code && (() => {
-                      const before = takeoffPctOf(otherEntries(), it.code), inForm = formPct(it.code);
-                      const total = before == null && inForm == null ? null : (before || 0) + (inForm || 0);
-                      const line = String(it.pct ?? "").trim() !== "" && !isNaN(parseFloat(it.pct)) ? parseFloat(it.pct) : null;
-                      const over = total != null && total > 100;
-                      const r1 = (v) => (Math.round(v * 10) / 10).toFixed(1);
+                      const before = otherTakeoff(it.code), total = before + formTakeoff(it.code), line = parseFloat(it.takeoff)||0;
+                      const pc = budget > 0 ? total / budget * 100 : null, over = pc != null && pc > 100, bad = over || (pc == null && total > 0);
                       return (
-                        <div data-tk-pct style={{marginTop:10,fontSize:12,color:T.textSecondary,background:over?T.redBg:"#eef4ff",border:`1px solid ${over?"#fecaca":"#dbe6ff"}`,borderRadius:8,padding:"6px 10px",display:"flex",flexWrap:"wrap",gap:"2px 10px",alignItems:"center"}}>
-                          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><Ico name="ruler" size={14} />{t("% Take off รหัสนี้รวม","% Take off for this code")}</span>
-                          {total != null ? (<>
-                            <b data-tk-pct-val style={{color:over?T.red:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{r1(total)}%</b>
-                            {over && <span style={{color:T.red,fontWeight:600}}>{t("เกิน 100%","over 100%")}</span>}
-                            <span style={{color:T.textMuted,fontVariantNumeric:"tabular-nums"}}>({t("บรรทัดนี้","this line")} {line != null ? `${r1(line)}%` : "—"}{before != null ? ` · ${t("ก่อนหน้า","before")} ${r1(before)}%` : ""})</span>
+                        <div data-tk-pct style={{marginTop:10,fontSize:12,color:T.textSecondary,background:bad?T.redBg:"#eef4ff",border:`1px solid ${bad?"#fecaca":"#dbe6ff"}`,borderRadius:8,padding:"6px 10px",display:"flex",flexWrap:"wrap",gap:"2px 10px",alignItems:"center"}}>
+                          <span style={{display:"inline-flex",alignItems:"center",gap:5}}><Ico name="ruler" size={14} />{t("% Take off รหัสนี้","% Take off for this code")}</span>
+                          {budget > 0 ? (<>
+                            <b data-tk-pct-val style={{color:over?T.red:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums"}}>{pc.toFixed(1)}%</b>
+                            <span style={{fontVariantNumeric:"tabular-nums"}}>{t("ของ Tender","of Tender")} ฿{fmt0(budget)} · Take off {t("รวม","total")} ฿{fmt0(total)}{over ? ` · ${t("เกิน Tender","over Tender")}` : ""}</span>
+                            {line > 0 && <span style={{color:T.textMuted,fontVariantNumeric:"tabular-nums"}}>({t("บรรทัดนี้","this line")} {(line/budget*100).toFixed(1)}%{before>0?` · ${t("ก่อนหน้า","before")} ${(before/budget*100).toFixed(1)}%`:""})</span>}
                           </>) : (
-                            <span data-tk-pct-val style={{color:T.textMuted}}>{t("ยังไม่ได้กรอก — ใส่ในช่อง % Take off ด้านบน","Not entered yet — use the % Take off field above")}</span>
+                            <span style={{color:total>0?T.red:T.textMuted}}>{t("ไม่มีงบ Tender ของรหัสนี้ — คิด % ไม่ได้","No Tender budget for this code — no %")}{total>0?` · Take off ฿${fmt0(total)}`:""}</span>
                           )}
-                          {amt>0 && <span style={{color:T.textMuted}}>· {t("ยอด PO นี้","this PO")} {fmt(amt)} = {budget>0?Math.round(amt/budget*100):0}% {t("ของงบ","of budget")}</span>}
                         </div>
                       );
                     })()}
