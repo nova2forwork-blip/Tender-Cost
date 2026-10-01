@@ -1,6 +1,6 @@
 // Tender Cost — สร้างไฟล์ Excel ทุกแผนก (ออกแบบเป็นภาษาไทยเสมอ)
 import * as XLSX from "xlsx-js-style";
-import { ACCOUNTS, GROUPS, OTHER_COL_LABEL, PAYMENT_LABEL, WASTE_LBL, WASTE_RATE, accountOf, buildCombinedBudget, exportAccountList, fmt, hiddenSafeForPO, itemSupplierName, monthAddValue, monthRowBreakdown, monthShortLabel, paymentStatus, poAmountForCode, takeoffPctOf, takeoffPctOverall, poItems, poNextDueDate, poNumbersLabel, poPaidAmount, poPayLines, poRounds, poTotal, roundPaid, roundReceived, todayStr, wasteOf, withWaste } from "./core.jsx";
+import { ACCOUNTS, GROUPS, OTHER_COL_LABEL, PAYMENT_LABEL, WASTE_LBL, WASTE_RATE, accountOf, buildCombinedBudget, exportAccountList, fmt, hiddenSafeForPO, itemSupplierName, monthAddValue, monthRowBreakdown, monthShortLabel, paymentStatus, poAmountForCode, poItems, poNextDueDate, poNumbersLabel, poPaidAmount, poPayLines, poRounds, poTotal, roundPaid, roundReceived, todayStr, wasteOf, withWaste } from "./core.jsx";
 
 // ─── Styling helper ─────────────────────────────────────────────────────────
 // Lays down a colored title bar (merged across every column), optional gray
@@ -606,14 +606,12 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   };
   // คอลัมน์ต้นทุน: Tender Cost · Take off · % Take off · Stock · Issue PO · Pending PO + เดือน (1 ช่อง/เดือน) + TOTAL + Balance Cost
   const header = ["Acc. Code","Acc. Name",`Tender Cost (รวมเผื่อ ${WASTE_LBL})`,"Take off","% Take off","Stock","Issue PO","Pending PO"];
-  // % Take off = ที่จัดซื้อกรอกในฟอร์ม PO รวมทุกบรรทัดของรหัส (เก็บเป็นสัดส่วน Excel แสดงเป็น %) · ยังไม่กรอก = "-"
-  const tkEntries = [...poEntries, ...plansArr];
-  const tkPct = (v) => v == null ? "-" : v / 100;
+  const tkPct = (tk, bud) => bud > 0 && tk ? tk / bud : "-";   // % Take off = Take off ÷ Tender (Excel แสดงเป็น %) · ไม่มีงบ/ไม่มี Take off = "-"
   mMonths.forEach(mk => header.push(monthShortLabel(mk)));
   header.push("TOTAL","Balance Cost");
   const rows = [
     [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
-    [`เดือนละ 1 ช่อง (มีป้ายกำกับ) — จ่าย=จ่ายแล้ว(เขียว) · รับ=รับของแล้ว · รอเข้า=PO ยังไม่รับ(⚠=ล่าช้า) · แผน=ยังไม่เป็น PO(แดง, มี *) · % Take off = ที่กรอกในฟอร์ม PO (รวมทุกบรรทัดของรหัส · TOTAL = เฉลี่ยถ่วงด้วย Tender) · Issue PO = PO ที่ยื่นจริง · Pending PO = งบ−Stock−PO−แผน · Balance Cost = Tender Cost−Stock−Issue PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [`เดือนละ 1 ช่อง (มีป้ายกำกับ) — จ่าย=จ่ายแล้ว(เขียว) · รับ=รับของแล้ว · รอเข้า=PO ยังไม่รับ(⚠=ล่าช้า) · แผน=ยังไม่เป็น PO(แดง, มี *) · % Take off = Take off ÷ Tender Cost · Issue PO = PO ที่ยื่นจริง · Pending PO = งบ−Stock−PO−แผน · Balance Cost = Tender Cost−Stock−Issue PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
     header,
   ];
@@ -621,7 +619,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   const lineCount = {}; // จำนวนบรรทัดสูงสุดต่อแถว → ใช้ตั้งความสูงแถว
   mCodes.forEach((code, ri) => {
     const budget=budgetOf(code), committed=committedOf(code), stock=stockOf(code), planned=plannedOf(code), takeoff=takeoffOf(code);
-    const row = [xCode(code), nameOf(code), budget, takeoff, tkPct(takeoffPctOf(tkEntries, code)), stock, committed, budget-stock-committed-planned];
+    const row = [xCode(code), nameOf(code), budget, takeoff, tkPct(takeoff, budget), stock, committed, budget-stock-committed-planned];
     let maxLines = 1;
     mMonths.forEach(mk => { const l=cellLines(cellOf(code,mk)); maxLines=Math.max(maxLines, l.length||1); row.push(l.length?l.join("\n"):"-"); });
     row.push(mMonths.reduce((s,mk)=>s+cellTot(cellOf(code,mk)),0), budget-stock-committed); // Balance Cost = Tender Cost − Stock − Issue PO
@@ -630,7 +628,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   });
   const dataEnd = rows.length - 1;
   const sumOf = (fn) => mCodes.reduce((s,c)=>s+fn(c),0);
-  const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(takeoffOf), tkPct(takeoffPctOverall(tkEntries, mCodes, budgetOf)), sumOf(stockOf), sumOf(committedOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
+  const totalArr = ["","TOTAL", sumOf(budgetOf), sumOf(takeoffOf), tkPct(sumOf(takeoffOf), sumOf(budgetOf)), sumOf(stockOf), sumOf(committedOf), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c)-plannedOf(c))];
   // แถว TOTAL: รวมยอดทั้งเดือนเป็นตัวเลขเดียว (ไม่แยกจ่าย/รอเข้า/แผน)
   mMonths.forEach(mk => { const colT = sumOf(c=>cellTot(cellOf(c,mk))); totalArr.push(colT>0 ? fmt(colT) : "-"); });
   totalArr.push(mCodes.reduce((s,c)=> s + mMonths.reduce((ss,mk)=>ss+cellTot(cellOf(c,mk)),0), 0), sumOf(c=>budgetOf(c)-stockOf(c)-committedOf(c))); // Balance Cost = Tender − Stock − Issue PO
