@@ -190,9 +190,13 @@ async function migrateAccountCodes(renameMap) {
 // APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
 // build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
 // commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
-const APP_VERSION = "1.0.015";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
+const APP_VERSION = "1.0.017";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
 // ประวัติการอัปเดต (ใหม่สุดอยู่บน) — แสดงในเมนูผู้ใช้ → "ประวัติการอัปเดต"
 const APP_CHANGELOG = [
+  { v: "1.0.017", date: "2026-10-02", th: ["\"% Take off\" = % ที่จัดซื้อพิมพ์เองในแต่ละ PO รวมกันต่อรหัส (ไม่คำนวณจากยอดเงินแล้ว) — PO เดิมที่ยังไม่ได้พิมพ์ % ให้เข้าไปแก้ PO แล้วกรอก"],
+    en: ["\"% Take off\" = the % procurement types on each PO, summed per code (no longer calculated from amounts) — for existing POs, edit them and type the %"] },
+  { v: "1.0.016", date: "2026-10-01", th: ["% เดิมของ PO ที่สร้างไปแล้ว = ยอด PO ÷ Take off (สั่งไปกี่ % ของ Take off) แทนการเทียบ Tender — รวมไม่เกิน 100%", "เพดาน 100% ในฟอร์มนับรวม % เดิมด้วย"],
+    en: ["Earlier % of existing POs = PO amount ÷ Take off (how much of the take-off is ordered) instead of vs Tender — never over 100%", "The 100% cap in the form now includes the earlier %"] },
   { v: "1.0.015", date: "2026-10-01", th: ["\"% Take off\" = ผลรวม \"% ของยอดสั่ง\" ทุก PO ของรหัสนั้น — PO ที่สร้างไปแล้วใช้ % เดิม (Take off ÷ Tender) · PO ที่สร้างใหม่ใช้ % ที่กรอกเอง", "ฟอร์ม PO: ช่อง \"% ของยอดสั่ง (กรอกเอง)\" — % ที่กรอกรวมทุก PO ไม่เกิน 100% (ไม่นับ % เดิมของ PO เก่า)", "หน้ารายละเอียด PO: แสดง % ของยอดสั่งของแต่ละรายการ และ % ย่อยของแต่ละงวดเมื่อแบ่งหลายงวด"],
     en: ["\"% Take off\" = sum of \"% of order\" over all POs of the code — existing POs use the earlier % (Take off ÷ Tender) · new POs use the typed %", "PO form: \"% of order (manual)\" — typed % across POs max 100% (earlier % of old POs not counted)", "PO detail: shows each line's % of order, and each round's share when split into rounds"] },
   { v: "1.0.014", date: "2026-10-01", th: ["\"% Take off\" ในตารางและ Excel = % ที่กรอกเองในฟอร์ม PO รวมทุก PO ของรหัสนั้น (ไม่เทียบกับ Tender แล้ว · ไม่เกิน 100%)", "ฟอร์ม PO: ช่องชื่อ \"% Take off ที่สั่ง (กรอกเอง)\" · เอาแถบเทียบ Tender ออก"],
@@ -349,18 +353,14 @@ const migratePO = (p) => {
 
 const poItems = (p) => migratePO(p).items;
 const poTotal = (p) => poItems(p).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
-// "% ของยอดสั่ง" ต่อบรรทัด PO/แผน:
-//   • กรอกเองไว้ (it.pct) → ใช้ค่าที่กรอก
-//   • PO ที่สร้างก่อน v1.0.015 (ไม่มีธง pctNew) และไม่ได้กรอก → ใช้ % เดิม = Take off ÷ Tender ของรหัส (แบบที่เคยแสดง)
-//   • บรรทัดที่สร้างใหม่ (pctNew) แต่ยังไม่กรอก → ไม่นับ
+// "% Take off" = % ที่จัดซื้อพิมพ์เองในแต่ละบรรทัด PO/แผน (ช่อง "% ของยอดสั่ง (กรอกเอง)" → it.pct)
+// รวมทุกบรรทัดของรหัสเดียวกัน = รหัสนั้นเทคมาแล้วกี่ % · ไม่คำนวณจากยอดเงินใด ๆ · ยังไม่มีใครพิมพ์ = null ("-")
 const hasTypedPct = (it) => it && it.pct != null && String(it.pct).trim() !== "" && !isNaN(parseFloat(it.pct));
-const legacyLinePct = (it, budget) => (!it.pctNew && !hasTypedPct(it) && budget > 0 && (parseFloat(it.takeoff) || 0) > 0) ? (parseFloat(it.takeoff) || 0) / budget * 100 : null;
-const linePct = (it, budget) => hasTypedPct(it) ? parseFloat(it.pct) : legacyLinePct(it, budget);
-// ผลรวม "% ของยอดสั่ง" ของรหัส (ทุก PO + แผน) — null ถ้าไม่มีบรรทัดไหนมี %
-const takeoffPctOf = (entries, code, budget = 0) => {
+const linePct = (it) => hasTypedPct(it) ? parseFloat(it.pct) : null;
+const takeoffPctOf = (entries, code) => {
   let any = false, sum = 0;
-  (entries || []).forEach(p => poItems(p).forEach(it => { if (it.code !== code) return; const v = linePct(it, budget); if (v != null) { any = true; sum += v; } }));
-  return any ? sum : null;   // ไม่ปัดตรงนี้ — ให้ตรงกับ Take off รวม ÷ Tender (ปัดตอนแสดงผล)
+  (entries || []).forEach(p => poItems(p).forEach(it => { if (it.code !== code) return; const v = linePct(it); if (v != null) { any = true; sum += v; } }));
+  return any ? sum : null;
 };
 const poAmountForCode = (p, code) => poItems(p).filter(it => it.code===code).reduce((s,it) => s + (parseFloat(it.amount)||0), 0);
 
@@ -1100,4 +1100,4 @@ const projectSummary = ({ tenders = {}, additions = {}, extra = [], hidden = [],
   return { budget, committed, pct: budget > 0 ? committed / budget * 100 : 0, dueNow, poCount: (po || []).length, late, overCodes };
 };
 
-export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, APP_VERSION, APP_CHANGELOG, appBuild, appBuildLabel, appBuildDetail, changelogText, buildFromHtml, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, takeoffPctOf, hasTypedPct, legacyLinePct, linePct, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, unusualAmountIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
+export { ACCOUNTS, GROUPS, PO_STATUS, PO_STATUS_TH, poStatusLabel, STATUS_CLR, STATUS_BG, GRP_COLORS, applyAccountList, _EXTRA_ITEMS, setExtraRegistry, accountOf, codeText, APP_VERSION, APP_CHANGELOG, appBuild, appBuildLabel, appBuildDetail, changelogText, buildFromHtml, extraCodeError, renameProjectCode, migrateAccountCodes, todayStr, UnsavedGuard, DialogStore, uiAlert, uiConfirm, uiPrompt, leaveIfDirty, addDays, DEFAULT_CREDIT_DAYS, isNewPO, migratePO, poItems, poTotal, poAmountForCode, takeoffPctOf, hasTypedPct, linePct, poSupplier, poSupplierName, poSupplierText, poSupplierLabel, poNumbersLabel, itemSupplierName, poSuppliers, poRounds, poDeliveries, roundPayDate, roundReceived, roundPaid, itemOrdered, itemReceived, itemEntered, itemRemaining, HISTORY_ICON, historyEntry, poHistory, poLastUpdate, withHistory, relativeTime, uiLocale, formatDateTime, poReceivedDates, poPaidDate, roundDueForecast, poNextDueDate, fmtDate, PayDateText, poPayLines, poPaidAmount, itemPaidAmount, poBilledAmount, PO_STAGES, poStage, poStageLabel, isPOLocked, canEditPO, normPoNo, normSupplier, suppliersLookAlike, supplierCounts, similarSupplier, farFromPODate, poDataContext, poDataIssues, unusualAmountIssues, deliveryStatus, incomingStatus, paymentStatus, INCOMING_LABEL, INCOMING_CLR, INCOMING_BG, PAYMENT_LABEL, PAYMENT_CLR, PAYMENT_BG, PAYMENT_TYPE_CLR, PAYMENT_TYPE_BG, creditTermDays, INCOMING_LABEL_EN, PAYMENT_LABEL_EN, incLabel, payLabel, payTypeLabelT, fmt, fmtZ, fmt0, fmtK, monthShortLabel, uid, T, _LANG, _langSubs, t, inThai, setLang, toggleLang, useLang, FAB_SIZE, FAB_GAP, BNAV_H, bnavH, BOTTOM, GLOBAL_CSS, monthAddValue, WASTE_RATE, WASTE_LBL, wasteOf, withWaste, rollupTenders, rollupAdditions, buildCombinedBudget, monthRowBreakdown, OTHER_COL_LABEL, exportAccountList, ORPHAN_NAME, poCodeSet, hiddenSafeForPO, projectSummary };
