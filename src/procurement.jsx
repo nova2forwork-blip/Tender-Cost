@@ -975,11 +975,8 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
             )}
           </div>
         )}
-        <div className="stat-grid has-lead four" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
-          <StatCard lead progress={tenderTotal>0 ? totalComm/tenderTotal*100 : null} label={t(`งบคงเหลือ (รวมเผื่อเศษ ${WASTE_LBL})`,`Budget remaining (incl. ${WASTE_LBL} wastage)`)} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`${t("ใช้ไป","Used")} ${((totalComm/tenderTotal)*100).toFixed(1)}% ${t("ของงบ","of budget")} ฿${fmt0(tenderTotal)}`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
-          {/* ยอด Tender ทั้งโครงการ (รวมเผื่อเศษ) */}
-          <StatCard label={t(`Tender Cost (รวมเผื่อ ${WASTE_LBL})`,`Tender Cost (incl. ${WASTE_LBL})`)} value={"฿"+fmt0(tenderTotal)} thb={tenderTotal} rate={usdRate}
-              color={T.blue} icon="📐" accent={T.blueLight}/>
+        <div className="stat-grid has-lead" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16,marginBottom:20}}>
+          <StatCard lead progress={tenderTotal>0 ? totalComm/tenderTotal*100 : null} label={t(`งบคงเหลือ (รวมเผื่อเศษ ${WASTE_LBL})`,`Budget remaining (incl. ${WASTE_LBL} wastage)`)} value={"฿"+fmt0(tenderTotal-totalComm)} thb={tenderTotal-totalComm} rate={usdRate} sub={tenderTotal>0?`Tender Cost ฿${fmt0(tenderTotal)} · ${t("ใช้ไป","used")} ${((totalComm/tenderTotal)*100).toFixed(1)}%`:"—"} color={tenderTotal-totalComm<0?T.red:T.textSecondary} icon={tenderTotal-totalComm<0?"⚠️":"💰"} accent={tenderTotal-totalComm<0?T.redBg:"#f8fafc"}/>
           <StatCard label={t("ผูกพันแล้ว (PO)","Committed (PO)")} value={"฿"+fmt0(totalComm)} thb={totalComm} rate={usdRate} sub={`${poEntries.length} ${t("รายการ","items")}`} color={T.amber} icon="📦" accent={T.amberBg}/>
           <StatCard label={t("ชำระแล้ว","Paid")} value={"฿"+fmt0(totalPaid)} thb={totalPaid} rate={usdRate} sub={`${paidCount} ${t("รายการ","items")} · ${t("จ่ายอัตโนมัติ","auto-paid")}`} color={T.green} icon="✅" accent={T.greenBg}/>
         </div>
