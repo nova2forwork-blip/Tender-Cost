@@ -190,9 +190,11 @@ async function migrateAccountCodes(renameMap) {
 // APP_VERSION = เลขที่ส่งมอบ (เปลี่ยนทุกครั้งที่ปล่อยไฟล์ชุดใหม่)
 // build       = รหัสไฟล์ JS ที่ Vite สร้าง (index-XXXX.js) — ต่างกันทุกครั้งที่ deploy จึงใช้เทียบว่า "ทุกคนเปิดตัวเดียวกันไหม"
 // commit      = commit ของ Git จาก Vercel (มีเมื่อเปิด "Automatically expose System Environment Variables")
-const APP_VERSION = "1.0.017";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
+const APP_VERSION = "1.0.018";   // รูปแบบ 1.0.xxx — เพิ่มทีละ 1 ทุกครั้งที่ส่งไฟล์ชุดใหม่ (ใส่รายการใน APP_CHANGELOG ด้วย)
 // ประวัติการอัปเดต (ใหม่สุดอยู่บน) — แสดงในเมนูผู้ใช้ → "ประวัติการอัปเดต"
 const APP_CHANGELOG = [
+  { v: "1.0.018", date: "2026-10-02", th: ["จัดซื้อ: รวมการ์ด Tender Cost เข้ากับการ์ดงบคงเหลือ (เหลือ 3 การ์ด)"],
+    en: ["Procurement: Tender Cost card merged into the budget-remaining card (3 cards)"] },
   { v: "1.0.017", date: "2026-10-02", th: ["\"% Take off\" = % ที่จัดซื้อพิมพ์เองในแต่ละ PO รวมกันต่อรหัส (ไม่คำนวณจากยอดเงินแล้ว) — PO เดิมที่ยังไม่ได้พิมพ์ % ให้เข้าไปแก้ PO แล้วกรอก"],
     en: ["\"% Take off\" = the % procurement types on each PO, summed per code (no longer calculated from amounts) — for existing POs, edit them and type the %"] },
   { v: "1.0.016", date: "2026-10-01", th: ["% เดิมของ PO ที่สร้างไปแล้ว = ยอด PO ÷ Take off (สั่งไปกี่ % ของ Take off) แทนการเทียบ Tender — รวมไม่เกิน 100%", "เพดาน 100% ในฟอร์มนับรวม % เดิมด้วย"],
