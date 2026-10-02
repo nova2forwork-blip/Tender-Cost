@@ -606,14 +606,14 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   };
   // คอลัมน์ต้นทุน: Tender Cost · Take off · % Take off · Stock · Issue PO · Pending PO + เดือน (1 ช่อง/เดือน) + TOTAL + Balance Cost
   const header = ["Acc. Code","Acc. Name",`Tender Cost (รวมเผื่อ ${WASTE_LBL})`,"Take off","% Take off","Stock","Issue PO","Pending PO"];
-  // % Take off = ผลรวม "% ของยอดสั่ง" ทุก PO/แผนของรหัส (PO เดิม = Take off ÷ Tender, PO ใหม่ = ที่กรอกเอง) · ไม่มี = "-"
+  // % Take off = ผลรวม "% ของยอดสั่ง" ทุก PO/แผนของรหัส (% ที่จัดซื้อพิมพ์ในแต่ละ PO รวมกัน) · ไม่มี = "-"
   const tkEntries = [...poEntries, ...plansArr];
-  const tkPct = (code) => { const v = takeoffPctOf(tkEntries, code, budgetOf(code)); return v == null ? "-" : v / 100; };
+  const tkPct = (code) => { const v = takeoffPctOf(tkEntries, code); return v == null ? "-" : v / 100; };
   mMonths.forEach(mk => header.push(monthShortLabel(mk)));
   header.push("TOTAL","Balance Cost");
   const rows = [
     [`ของเข้ารายเดือน (แผน + PO จริง) — ${project.name}`],
-    [`เดือนละ 1 ช่อง (มีป้ายกำกับ) — จ่าย=จ่ายแล้ว(เขียว) · รับ=รับของแล้ว · รอเข้า=PO ยังไม่รับ(⚠=ล่าช้า) · แผน=ยังไม่เป็น PO(แดง, มี *) · % Take off = ผลรวม % ของยอดสั่ง (PO เดิม = Take off ÷ Tender · PO ใหม่ = ที่กรอก) · Issue PO = PO ที่ยื่นจริง · Pending PO = งบ−Stock−PO−แผน · Balance Cost = Tender Cost−Stock−Issue PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
+    [`เดือนละ 1 ช่อง (มีป้ายกำกับ) — จ่าย=จ่ายแล้ว(เขียว) · รับ=รับของแล้ว · รอเข้า=PO ยังไม่รับ(⚠=ล่าช้า) · แผน=ยังไม่เป็น PO(แดง, มี *) · % Take off = ผลรวม % ของยอดสั่ง (% ที่จัดซื้อพิมพ์ในแต่ละ PO รวมกัน) · Issue PO = PO ที่ยื่นจริง · Pending PO = งบ−Stock−PO−แผน · Balance Cost = Tender Cost−Stock−Issue PO · Export: ${new Date().toLocaleDateString("th-TH")}`],
     [],
     header,
   ];
@@ -658,7 +658,7 @@ function addIncomingMonthlySheet(wb, { project, poEntries, incomingPlan=[], tend
   };
   for (let r=dataStart; r<=dataEnd; r++) {
     paintMonth(r);
-    { const ref=XLSX.utils.encode_cell({r,c:4}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v>1) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; }   // Take off เกิน Tender
+    { const ref=XLSX.utils.encode_cell({r,c:4}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v>1.0005) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; }   // Take off เกิน Tender
     [7, balPOcol].forEach(cc => { const ref=XLSX.utils.encode_cell({r,c:cc}); if (ws[ref] && typeof ws[ref].v==="number" && ws[ref].v<0) ws[ref].s = { ...(ws[ref].s||{}), font:{ ...(ws[ref].s?.font||{}), color:{rgb:"DC2626"}, bold:true } }; });
   }
   // แถว TOTAL: ช่องเดือนเป็นยอดรวมเดียว — ตัวหนา ชิดขวา
