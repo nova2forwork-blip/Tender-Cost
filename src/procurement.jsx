@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ACCOUNTS, DEFAULT_CREDIT_DAYS, codeText, HISTORY_ICON, INCOMING_BG, INCOMING_CLR, PAYMENT_BG, PAYMENT_CLR, PAYMENT_TYPE_BG, PAYMENT_TYPE_CLR, PO_STAGES, PO_STATUS, PayDateText, T, WASTE_LBL, accountOf, addDays, buildCombinedBudget, canEditPO, deliveryStatus, exportAccountList, fmt, fmt0, fmtDate, formatDateTime, hiddenSafeForPO, historyEntry, farFromPODate, incLabel, incomingStatus, poDataContext, poDataIssues, similarSupplier, unusualAmountIssues, supplierCounts, itemOrdered, itemPaidAmount, itemReceived, itemRemaining, itemSupplierName, migratePO, monthShortLabel, payLabel, payTypeLabelT, paymentStatus, poAmountForCode, takeoffPctOf, hasTypedPct, linePct, poDeliveries, poHistory, poItems, poLastUpdate, poNextDueDate, poNumbersLabel, poPaidAmount, poPaidDate, poReceivedDates, poRounds, poStage, poStageLabel, poStatusLabel, poSupplierLabel, poSupplierName, poSupplierText, poSuppliers, poTotal, relativeTime, roundPaid, roundPayDate, roundReceived, t, todayStr, uiAlert, uiConfirm, uiLocale, uid, withHistory } from "./core.jsx";
 import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, MoneyInput, SearchInput, Shell, StatCard, StatusPicker, effRate, fmtMoneyInput, usdLine, useIsPhone } from "./ui.jsx";
 
-function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, session, usdRate=0, readOnly=false }) {
+function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, onOpenCode, session, usdRate=0, readOnly=false }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
   const [confirmDel, setConfirmDel] = useState(false); // ยืนยันลบในแอป (กันกรณี window.confirm ถูกบล็อกใน webview)
@@ -173,8 +173,17 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
               <div key={it.id||ii} style={{background:T.bg,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
                   <div style={{minWidth:0}}>
+                    {onOpenCode && it.code ? (
+                      <button type="button" data-open-code={it.code} onClick={()=>onOpenCode(it.code)} title={t("ดูคำสั่งซื้อทั้งหมดของรหัสนี้","See all orders in this code")}
+                        style={{background:"none",border:"none",padding:0,cursor:"pointer",textAlign:"left",display:"inline-flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+                        <span style={{fontSize:11,color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650,textDecoration:"underline",textUnderlineOffset:2}}>{codeText(it.code)||"—"}</span>
+                        <span style={{fontSize:12,color:T.textSecondary}}>{acc?.name||"—"}</span>
+                        <span style={{fontSize:11,color:T.blue,fontWeight:600,display:"inline-flex",alignItems:"center",gap:3}}><Ico name="chart" size={12} />{t("สรุปรหัส","Code summary")}</span>
+                      </button>
+                    ) : (<>
                     <span style={{fontSize:11,color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{codeText(it.code)||"—"}</span>
                     <span style={{fontSize:12,color:T.textSecondary,marginLeft:8}}>{acc?.name||"—"}</span>
+                    </>)}
                   </div>
                   <span style={{fontSize:12,color:T.textMuted,textAlign:"right"}}>{t("สั่ง","Ordered")} <b style={{color:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>{fmt(ordered)}</b>
                     {lp != null && <span data-item-pct title={t("% ของยอดสั่ง ที่จัดซื้อพิมพ์ไว้ในใบนี้","% of order typed on this PO")}
@@ -315,11 +324,160 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
   );
 }
 
+// ─── สรุปรายรหัส (Acc. Code): มีกี่ PO · ยอดเท่าไหร่ · กี่ % ของ Tender · Stock เท่าไหร่/กี่ % ──
+//  เปิดได้จาก: หัวกลุ่มในรายการ PO · รหัสในหน้ารายละเอียด PO · ช่อง Acc. Code ในตารางของเข้ารายเดือน
+//  คิดเลขชุดเดียวกับตาราง (Tender Cost รวมเผื่อเศษ, Stock = ช่อง "มีใน store" ของทุก PO รหัสนี้,
+//  คงเหลือ = Tender − Stock − PO) เพื่อให้ตัวเลขตรงกันทุกหน้า
+function CodeSummaryModal({ code, poEntries = [], plans = [], budget = 0, usdRate = 0, onClose, onOpenPO, paused = false }) {
+  const [sortKey, setSortKey] = useState("date"); // "date" | "amount"
+  useEffect(() => {
+    if (!code || paused) return;
+    const onEsc = (e) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); onClose?.(); } };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [code, paused, onClose]);
+  if (!code) return null;
+  const acc = accountOf(code);
+  const lineOf = (p) => poItems(p).filter(it => it.code === code);
+  const rows = poEntries.filter(p => lineOf(p).length > 0).map(p => {
+    const lines = lineOf(p);
+    return {
+      po: p,
+      amount: lines.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0),
+      stock: lines.reduce((s, it) => s + (parseFloat(it.store) || 0), 0),
+      received: lines.reduce((s, it) => s + itemReceived(it), 0),
+    };
+  });
+  const planRows = plans.filter(pl => lineOf(pl).length > 0);
+  const poSum    = rows.reduce((s, r) => s + r.amount, 0);
+  const stockSum = rows.reduce((s, r) => s + r.stock, 0);
+  const recvSum  = rows.reduce((s, r) => s + r.received, 0);
+  const planSum  = planRows.reduce((s, pl) => s + poAmountForCode(pl, code), 0);
+  const balance  = budget - stockSum - poSum;
+  const pctOf = (v) => budget > 0 ? v / budget * 100 : null;
+  const pctTxt = (v) => { const p = pctOf(v); return p == null ? "—" : `${(Math.round(p * 10) / 10).toFixed(1)}%`; };
+  const sorted = rows.slice().sort((a, b) => sortKey === "amount" ? b.amount - a.amount : (b.po.date || "").localeCompare(a.po.date || ""));
+
+  // แถบสัดส่วนเทียบ Tender: Stock · PO · แผน · คงเหลือ (เกินงบ = แดง)
+  const scale = Math.max(budget, stockSum + poSum + planSum, 1);
+  const over = stockSum + poSum > budget && budget > 0;
+  const seg = (v, bg, key) => v > 0 ? <span key={key} style={{ width: `${v / scale * 100}%`, background: bg }} /> : null;
+
+  const tile = (label, value, pct, clr, sub, key) => (
+    <div data-code-tile={key} style={{ flex: "1 1 140px", minWidth: 0, background: T.bg, borderRadius: 12, padding: "10px 12px" }}>
+      <div style={{ fontSize: 12, color: T.textSecondary, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ width: 9, height: 9, borderRadius: 3, background: clr, display: "inline-block", flexShrink: 0 }} />{label}
+      </div>
+      <div style={{ fontSize: 17, fontWeight: 700, color: T.textPrimary, fontVariantNumeric: "tabular-nums", marginTop: 3 }}>฿{fmt(value)}</div>
+      {usdLine(value, usdRate)}
+      <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
+        {pct != null && <b data-code-pct style={{ color: clr === "#cbd5e1" ? T.textSecondary : clr, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{pct}</b>}
+        {sub && <span>{pct != null ? " · " : ""}{sub}</span>}
+      </div>
+    </div>
+  );
+  const STOCK_CLR = T.blue, PO_CLR = T.amber, PLAN_CLR = "#fcd9a0";
+
+  return (
+    <div data-code-summary={code} onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 96, padding: 16, animation: "fadeIn 0.15s ease" }}>
+      <div role="dialog" aria-modal="true" aria-label={t(`สรุปรหัส ${code}`, `Code summary ${code}`)} onClick={e => e.stopPropagation()}
+        style={{ background: T.card, borderRadius: 16, width: "100%", maxWidth: 640, maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, padding: "20px 22px 12px" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{t("สรุปคำสั่งซื้อตามรหัส","Orders by code")}</div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: T.textPrimary, marginTop: 2 }}>
+              <span style={{ color: T.blue, fontVariantNumeric: "tabular-nums" }}>{codeText(code) || "—"}</span> <span style={{ fontWeight: 600 }}>{acc?.name || ""}</span>
+            </div>
+          </div>
+          <button onClick={onClose} aria-label={t("ปิด","Close")} style={{ background: T.bg, border: "none", borderRadius: 8, width: 32, height: 32, cursor: "pointer", fontSize: 16, color: T.textMuted, flexShrink: 0 }}>×</button>
+        </div>
+
+        <div style={{ overflowY: "auto", padding: "0 22px 18px" }}>
+          {/* Tender Cost = ฐาน 100% */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", padding: "10px 12px", border: `1px solid ${T.cardBorder}`, borderRadius: 12 }}>
+            <span style={{ fontSize: 13, color: T.textSecondary, fontWeight: 600 }}>Tender Cost <span style={{ fontWeight: 400, color: T.textMuted, fontSize: 12 }}>({t(`รวมเผื่อเศษ ${WASTE_LBL}`, `incl. ${WASTE_LBL}`)})</span></span>
+            <span data-code-budget style={{ fontSize: 17, fontWeight: 700, color: T.textPrimary, fontVariantNumeric: "tabular-nums" }}>฿{fmt(budget)}{usdLine(budget, usdRate)}</span>
+          </div>
+          {!(budget > 0) && <div style={{ fontSize: 12, color: "#92400e", background: T.amberBg, borderRadius: 8, padding: "6px 10px", marginTop: 8 }}>{t("รหัสนี้ยังไม่มี Tender Cost — คิด % ไม่ได้","This code has no Tender Cost yet — % can't be calculated")}</div>}
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+            {tile(t("คำสั่งซื้อ (PO)","Orders (PO)"), poSum, budget > 0 ? `${pctTxt(poSum)} ${t("ของ Tender","of Tender")}` : null, PO_CLR, `${rows.length} ${t("ใบ","POs")}`, "po")}
+            {tile("Stock", stockSum, budget > 0 ? `${pctTxt(stockSum)} ${t("ของ Tender","of Tender")}` : null, STOCK_CLR, null, "stock")}
+            {tile(balance < 0 ? t("เกินงบ","Over budget") : t("คงเหลือ","Remaining"), Math.abs(balance), budget > 0 ? `${pctTxt(Math.abs(balance))}` : null, balance < 0 ? T.red : "#cbd5e1", t("Tender − Stock − PO","Tender − Stock − PO"), "balance")}
+          </div>
+
+          <div aria-hidden="true" style={{ display: "flex", height: 10, borderRadius: 99, background: "#eef2f7", overflow: "hidden", marginTop: 12 }}>
+            {seg(stockSum, over ? T.red : STOCK_CLR, "s")}
+            {seg(poSum, over ? "#f87171" : PO_CLR, "p")}
+            {seg(planSum, PLAN_CLR, "pl")}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", fontSize: 12, color: T.textMuted, marginTop: 5 }}>
+            <span>{t("ใช้ไป (Stock + PO)","Used (Stock + PO)")} <b style={{ color: over ? T.red : T.textPrimary, fontVariantNumeric: "tabular-nums" }}>{pctTxt(stockSum + poSum)}</b></span>
+            {poSum > 0 && <span>{t("ของเข้าแล้ว","Received")} <b style={{ color: T.textPrimary, fontVariantNumeric: "tabular-nums" }}>฿{fmt(recvSum)}</b> ({(recvSum / poSum * 100).toFixed(1)}% {t("ของ PO","of PO")})</span>}
+          </div>
+          {planRows.length > 0 && (
+            <div data-code-plan style={{ fontSize: 12, color: T.textSecondary, marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ width: 9, height: 9, borderRadius: 3, background: PLAN_CLR, display: "inline-block" }} />
+              {t("แผนที่ยังไม่เป็น PO","Plans not yet PO")}: {planRows.length} {t("รายการ","plans")} · <b style={{ fontVariantNumeric: "tabular-nums" }}>฿{fmt(planSum)}</b> {budget > 0 && <>({pctTxt(planSum)})</>}
+            </div>
+          )}
+
+          {/* รายการ PO ของรหัสนี้ */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 18, marginBottom: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 650, color: T.textPrimary }}>{t("คำสั่งซื้อในรหัสนี้","Orders in this code")} <span style={{ color: T.textMuted, fontWeight: 500 }}>({rows.length})</span></div>
+            {rows.length > 1 && (
+              <div className="seg-tabs" role="tablist" style={{ fontSize: 12 }}>
+                {[["date", t("ล่าสุด","Latest")], ["amount", t("ยอดสูงสุด","Largest")]].map(([k, l]) => (
+                  <button key={k} role="tab" aria-selected={sortKey === k} onClick={() => setSortKey(k)} className={`seg-tab${sortKey === k ? " on" : ""}`}>{l}</button>
+                ))}
+              </div>
+            )}
+          </div>
+          {rows.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "26px 0", color: T.textMuted, fontSize: 13 }}>{t("ยังไม่มี PO ในรหัสนี้","No PO in this code yet")}</div>
+          ) : (
+            <div style={{ border: `1px solid ${T.cardBorder}`, borderRadius: 12, overflow: "hidden" }}>
+              {sorted.map((r, i) => {
+                const p = r.po, inc = incomingStatus(p);
+                return (
+                  <div key={p.id || i} data-code-po role="button" tabIndex={0}
+                    onClick={() => onOpenPO?.(p)} onKeyDown={e => { if (e.key === "Enter") onOpenPO?.(p); }}
+                    className="po-row" style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 12px", borderTop: i ? "1px solid #f1f5f9" : "none", cursor: "pointer" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 650, color: T.textPrimary, fontSize: 13, fontVariantNumeric: "tabular-nums", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{poNumbersLabel(p)}</div>
+                      <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 1 }}>{poSupplierName(p)} · {fmtDate(p.date)}</div>
+                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 5 }}>
+                        <span style={{ background: INCOMING_BG[inc], color: INCOMING_CLR[inc], fontSize: 11, padding: "2px 8px", borderRadius: 20, fontWeight: 600 }}>{incLabel(inc)}</span>
+                        {r.stock > 0 && <span style={{ background: T.blueLight, color: T.blueDark, fontSize: 11, padding: "2px 8px", borderRadius: 20, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>Stock ฿{fmt(r.stock)}{budget > 0 ? ` · ${pctTxt(r.stock)}` : ""}</span>}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontWeight: 700, color: T.textPrimary, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>฿{fmt(r.amount)}</div>
+                      {usdLine(r.amount, usdRate)}
+                      {budget > 0 && <div data-code-po-pct style={{ fontSize: 12, color: T.amber, fontWeight: 650, fontVariantNumeric: "tabular-nums" }}>{pctTxt(r.amount)} {t("ของ Tender","of Tender")}</div>}
+                      {poItems(p).length > 1 && <div style={{ fontSize: 11, color: T.textMuted }}>{t("ทั้งใบ","whole PO")} ฿{fmt(poTotal(p))}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "#f8fafc", borderTop: `1px solid ${T.cardBorder}`, fontSize: 13 }}>
+                <span style={{ color: T.textSecondary, fontWeight: 600 }}>{t("รวม","Total")} {rows.length} {t("ใบ","POs")}</span>
+                <span style={{ fontWeight: 700, color: T.textPrimary, fontVariantNumeric: "tabular-nums" }}>฿{fmt(poSum)} {budget > 0 && <span style={{ color: T.amber, fontSize: 12 }}>· {pctTxt(poSum)}</span>}</span>
+              </div>
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>{t("กดที่ PO เพื่อเปิดรายละเอียด","Tap a PO to open its details")}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── จัดซื้อ: แผนของเข้าทั้งโปรเจค (ใช้ฟอร์มเดียวกับ PO) ────────────────────────
 //  แผน = อ็อบเจ็กต์รูปเดียวกับ PO (isPlan:true) สร้าง/แก้ผ่านฟอร์ม PO โดยติ๊ก
 //  "แผนของเข้า". แท็บนี้แค่แสดงลิสต์แผน + ปุ่มเรียกฟอร์ม. "→ ทำเป็น PO จริง" =
 //  เปิดฟอร์มโดยเอาติ๊กออกให้ พอกดบันทึกก็กลายเป็น PO จริงและแผนถูกย้ายออก.
-function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {}, additions = {}, extraItems = [], hiddenAccounts = [], onNew, onEdit, onConvert, onDelete }) {
+function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {}, additions = {}, extraItems = [], hiddenAccounts = [], onNew, onEdit, onConvert, onDelete, onOpenCode }) {
   // ตารางของเข้ารายเดือน: ล็อกหัวตาราง — วัดความกว้างจริงของคอลัมน์ Acc. Code ให้คอลัมน์ชื่อบัญชีตรึงต่อพอดี
   const imTableRef = useRef(null);
   useLayoutEffect(() => {
@@ -481,7 +639,11 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
                   const bud = budgetOf(code), tko = takeoffOf(code), stk = stockOf(code), bc = balCostOf(code), iss = issuePOof(code), bpo = balPOof(code);
                   return (
                     <tr key={code}>
-                      <td style={{ ...cM, ...stickyBody0, fontVariantNumeric: "tabular-nums", fontWeight: 600, color: T.blue }}>{codeText(code)}</td>
+                      <td style={{ ...cM, ...stickyBody0, fontVariantNumeric: "tabular-nums", fontWeight: 600, color: T.blue }}>
+                        {onOpenCode ? <button type="button" data-open-code={code} onClick={() => onOpenCode(code)} title={t("ดูคำสั่งซื้อของรหัสนี้","See orders in this code")}
+                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: T.blue, fontWeight: 600, fontSize: 13, fontVariantNumeric: "tabular-nums", textDecoration: "underline", textUnderlineOffset: 2 }}>{codeText(code) || code}</button>
+                          : codeText(code)}
+                      </td>
                       <td style={{ ...cM, ...stickyBody1, color: T.textSecondary }}>{nameOf(code)}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(bud)}{bud ? usdLine(bud, usdRate) : null}</td>
                       <td style={{ ...nM, background: bCost, fontWeight: 600, color: T.textPrimary }}>{money(tko)}{tko ? usdLine(tko, usdRate) : null}</td>
@@ -606,6 +768,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
   const isPhone = useIsPhone();
   const [search, setSearch] = useState("");
   const [detailId, setDetailId] = useState(null);
+  const [codeSummary, setCodeSummary] = useState(null);  // Acc. Code ที่เปิดหน้าสรุปรายรหัสอยู่
   const [collapsed, setCollapsed] = useState({});
   const plans = Array.isArray(incomingPlan) ? incomingPlan : [];
   // อยู่ในโหมดแก้ไขเมื่อเปิดฟอร์มเพิ่ม/แก้ PO หรือเปิดหน้ารายละเอียด (บันทึกของเข้า/แบ่งงวด)
@@ -890,6 +1053,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
   const backNav = () => {
     if (view === "add")       return closeForm();
     if (detailId != null)     return closeDetail();
+    if (codeSummary)          return setCodeSummary(null);
     if (tabHist.length)       { const h = [...tabHist]; const p = h.pop(); setTabHist(h); setTab(p); return; }
     onBack();
   };
@@ -1273,7 +1437,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
           </div>
         ) : tab==="inplan" ? (
           <>
-            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={readOnly ? null : openNewPO} onEdit={readOnly ? null : openEditPlan} onConvert={readOnly ? null : startConvert} onDelete={readOnly ? null : deletePlan} />
+            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={readOnly ? null : openNewPO} onEdit={readOnly ? null : openEditPlan} onConvert={readOnly ? null : startConvert} onDelete={readOnly ? null : deletePlan} onOpenCode={setCodeSummary} />
             {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
             <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
               <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><Ico name="truck" size={18} color={T.textSecondary} />{t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
@@ -1349,7 +1513,8 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
                   const grpCommitted = poEntries.reduce((s,p)=>s+poAmountForCode(p,code),0);
                   const grpStock = poEntries.reduce((s,p)=>s+poItems(p).filter(it=>it.code===code).reduce((ss,it)=>ss+(parseFloat(it.store)||0),0),0);
                   return { code, acc: accountOf(code), rows, isCollapsed: !!collapsed[code],
-                    total: rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0), budget: grpBudget, toOrder: grpBudget - grpStock - grpCommitted };
+                    total: rows.reduce((s,{item})=>s+(parseFloat(item.amount)||0),0), budget: grpBudget, toOrder: grpBudget - grpStock - grpCommitted,
+                    committed: grpCommitted, stock: grpStock };
                 });
                 const grandTotal = filtered.reduce((s,p)=>s+poTotal(p),0);
                 const chip = (bg, clr, txt, key) => <span key={key} style={{background:bg,color:clr,fontSize:12,padding:"2px 8px",borderRadius:20,fontWeight:600,whiteSpace:"nowrap"}}>{txt}</span>;
@@ -1359,6 +1524,8 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
                     {t("งบ","Budget")} <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums",fontWeight:600}}>฿{fmt0(g.budget)}</b>
                     {" · "}
                     <span style={{color:g.toOrder<0?T.red:T.textMuted,fontWeight:g.toOrder<0?650:400}}>{g.toOrder<0 ? t("เกินงบ","Over budget") : t("ต้องสั่งเพิ่ม","To order")} <b style={{color:g.toOrder<0?T.red:T.amber,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(Math.abs(g.toOrder))}</b></span>
+                    {g.budget > 0 && <span data-grp-pct>{" · "}PO <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums",fontWeight:600}}>{(g.committed/g.budget*100).toFixed(1)}%</b>
+                      {g.stock > 0 && <>{" · "}Stock <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums",fontWeight:600}}>{(g.stock/g.budget*100).toFixed(1)}%</b></>}</span>}
                   </span>
                 );
                 const editBtn = (p, locked) => readOnly ? null : (
@@ -1379,6 +1546,8 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
                           <span style={{fontSize:13,fontWeight:650,color:T.textPrimary,fontVariantNumeric:"tabular-nums"}}>{fmt(g.total)}</span>
                           <span style={{flexBasis:"100%",paddingLeft:22}}>{budgetNote(g)} <span style={{fontSize:12,color:T.textMuted}}>· {g.rows.length} {t("รายการ","items")}</span></span>
                         </button>
+                        <div style={{padding:"0 2px 8px 24px"}}><button type="button" data-open-code={g.code} onClick={e=>{ setCodeSummary(g.code); }} title={t("ดูสรุปคำสั่งซื้อ / % ของ Tender / Stock ของรหัสนี้","See orders / % of Tender / Stock for this code")}
+                                  className="btn-ghost" style={{padding:"3px 10px",fontSize:12,minHeight:28,display:"inline-flex",alignItems:"center",gap:5,color:T.blue,borderColor:T.blueMid,background:T.blueLight}}><Ico name="chart" size={13} />{t("สรุปรหัส","Summary")}</button></div>
                         {!g.isCollapsed && (
                           <div style={{display:"flex",flexDirection:"column",gap:8}}>
                             {g.rows.map(({po:p,item}) => {
@@ -1444,6 +1613,8 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
                                 <b style={{color:T.blue,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{codeText(g.code)}</b>
                                 <span style={{color:T.textPrimary,fontWeight:600}}>{g.acc?.name || "—"}</span>
                                 <span style={{color:T.textMuted,fontSize:12}}>· {g.rows.length} {t("รายการ","items")}</span>
+                                <button type="button" data-open-code={g.code} onClick={e=>{ e.stopPropagation(); setCodeSummary(g.code); }} title={t("ดูสรุปคำสั่งซื้อ / % ของ Tender / Stock ของรหัสนี้","See orders / % of Tender / Stock for this code")}
+                                  className="btn-ghost" style={{padding:"3px 10px",fontSize:12,minHeight:28,display:"inline-flex",alignItems:"center",gap:5,color:T.blue,borderColor:T.blueMid,background:T.blueLight}}><Ico name="chart" size={13} />{t("สรุปรหัส","Summary")}</button>
                               </span>
                             </td>
                             <td style={{padding:"10px 14px",textAlign:"right",fontVariantNumeric:"tabular-nums",fontWeight:650,color:T.textPrimary,whiteSpace:"nowrap"}}>
@@ -1508,7 +1679,10 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
           </>
         )}
       </div>
-      <PODetailModal key={detailPO?.id || "none"} po={detailPO} issues={detailPO ? dataIssuesOf(detailPO) : []} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO} session={session} usdRate={usdRate} readOnly={readOnly} />
+      <CodeSummaryModal key={"code-" + (codeSummary || "none")} code={codeSummary} poEntries={poEntries} plans={plans} budget={parseFloat(combinedBudget[codeSummary]) || 0} usdRate={usdRate}
+        onClose={()=>setCodeSummary(null)} onOpenPO={openDetail} paused={detailId != null} />
+      <PODetailModal key={detailPO?.id || "none"} po={detailPO} issues={detailPO ? dataIssuesOf(detailPO) : []} onClose={closeDetail} onEdit={openEdit} onDelete={deletePO} onStatusChange={changeStatus} onChangePO={updatePO}
+        onOpenCode={(c)=>{ if (codeSummary === c) { closeDetail(); return; } setCodeSummary(c); closeDetail(); }} session={session} usdRate={usdRate} readOnly={readOnly} />
     </Shell>
   );
 }
