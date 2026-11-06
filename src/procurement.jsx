@@ -646,7 +646,7 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
 
   return (
     <div>
-      {onNew && (
+      {onNew && months.length === 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
           <button onClick={onNew} className="btn-primary" style={{ marginLeft: "auto" }}>+ {t("เพิ่ม PO","Add PO")}</button>
         </div>
@@ -655,7 +655,11 @@ function IncomingPlanTab({ plans, poEntries = [], usdRate = 0, tenderCosts = {},
       {/* รายการของเข้ารายเดือน — เดือนเป็นคอลัมน์ + ต้นทุน (แผน + PO จริง รวมกัน) */}
       {months.length > 0 && (
         <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, marginBottom: 10 }}>{t("รายการของเข้ารายเดือน (แผน + PO จริง)","Monthly incoming (plan + real PO)")}</div>
+          {/* หัวตาราง + ปุ่มเพิ่ม PO บรรทัดเดียวกัน (เดิมปุ่มอยู่แถวของตัวเอง เหลือที่ว่างโล่ง) */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary }}>{t("รายการของเข้ารายเดือน (แผน + PO จริง)","Monthly incoming (plan + real PO)")}</div>
+            {onNew && <button onClick={onNew} className="btn-primary">+ {t("เพิ่ม PO","Add PO")}</button>}
+          </div>
           <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
             {[[t("รับแล้ว","Received"), T.green, "#eafaf1"], [t("ล่าช้า ⚠","Late ⚠"), T.amber, "#fff6e6"], [t("PO รอเข้า","PO awaiting"), T.textPrimary, "#eef2f7"], [t("แผน (มี * ต่อท้าย)","Plan (with *)"), T.red, "#fdecec"]].map(([label, clr, bg]) => (
               <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: bg, border: `1.5px solid ${clr}`, borderRadius: 20, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: clr }}>
@@ -1494,7 +1498,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
               <ProcurementTrackingTab poEntries={poEntries} onEdit={readOnly ? null : openEdit} onView={openDetail} onAddNew={readOnly ? null : openNewPO} readOnly={readOnly}
                 onStatusChange={changeStatus} session={session} usdRate={usdRate}
                 tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
-                onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
+                onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} onOpenCode={setCodeSummary} />
           </div>
         ) : (
           <>
@@ -1739,7 +1743,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
 // ─── Procurement: Incoming / Payment Tracking tab ─────────────────────────────
 // Groups every PO by its Account Code so the team can see, at a glance and per
 // cost line, which deliveries and payments are on track vs. overdue.
-function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], readOnly=false }) {
+function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], readOnly=false, onOpenCode }) {
   const trkBudget = buildCombinedBudget(tenderCosts, additions);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
@@ -2013,9 +2017,13 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
                   <span style={{fontSize:12,color:T.textMuted,transform:isCollapsed?"rotate(-90deg)":"none",transition:"transform 0.15s",display:"inline-block",width:12}}>▼</span>
                   <span style={{color:T.blue,fontSize:13,fontVariantNumeric:"tabular-nums",fontWeight:650}}>{codeText(code)}</span>
                   <span style={{color:T.textPrimary,fontSize:13,fontWeight:600}}>{acc?.name || "—"}</span>
+                  {onOpenCode && <button type="button" data-open-code={code} onClick={e=>{ e.stopPropagation(); onOpenCode(code); }} title={t("ดูสรุปคำสั่งซื้อ / % ของ Tender / Stock ของรหัสนี้","See orders / % of Tender / Stock for this code")}
+                    className="btn-ghost" style={{padding:"3px 10px",fontSize:12,minHeight:28,display:"inline-flex",alignItems:"center",gap:5,color:T.blue,borderColor:T.blueMid,background:T.blueLight}}><Ico name="chart" size={13} />{t("สรุปรหัส","Summary")}</button>}
                   <span style={{flex:1}}/>
                   <span style={{fontSize:12,color:T.textMuted}}>{t("งบ","Budget")} <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(grpBudget)}</b></span>
                   <span style={{fontSize:12,color:grpToOrder<0?T.red:T.textMuted,fontWeight:grpToOrder<0?650:400}}>{grpToOrder<0 ? t("เกินงบ","Over budget") : t("ต้องสั่งเพิ่ม","To order")} <b style={{color:grpToOrder<0?T.red:T.amber,fontVariantNumeric:"tabular-nums"}}>฿{fmt0(Math.abs(grpToOrder))}</b></span>
+                  {grpBudget > 0 && <span data-grp-pct style={{fontSize:12,color:T.textMuted}}>PO <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>{(grpCommitted/grpBudget*100).toFixed(1)}%</b>
+                    {grpStock > 0 && <> · Stock <b style={{color:T.textSecondary,fontVariantNumeric:"tabular-nums"}}>{(grpStock/grpBudget*100).toFixed(1)}%</b></>}</span>}
                   <span style={{color:T.textMuted,fontSize:12}}>{rows.length} PO</span>
                   {lateCount>0 && <Badge text={`⚠️ ${lateCount} ${t("ล่าช้า","late")}`} clr={T.red} bg={T.redBg}/>}
                 </div>
