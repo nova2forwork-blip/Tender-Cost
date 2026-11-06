@@ -6,6 +6,9 @@ import { AccountPicker, BottomNav, CurrencyControl, DateInput, FormStep, Ico, Mo
 function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onStatusChange, onChangePO, onOpenCode, session, usdRate=0, readOnly=false }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [capWarn, setCapWarn] = useState(""); // เตือนเมื่อยอดของเข้าจริงรวมเกินยอดสั่ง
+  const narrow = useIsPhone();                          // มือถือ: แถวงวดที่จ่ายแล้วเป็น 2 บรรทัด
+  const [openRounds, setOpenRounds] = useState({});   // งวดที่จ่ายแล้วแต่กดเปิดแก้ (round id → true)
+  const [paidHidden, setPaidHidden] = useState({});   // ซ่อนรายการงวดที่จ่ายแล้ว (item id → true)
   const [confirmDel, setConfirmDel] = useState(false); // ยืนยันลบในแอป (กันกรณี window.confirm ถูกบล็อกใน webview)
   // กด Esc = ปิด/ยกเลิกหน้ารายละเอียด
   useEffect(() => {
@@ -191,7 +194,8 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
                   </span>
                 </div>
 
-                {(it.rounds||[]).map((r,ri)=>{
+                {(() => {
+                  const fullCard = (r, ri, onCollapse) => {
                   const [label,bg,clr] = roundBadge(r);
                   const payDate = roundPayDate(po,r);
                   const late = r.actualDate && r.planDate && r.actualDate>r.planDate;
@@ -202,6 +206,7 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
                           {it.rounds.length > 1 && roundShare(r) != null && <span data-round-pct style={{color:T.blue,marginLeft:6}} title={t("% ย่อยของงวดนี้ = % ของยอดสั่ง × ยอดงวด ÷ ยอดสั่ง","Round share = % of order × round amount ÷ ordered")}>· {p1(roundShare(r))}</span>}</span>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{background:bg,color:clr,fontSize:11,padding:"2px 8px",borderRadius:20,fontWeight:600}}>{label}</span>
+                          {onCollapse && <button type="button" data-round-collapse onClick={onCollapse} className="btn-ghost" style={{padding:"2px 10px",fontSize:11,minHeight:26}}>{t("ย่อ","Collapse")}</button>}
                           {!locked && it.rounds.length>1 && (
                             <button type="button" onClick={()=>removeRound(it.id,r.id)} title={t("ลบงวดนี้","Delete round")}
                               aria-label={t("ลบงวดนี้","Delete this round")} className="icon-danger"
@@ -229,7 +234,52 @@ function PODetailModal({ po: rawPo, issues = [], onClose, onEdit, onDelete, onSt
                       </div>
                     </div>
                   );
-                })}
+                  };
+                  // งวดที่ "รับของแล้ว + ถึงกำหนดจ่ายแล้ว" = จบแล้ว → ย่อเป็นแถวเดียว (กดดินสอเพื่อแก้)
+                  const all = (it.rounds||[]).map((r,ri)=>({r,ri}));
+                  const done = all.filter(({r}) => roundReceived(r) && roundPaid(po,r));
+                  const rest = all.filter(({r}) => !(roundReceived(r) && roundPaid(po,r)));
+                  const doneSum = done.reduce((s,{r})=>s+(parseFloat(r.actualAmount)||0),0);
+                  const hidden = !!paidHidden[it.id];
+                  const cell = {fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"};
+                  const cols = narrow ? "22px minmax(0,1fr) auto 28px" : "22px minmax(0,1fr) auto minmax(0,1fr) 28px";
+                  const paidOn = (r) => { const d = roundPayDate(po,r); return fmtDate(po.status==="Paid" && po.paidDate && (!d || d > todayStr()) ? po.paidDate : d); };
+                  return (<>
+                    {done.length > 0 && (
+                      <div data-paid-rounds style={{border:"1px solid #bbf7d0",background:"#f6fdf8",borderRadius:10,marginBottom:6,overflow:"hidden"}}>
+                        <button type="button" onClick={()=>setPaidHidden(h=>({...h,[it.id]:!h[it.id]}))} aria-expanded={!hidden}
+                          style={{width:"100%",display:"flex",alignItems:"center",gap:8,background:"none",border:"none",padding:"9px 12px",cursor:"pointer",textAlign:"left"}}>
+                          <span style={{transition:"transform 0.15s",transform:hidden?"none":"rotate(90deg)",display:"inline-block",color:T.textMuted,fontSize:11}}>▸</span>
+                          <span style={{fontSize:12.5,fontWeight:650,color:"#047857",display:"inline-flex",alignItems:"center",gap:5}}><Ico name="check" size={14} />{t("จ่ายแล้ว","Paid")} {done.length} {t("งวด","rounds")}</span>
+                          <span style={{marginLeft:"auto",fontSize:13,fontWeight:700,color:T.textPrimary,...cell}}>฿{fmt(doneSum)}</span>
+                        </button>
+                        {!hidden && (
+                          <div style={{borderTop:"1px solid #dcfce7"}}>
+                            <div aria-hidden="true" style={{display:"grid",gridTemplateColumns:cols,gap:6,padding:"5px 10px",fontSize:11,color:T.textMuted,fontWeight:600,background:"#ecfdf3"}}>
+                              <span>#</span><span>{narrow ? t("รับของ / จ่ายเงิน","Received / paid") : t("รับของ","Received")}</span><span style={{textAlign:"right"}}>{t("ยอด (บาท)","Amount")}</span>{!narrow && <span style={{textAlign:"right"}}>{t("จ่ายเงิน","Paid")}</span>}<span/>
+                            </div>
+                            {done.map(({r,ri}) => openRounds[r.id]
+                              ? <div key={r.id||ri} style={{padding:"6px 6px 0",minWidth:0}}>{fullCard(r, ri, ()=>setOpenRounds(o=>({...o,[r.id]:false})))}</div>
+                              : (
+                              <div key={r.id||ri} data-paid-round style={{display:"grid",gridTemplateColumns:cols,gap:6,alignItems:"center",padding:"6px 10px",borderTop:"1px solid #ecfdf3",fontSize:12.5}}>
+                                <span style={{color:T.textSecondary,fontWeight:600}}>{ri+1}</span>
+                                <span style={{...cell,color:T.textPrimary,overflow:"hidden",textOverflow:"ellipsis"}}>{fmtDate(r.actualDate)}{narrow && <span style={{display:"block",fontSize:11.5,color:"#047857",fontWeight:600}}>{t("จ่าย","Paid")} {paidOn(r)}</span>}</span>
+                                <span style={{...cell,textAlign:"right",fontWeight:650,color:T.textPrimary}}>{fmt(r.actualAmount)}
+                                  {it.rounds.length > 1 && roundShare(r) != null && <span style={{display:"block",fontSize:10.5,color:T.blue,fontWeight:600}}>{p1(roundShare(r))}</span>}</span>
+                                {!narrow && <span style={{...cell,textAlign:"right",color:"#047857",fontWeight:600}}>{paidOn(r)}</span>}
+                                {!locked ? (
+                                  <button type="button" data-round-edit onClick={()=>setOpenRounds(o=>({...o,[r.id]:true}))} title={t("แก้งวดนี้","Edit this round")} aria-label={t(`แก้งวดที่ ${ri+1}`,`Edit round ${ri+1}`)}
+                                    style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",padding:2,minWidth:28,minHeight:30,borderRadius:8,display:"inline-grid",placeItems:"center"}}><Ico name="edit" size={15} /></button>
+                                ) : <span/>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {rest.map(({r,ri}) => fullCard(r, ri))}
+                  </>);
+                })()}
 
                 {/* Progress + split */}
                 <div style={{height:8,borderRadius:6,background:T.cardBorder,overflow:"hidden",marginTop:6}}>
