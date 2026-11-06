@@ -1744,6 +1744,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
 // Groups every PO by its Account Code so the team can see, at a glance and per
 // cost line, which deliveries and payments are on track vs. overdue.
 function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssues, setOnlyIssues, onStatusChange, session, usdRate=0, tenderCosts={}, additions={}, extraItems=[], hiddenAccounts=[], readOnly=false, onOpenCode }) {
+  const trkPhone = useIsPhone();
   const trkBudget = buildCombinedBudget(tenderCosts, additions);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // กรองตามสถานะของเข้า/จ่าย
@@ -1959,6 +1960,8 @@ function ProcurementTrackingTab({ poEntries, onEdit, onView, onAddNew, onlyIssue
           );
         })()}
         <div style={{flex:1}}/>
+        {/* ปุ่มเพิ่ม PO เหมือนแท็บรายการ PO — มือถือใช้ปุ่ม "เพิ่ม PO" ในแถบล่างแทน */}
+        {onAddNew && !trkPhone && <button onClick={onAddNew} className="btn-primary" data-tracking-add>+ {t("เพิ่ม PO","Add PO")}</button>}
       </div>
 
       {filteredEntries.length===0 ? (
