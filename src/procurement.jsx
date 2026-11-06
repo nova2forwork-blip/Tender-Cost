@@ -792,7 +792,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
   const curProject    = readOnly ? { ...project, ...curOverride } : project;
   const updateProject = readOnly ? (fields) => setCurOverride(o => ({ ...o, ...fields })) : updateProjectProp;
   const usdRate = effRate(curProject);  // อัตราแลกเปลี่ยน บาท/USD (0 = ปิดแสดง $)
-  const [tab,    setTab]    = useState("list"); // "list" | "tracking"
+  const [tab,    setTab]    = useState("list"); // "list" | "inplan" | "tracking"
   const [tabHist, setTabHist] = useState([]);   // ประวัติแท็บ — ปุ่มกลับย้อนทีละหน้า
   const goTab   = (id) => { if (id !== tab) { setTabHist(h => [...h, tab]); setTab(id); } };
   const [trackingOnlyIssues, setTrackingOnlyIssues] = useState(false); // lifted so the alert banner below can jump straight into "only late items"
@@ -1166,6 +1166,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
       {isPhone && view!=="add" && <BottomNav items={[
         { key:"list",   icon:"clipboard", label:t("รายการ PO","PO List"), on:tab==="list", onClick:()=>goTab("list") },
         { key:"inplan", icon:"calendar",  label:t("แผนของเข้า","Incoming plan"), on:tab==="inplan", onClick:()=>goTab("inplan") },
+        { key:"tracking", icon:"truck",   label:t("ติดตาม","Tracking"), on:tab==="tracking", onClick:()=>goTab("tracking") },
         ...(readOnly ? [] : [{ key:"add", icon:"plus", label:t("เพิ่ม PO","Add PO"), onClick:openNewPO }]),
         { key:"export", icon:"download",  label:"Export", onClick:onExport },
       ]} />}
@@ -1174,7 +1175,7 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
           <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center",flexWrap:"wrap"}}>
             {!isPhone && (
             <div className="seg-tabs" role="tablist">
-            {[["list",t("รายการ PO","PO List")],["inplan",t("แผนของเข้า","Incoming plan")]].map(([id,label])=>(
+            {[["list",t("รายการ PO","PO List")],["inplan",t("แผนของเข้า","Incoming plan")],["tracking",t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")]].map(([id,label])=>(
               <button key={id} role="tab" aria-selected={tab===id} onClick={()=>goTab(id)} className={`seg-tab${tab===id?" on":""}`}>
                 {label}
               </button>
@@ -1486,17 +1487,15 @@ function ProcurementView({ project, updateProject: updateProjectProp, tenderCost
           })()}
           </div>
         ) : tab==="inplan" ? (
-          <>
-            <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={readOnly ? null : openNewPO} onEdit={readOnly ? null : openEditPlan} onConvert={readOnly ? null : startConvert} onDelete={readOnly ? null : deletePlan} onOpenCode={setCodeSummary} />
-            {/* ติดตามของเข้า/จ่ายเงิน — ย้ายมาไว้ใต้ "จัดการแผน" (เอาแท็บติดตามแยกออก) */}
-            <div style={{marginTop:28,paddingTop:20,borderTop:`2px solid ${T.cardBorder}`}}>
-              <div style={{fontSize:15,fontWeight:650,color:T.textPrimary,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><Ico name="truck" size={18} color={T.textSecondary} />{t("ติดตามของเข้า / จ่ายเงิน","Track incoming / payments")}</div>
+          <IncomingPlanTab plans={plans} poEntries={poEntries} usdRate={usdRate} tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts} onNew={readOnly ? null : openNewPO} onEdit={readOnly ? null : openEditPlan} onConvert={readOnly ? null : startConvert} onDelete={readOnly ? null : deletePlan} onOpenCode={setCodeSummary} />
+        ) : tab==="tracking" ? (
+          // ติดตามของเข้า/จ่ายเงิน — แยกเป็นแท็บของตัวเอง (เดิมต่อท้ายแท็บแผนของเข้า ต้องเลื่อนลงไกล)
+          <div data-tracking-tab>
               <ProcurementTrackingTab poEntries={poEntries} onEdit={readOnly ? null : openEdit} onView={openDetail} onAddNew={readOnly ? null : openNewPO} readOnly={readOnly}
                 onStatusChange={changeStatus} session={session} usdRate={usdRate}
                 tenderCosts={tenderCosts} additions={additions} extraItems={extraItems} hiddenAccounts={hiddenAccounts}
                 onlyIssues={trackingOnlyIssues} setOnlyIssues={setTrackingOnlyIssues} />
-            </div>
-          </>
+          </div>
         ) : (
           <>
             <div style={{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:14,padding:"14px 18px",marginBottom:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
